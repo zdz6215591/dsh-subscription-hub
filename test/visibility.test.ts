@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { accountKeyOf } from '../src/auth/store.js'
 import type { AgySession, CodeBuddySession, CommandCodeSession, ZedSession } from '../src/auth/store.js'
 import { filterVisible, setModelVisible, hiddenIds } from '../src/model-visibility.js'
-import { sessionFromZedPaste, parseZedModels, ndjsonToSse, parseZedUsage } from '../src/providers/zed.js'
+import { sessionFromZedPaste, parseZedModels, ndjsonToSse, parseZedUsage, buildZedProviderRequest } from '../src/providers/zed.js'
 import { parseMeterUsage } from '../src/providers/codebuddy-lib/usage.js'
 import { parseCommandCodeAuthFile, parseCommandCodeCredits, parseCommandCodeStream, sessionFromCommandCodePaste } from '../src/providers/commandcode.js'
 import { extractAgyProjectId } from '../src/providers/agy.js'
@@ -120,6 +120,40 @@ describe('zed paste and catalog', () => {
     assert.equal(models[0].provider, 'anthropic')
     assert.equal(models[0].supportsImages, true)
     assert.equal(models[1].name, 'GPT-5 nano')
+  })
+
+  it('reads alternate context-window fields', () => {
+    const models = parseZedModels({
+      models: [
+        { id: 'gpt-wide', provider: 'open_ai', max_tokens: 400_000, max_output_tokens: 32_000 },
+      ],
+    })
+    assert.equal(models[0].contextWindow, 400_000)
+    assert.equal(models[0].maxTokens, 32_000)
+  })
+
+  it('builds OpenAI Responses provider_request with top-level tool name', () => {
+    const { provider, body } = buildZedProviderRequest(
+      {
+        model: 'gpt-5.6-luna',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+        tools: [{ name: 'search', description: 's', parameters: { type: 'object' } }],
+      } as unknown as Parameters<typeof buildZedProviderRequest>[0],
+      {
+        id: 'gpt-5.6-luna',
+        name: 'GPT',
+        provider: 'open_ai',
+        supportsImages: false,
+        supportsThinking: true,
+        contextWindow: 272_000,
+        maxTokens: 16_384,
+      },
+      [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] as Parameters<typeof buildZedProviderRequest>[2],
+    )
+    assert.equal(provider, 'open_ai')
+    assert.equal(Array.isArray(body.input), true)
+    assert.equal((body.tools as { name?: string }[])[0]?.name, 'search')
+    assert.equal('function' in ((body.tools as object[])[0] as object), false)
   })
 
   it('maps /client/users/me plan + edit-prediction usage', () => {

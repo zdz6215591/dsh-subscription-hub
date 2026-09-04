@@ -1,6 +1,6 @@
 {
   "name": "dsh-subscription-hub",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Unified DeepSeek Harness subscription hub: Codex, Claude, SuperGrok, Copilot, Antigravity, Command Code, CodeBuddy, and Zed Pro — multi-account pool, usage, model visibility, image/video tools",
   "license": "MIT",
   "repository": {

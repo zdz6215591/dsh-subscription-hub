@@ -438,6 +438,9 @@ export async function proxySetConfig(input: ProxyInput): Promise<ProxyConfigView
  * is issued with — a mismatched dispatcher can be silently ignored by the
  * host's global fetch.
  */
+/** Bypass the configured proxy (used when a proxied Google call is rejected as an invalid API key). */
+export const directFetch = fetch
+
 export async function proxiedFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   await ensureReady()
   let dispatcher: ProxyAgent | undefined

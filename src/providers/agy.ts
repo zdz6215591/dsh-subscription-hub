@@ -14,7 +14,7 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { FlowSpec } from '../auth/oauth-flow.js'
 import { accountKeyOf, saveAccountSession, type AgySession } from '../auth/store.js'
 import type { ProviderId } from '../auth/store.js'
-import { proxiedFetch } from '../http.js'
+import { directFetch, proxiedFetch } from '../http.js'
 import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from './accounts.js'
 import {
   discoverOrRetryAuth,
@@ -41,6 +41,7 @@ import {
   fetchAgyFirstOk,
   getAgyBootstrapClientMetadata,
   getAgyBootstrapUserAgent,
+  getAgyGenerateUserAgent,
 } from './agy/constants.js'
 import { AGY_PUBLIC_MODELS, catalogModel } from './agy/catalog.js'
 import { fetchAvailableModels, listAgyModels, parseAgyQuotaUsage, resolveAgyModel } from './agy/models.js'
@@ -97,9 +98,23 @@ function agyBootstrapHeaders(accessToken: string): Record<string, string> {
 
 function agyGenerateHeaders(accessToken: string): Record<string, string> {
   return {
-    ...agyBootstrapHeaders(accessToken),
+    authorization: `Bearer ${accessToken}`,
+    'content-type': 'application/json',
     accept: 'text/event-stream',
+    'user-agent': getAgyGenerateUserAgent(),
+    'Client-Metadata': getAgyBootstrapClientMetadata(),
   }
+}
+
+function deriveAgySessionId(account: string | undefined): string | undefined {
+  if (account === undefined || account.trim().length === 0) return undefined
+  let hash = 0xcbf29ce484222325n
+  for (let i = 0; i < account.length; i++) {
+    hash ^= BigInt(account.charCodeAt(i))
+    hash = BigInt.asIntN(64, hash * 0x100000001b3n)
+  }
+  const folded = hash < 0n ? -hash : hash
+  return `-${(folded % 9_000_000_000_000_000_000n).toString()}`
 }
 
 export function extractAgyProjectId(data: unknown): string {
@@ -499,22 +514,28 @@ export class AgyAdapter extends LlmAdapter {
           })
         }
       }
+      const sessionId = deriveAgySessionId(session.account)
       const body = toAgyRequestBody(options, {
         projectId: session.projectId,
-        ...(session.account === undefined ? {} : { sessionId: session.account }),
+        ...sessionId === undefined ? {} : { sessionId },
         ...(images.size > 0 ? { images } : {}),
       })
+      const init = {
+        method: 'POST' as const,
+        headers: agyGenerateHeaders(session.accessToken),
+        body: JSON.stringify(body),
+        signal: watchdog.signal,
+      }
+      const fetchFn = this.options.fetchFn ?? proxiedFetch
       let response: Response
       try {
-        response = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {
-          method: 'POST',
-          headers: {
-            ...agyGenerateHeaders(session.accessToken),
-            ...attributionHeaders(),
-          },
-          body: JSON.stringify(body),
-          signal: watchdog.signal,
-        }, this.options.fetchFn ?? proxiedFetch)
+        response = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', init, fetchFn)
+        if (!response.ok) {
+          const peek = await response.clone().text()
+          if (/api key is invalid/i.test(peek) && fetchFn !== directFetch) {
+            response = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', init, directFetch)
+          }
+        }
       } catch (error) {
         throw mapFetchFailure('agy', error, watchdog, options.signal)
       }

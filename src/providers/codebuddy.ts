@@ -37,6 +37,7 @@ import { serializeRequest } from './codebuddy-lib/serialize.js'
 import { parseSse } from './codebuddy-lib/sse.js'
 import { translate } from './codebuddy-lib/translate.js'
 import { hasDisclosedCapacity } from './codebuddy-lib/types.js'
+import type { CodeBuddyModel } from './codebuddy-lib/types.js'
 import { fetchCodeBuddyMeter } from './codebuddy-lib/usage.js'
 import type { CodeBuddyIdentity } from './codebuddy-lib/codebuddy.js'
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
@@ -265,7 +266,7 @@ export interface CodeBuddyAdapterOptions {
 const CATALOG_TTL_MS = 5 * 60_000
 
 export class CodeBuddyAdapter extends LlmAdapter {
-  private readonly catalogs = new Map<string, { at: number; models: LlmModelInfo[] }>()
+  private readonly catalogs = new Map<string, { at: number; models: CodeBuddyModel[] }>()
 
   constructor(private readonly options: CodeBuddyAdapterOptions) {
     super()
@@ -288,14 +289,34 @@ export class CodeBuddyAdapter extends LlmAdapter {
     else this.catalogs.delete(account)
   }
 
+  private listedModel(model: CodeBuddyModel, provider: string): LlmModelInfo {
+    return {
+      provider,
+      id: model.id,
+      name: model.name,
+      inputModalities: model.supportsImages === true ? ['text', 'image'] as const : ['text'] as const,
+    }
+  }
+
   async resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    if ([...this.catalogs.values()].every(entry => entry.models.length === 0)) {
+      await this.listOwnModels(provider)
+    }
+    const entry = [...this.catalogs.values()].flatMap(item => item.models).find(candidate => candidate.id === model)
+    const configured = this.options.models.find(item => item.id === model)
+    const contextWindow = entry?.maxAllowedSize !== undefined && entry.maxAllowedSize > 0
+      ? entry.maxAllowedSize
+      : configured?.contextWindow ?? 128_000
+    const maxTokens = entry?.maxOutputTokens !== undefined && entry.maxOutputTokens > 0
+      ? entry.maxOutputTokens
+      : configured?.maxTokens ?? 8_192
     return {
       provider,
       id: model,
-      name: model,
-      inputModalities: ['text', 'image'],
-      context: { contextWindow: 128_000 },
-      defaultMaxTokens: 8192,
+      name: entry?.name ?? configured?.name ?? model,
+      inputModalities: entry?.supportsImages === true ? ['text', 'image'] : ['text', 'image'],
+      context: { contextWindow },
+      defaultMaxTokens: maxTokens,
     }
   }
 
@@ -325,22 +346,17 @@ export class CodeBuddyAdapter extends LlmAdapter {
       return this.options.models.map(model => ({ provider, id: model.id, name: model.name ?? model.id }))
     }
     const cached = this.catalogs.get(account)
-    if (cached !== undefined && Date.now() - cached.at < CATALOG_TTL_MS) return cached.models
+    if (cached !== undefined && Date.now() - cached.at < CATALOG_TTL_MS) {
+      return cached.models.map(model => this.listedModel(model, provider))
+    }
     try {
       const session = await this.options.tokens.session(account)
       const config = await getConfig(identityOf(session), signal)
-      const models = (config.models ?? [])
-        .filter(model => hasDisclosedCapacity(model))
-        .map(model => ({
-          provider,
-          id: model.id,
-          name: model.name,
-          inputModalities: model.supportsImages === true ? ['text', 'image'] as const : ['text'] as const,
-        }))
+      const models = (config.models ?? []).filter(model => hasDisclosedCapacity(model))
       if (models.length > 0) this.catalogs.set(account, { at: Date.now(), models })
-      return models
+      return models.map(model => this.listedModel(model, provider))
     } catch (error) {
-      if (cached !== undefined) return cached.models
+      if (cached !== undefined) return cached.models.map(model => this.listedModel(model, provider))
       this.options.onWarn?.(`codebuddy catalog failed (${error instanceof Error ? error.message : String(error)})`)
       return this.options.models.map(model => ({ provider, id: model.id, name: model.name ?? model.id }))
     }

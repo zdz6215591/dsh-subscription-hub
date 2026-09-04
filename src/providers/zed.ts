@@ -32,6 +32,7 @@ import { DEFAULT_RATE_LIMIT_WAIT, DEFAULT_RETRY, subscriptionRetryPolicy } from 
 import type { RateLimitWait } from './rate-limit.js'
 import { streamChatCompletions, toChatMessages, toChatTools } from '../translate/chat-completions.js'
 import { streamAnthropic, toAnthropicMessages, toAnthropicTools } from '../translate/anthropic.js'
+import { streamResponses, toResponsesInput, toResponsesTools } from '../translate/responses.js'
 import { resolveImages } from '../translate/resolved.js'
 
 export const ZED_PREEMPT_MS = 4 * 60_000
@@ -462,6 +463,18 @@ export async function fetchZedUsage(
   return parseZedUsage(me, billing)
 }
 
+function numberField(record: Record<string, unknown>, ...keys: string[]): number | undefined {
+  for (const key of keys) {
+    const value = record[key]
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value
+    if (typeof value === 'string' && value.trim() !== '') {
+      const parsed = Number(value)
+      if (Number.isFinite(parsed) && parsed > 0) return parsed
+    }
+  }
+  return undefined
+}
+
 export function parseZedModels(payload: unknown): ZedCatalogModel[] {
   const root = payload as { models?: unknown }
   const rows = Array.isArray(root.models) ? root.models : Array.isArray(payload) ? payload : []
@@ -477,11 +490,69 @@ export function parseZedModels(payload: unknown): ZedCatalogModel[] {
       provider: typeof record.provider === 'string' ? record.provider : 'open_ai',
       supportsImages: record.supports_images === true,
       supportsThinking: record.supports_thinking === true,
-      contextWindow: typeof record.max_token_count === 'number' ? record.max_token_count : 200_000,
-      maxTokens: typeof record.max_output_tokens === 'number' ? record.max_output_tokens : 16_384,
+      contextWindow: numberField(record, 'max_token_count', 'max_tokens', 'context_window', 'max_input_tokens')
+        ?? 200_000,
+      maxTokens: numberField(record, 'max_output_tokens', 'max_completion_tokens') ?? 16_384,
     })
   }
   return models
+}
+
+/** Build the native provider_request Zed wraps in POST /completions. */
+export function buildZedProviderRequest(
+  options: GenerateOptions,
+  meta: ZedCatalogModel | undefined,
+  images: Awaited<ReturnType<typeof resolveImages>>,
+): { provider: string; body: Record<string, unknown> } {
+  const zedProvider = meta?.provider ?? (options.model.startsWith('claude') ? 'anthropic'
+    : options.model.startsWith('gemini') ? 'google' : 'open_ai')
+  if (zedProvider === 'anthropic') {
+    return {
+      provider: zedProvider,
+      body: {
+        model: options.model,
+        messages: toAnthropicMessages(images),
+        ...options.system !== undefined && options.system.length > 0
+          ? { system: [{ type: 'text', text: options.system }] }
+          : {},
+        max_tokens: options.maxTokens ?? meta?.maxTokens ?? 8192,
+        stream: true,
+        ...options.temperature === undefined ? {} : { temperature: options.temperature },
+        ...options.tools !== undefined && options.tools.length > 0 ? { tools: toAnthropicTools(options.tools) } : {},
+      },
+    }
+  }
+  if (zedProvider === 'open_ai') {
+    const { instructions, input } = toResponsesInput(images, options.system)
+    return {
+      provider: zedProvider,
+      body: {
+        model: options.model,
+        input,
+        stream: true,
+        ...instructions === undefined ? {} : { instructions },
+        ...options.temperature === undefined ? {} : { temperature: options.temperature },
+        ...options.maxTokens === undefined && meta?.maxTokens === undefined
+          ? {}
+          : { max_output_tokens: options.maxTokens ?? meta?.maxTokens },
+        ...options.tools !== undefined && options.tools.length > 0 ? { tools: toResponsesTools(options.tools) } : {},
+        ...meta?.supportsThinking && options.reasoningEffort !== undefined
+          ? { reasoning: { effort: String(options.reasoningEffort), summary: 'auto' } }
+          : {},
+      },
+    }
+  }
+  return {
+    provider: zedProvider,
+    body: {
+      model: zedProvider === 'google' ? `models/${options.model}` : options.model,
+      messages: toChatMessages(images, options.system),
+      stream: true,
+      ...options.temperature === undefined ? {} : { temperature: options.temperature },
+      ...options.maxTokens === undefined ? {} : { max_tokens: options.maxTokens },
+      ...options.tools !== undefined && options.tools.length > 0 ? { tools: toChatTools(options.tools) } : {},
+    },
+  }
 }
 
 /**
@@ -569,6 +640,9 @@ export class ZedAdapter extends LlmAdapter {
   }
 
   async resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    if ([...this.catalogs.values()].flat().length === 0) {
+      await this.listOwnModels(provider)
+    }
     const cached = [...this.catalogs.values()].flat().find(entry => entry.id === model)
     const configured = this.options.models.find(entry => entry.id === model)
     return {
@@ -610,6 +684,7 @@ export class ZedAdapter extends LlmAdapter {
         id: model.id,
         name: model.name,
         inputModalities: model.supportsImages ? ['text', 'image'] as const : ['text'] as const,
+        context: { contextWindow: model.contextWindow },
       }))
     }
     try {
@@ -635,6 +710,7 @@ export class ZedAdapter extends LlmAdapter {
           id: model.id,
           name: model.name,
           inputModalities: model.supportsImages ? ['text', 'image'] as const : ['text'] as const,
+          context: { contextWindow: model.contextWindow },
         }))
       }
     } catch (error) {
@@ -659,31 +735,13 @@ export class ZedAdapter extends LlmAdapter {
         session = await this.options.tokens.session(account, true)
       }
       const images = await resolveImages(options.messages, this.options.resolveAttachments?.())
+      if ([...this.catalogs.values()].flat().length === 0) {
+        await this.listOwnModels('zed', account)
+      }
       const meta = account === undefined
         ? [...this.catalogs.values()].flat().find(entry => entry.id === options.model)
         : this.catalogs.get(account)?.find(entry => entry.id === options.model)
-      const zedProvider = meta?.provider ?? (options.model.startsWith('claude') ? 'anthropic'
-        : options.model.startsWith('gemini') ? 'google' : 'open_ai')
-      const providerRequest = zedProvider === 'anthropic'
-        ? {
-            model: options.model,
-            messages: toAnthropicMessages(images),
-            ...options.system !== undefined && options.system.length > 0
-              ? { system: [{ type: 'text', text: options.system }] }
-              : {},
-            max_tokens: options.maxTokens ?? meta?.maxTokens ?? 8192,
-            stream: true,
-            ...options.temperature === undefined ? {} : { temperature: options.temperature },
-            ...options.tools !== undefined && options.tools.length > 0 ? { tools: toAnthropicTools(options.tools) } : {},
-          }
-        : {
-            model: options.model,
-            messages: toChatMessages(images, options.system),
-            stream: true,
-            ...options.temperature === undefined ? {} : { temperature: options.temperature },
-            ...options.maxTokens === undefined ? {} : { max_tokens: options.maxTokens },
-            ...options.tools !== undefined && options.tools.length > 0 ? { tools: toChatTools(options.tools) } : {},
-          }
+      const { provider: zedProvider, body: providerRequest } = buildZedProviderRequest(options, meta, images)
       let response: Response
       try {
         response = await proxiedFetch(`${ZED_CLOUD}/completions`, {
@@ -713,6 +771,7 @@ export class ZedAdapter extends LlmAdapter {
       const sse = ndjsonToSse(response.body)
       const pulse = (): void => { watchdog.pulse() }
       if (zedProvider === 'anthropic') yield* streamAnthropic(sse, pulse)
+      else if (zedProvider === 'open_ai') yield* streamResponses(sse, pulse)
       else yield* streamChatCompletions(sse, pulse)
     } finally {
       watchdog.stop()

@@ -124,6 +124,11 @@ export function getAgyBootstrapUserAgent(version = AGY_VERSION_FALLBACK): string
   return `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Antigravity/${version} Chrome/138.0.7204.235 Electron/37.3.1 Safari/537.36`
 }
 
+/** Generate-call UA. Cloud Code treats the Electron bootstrap UA plus X-Goog-Api-Client as an API-key client. */
+export function getAgyGenerateUserAgent(version = AGY_VERSION_FALLBACK): string {
+  return `antigravity/${version} windows/amd64`
+}
+
 /** Client-Metadata payload for bootstrap calls — ideType only (backend enum
  * validation rejects freely-added platform/pluginType; AGENTS.md invariant). */
 export function getAgyBootstrapClientMetadata(): string {
