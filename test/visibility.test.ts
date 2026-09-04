@@ -174,6 +174,30 @@ describe('zed paste and catalog', () => {
     assert.equal(Math.round(usage.windows?.[1]?.usedPercent ?? -1), 17)
   })
 
+  it('maps /client/users/me zed_student bundled $5 credit when no spent_cents reported', () => {
+    const usage = parseZedUsage({
+      plan: {
+        plan_v3: 'zed_student',
+        subscription_period: { started_at: '2026-09-03T02:36:56Z', ended_at: '2026-10-03T00:00:00Z' },
+        usage: {
+          model_requests: { used: 0, limit: { limited: 0 } },
+          edit_predictions: { used: 0, limit: 'unlimited' },
+        },
+      },
+      default_organization_id: 'org_01m1jhg6vxysd7sbeyf7z8zmyv',
+      organizations: [{ id: 'org_01m1jhg6vxysd7sbeyf7z8zmyv', name: 'Student Org' }],
+      plans_by_organization: { org_01m1jhg6vxysd7sbeyf7z8zmyv: 'zed_student' },
+    })
+    assert.equal(usage.supported, true)
+    assert.equal(usage.plan, 'Zed Student')
+    assert.equal(usage.windows?.[0]?.scope, 'Edit Predictions')
+    assert.equal(usage.windows?.[1]?.scope, 'Hosted models')
+    assert.equal(usage.windows?.[1]?.used, 0)
+    assert.equal(usage.windows?.[1]?.limit, 5)
+    assert.equal(usage.windows?.[1]?.remaining, 5)
+    assert.equal(usage.windows?.[1]?.usedPercent, 0)
+  })
+
   it('unwraps NDJSON {event} lines into SSE data frames', async () => {
     const bytes = new TextEncoder().encode('{"event":{"choices":[{"delta":{"content":"hi"}}]}}\n{"status":"ok"}\n')
     const stream = ndjsonToSse(new ReadableStream({

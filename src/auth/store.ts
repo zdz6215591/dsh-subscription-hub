@@ -140,6 +140,7 @@ export interface ZedSession {
   expiresAt: number
   userId: string
   account?: string
+  organizationId?: string
   llmToken?: string
   llmExpiresAt?: number
 }

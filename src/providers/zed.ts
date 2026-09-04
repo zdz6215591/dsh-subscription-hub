@@ -264,7 +264,7 @@ export async function sessionFromZedPaste(input: string): Promise<ZedSession> {
   return sessionFromFields(userId, normalizeZedToken(token))
 }
 
-async function mintLlmToken(session: ZedSession, systemId: string): Promise<{ token: string; expiresAt: number }> {
+async function mintLlmToken(session: ZedSession, systemId: string, orgId?: string | null): Promise<{ token: string; expiresAt: number }> {
   const response = await proxiedFetch(`${ZED_CLOUD}/client/llm_tokens`, {
     method: 'POST',
     headers: {
@@ -273,7 +273,7 @@ async function mintLlmToken(session: ZedSession, systemId: string): Promise<{ to
       'x-zed-system-id': systemId,
       'x-zed-version': ZED_VERSION,
     },
-    body: JSON.stringify({ organization_id: null }),
+    body: JSON.stringify({ organization_id: orgId ?? session.organizationId ?? null }),
   })
   if (!response.ok) throw await httpLlmError(response, 'zed llm token')
   const body = await response.json() as { token?: string; expires_at?: string }
@@ -284,9 +284,40 @@ async function mintLlmToken(session: ZedSession, systemId: string): Promise<{ to
   }
 }
 
+async function resolveOrganizationId(session: ZedSession): Promise<string | undefined> {
+  if (session.organizationId !== undefined && session.organizationId.length > 0) {
+    return session.organizationId
+  }
+  try {
+    const response = await proxiedFetch(`${ZED_CLOUD}/client/users/me`, {
+      headers: {
+        authorization: authHeader(session),
+        accept: 'application/json',
+        'x-zed-version': ZED_VERSION,
+        ...attributionHeaders(),
+      },
+    })
+    if (response.ok) {
+      const me = await response.json() as {
+        default_organization_id?: string
+        organizations?: Array<{ id?: string }>
+      }
+      return me.default_organization_id ?? me.organizations?.[0]?.id
+    }
+  } catch { /* leave undefined */ }
+  return undefined
+}
+
 export async function refreshZed(session: ZedSession): Promise<ZedSession> {
-  const minted = await mintLlmToken(session, session.userId)
-  return { ...session, llmToken: minted.token, llmExpiresAt: minted.expiresAt, expiresAt: minted.expiresAt }
+  const organizationId = await resolveOrganizationId(session)
+  const minted = await mintLlmToken(session, session.userId, organizationId)
+  return {
+    ...session,
+    ...organizationId !== undefined ? { organizationId } : {},
+    llmToken: minted.token,
+    llmExpiresAt: minted.expiresAt,
+    expiresAt: minted.expiresAt,
+  }
 }
 
 export function isZedPermanentRefreshError(error: unknown): boolean {
@@ -382,42 +413,69 @@ function limitedCount(limitRaw: unknown): number | undefined {
   return numberish(limitRaw)
 }
 
+/** Default included LLM token allowance in USD for plans with bundled credit. */
+function planDefaultLimit(plan: unknown): number | undefined {
+  if (typeof plan !== 'string') return undefined
+  switch (plan.toLowerCase().trim()) {
+    case 'zed_student':
+    case 'zed_pro':
+    case 'zed_pro_trial':
+      return 5
+    case 'zed_vip':
+      return 10
+    default:
+      return undefined
+  }
+}
+
 /**
  * The dollar-spend bucket for a Zed cloud payload (the plan root, the nested
- * `usage` object, or an org billing response). Zed token plans mostly expose a
- * *model_requests* count (handled by {@link modelRequestsWindow}), but when
- * the account is on a spend/credit-bucket plan the cloud returns dollar figures
- * under several different key spellings. Match across all of them so the
- * "$x used / $y 额度" window shows whenever the payload exposes a dollar amount.
- * A bare used-without-limit row is surfaced as an uncapped "used $x" window so
- * the user still sees their consumption, not an absent-invisible bucket.
+ * `usage` object, or an org billing response). Zed Pro / Zed Student bundles
+ * $5 of included LLM tokens per monthly subscription period. When the account
+ * hasn't spent anything yet or when token spend is reported, this window
+ * surfaces the "已用 $x / 总额 $y" dollars display.
  */
-function spendWindow(record: Record<string, unknown>, resetsAt?: number): UsageWindow[] {
+function spendWindow(record: Record<string, unknown>, resetsAt?: number, planKey?: string): UsageWindow[] {
+  const tokenSpend = typeof record.token_spend === 'object' && record.token_spend !== null
+    ? record.token_spend as Record<string, unknown>
+    : undefined
   const spentCents = pickCents(record, [
     'spent_cents', 'used_cents', 'current_spend_cents', 'token_spend_cents',
     'spend_cents', 'total_spent_cents', 'total_spend_cents', 'cost_cents', 'balance_used_cents',
-  ])
-  const spentUsd = spentCents !== undefined ? centsToUsd(spentCents) : pickUsd(record, [
+  ]) ?? (tokenSpend ? pickCents(tokenSpend, ['spend_in_cents', 'spent_in_cents', 'spend_cents', 'spent_cents']) : undefined)
+
+  let spentUsd = spentCents !== undefined ? centsToUsd(spentCents) : pickUsd(record, [
     'spent', 'used', 'current_spend', 'token_spend', 'spend',
     'total_spent', 'total_spend', 'cost', 'balance_used',
   ])
+
   const includedCents = pickCents(record, [
     'included_cents', 'included_credit_cents', 'credit_cents', 'included_spend_cents', 'limit_cents',
   ])
-  const includedUsd = includedCents !== undefined ? centsToUsd(includedCents) : pickUsd(record, [
+  let includedUsd = includedCents !== undefined ? centsToUsd(includedCents) : pickUsd(record, [
     'included', 'included_credit', 'credit', 'included_spend', 'credit_limit',
   ])
+
   const spendingLimitCents = pickCents(record, [
     'spend_limit_cents', 'limit_cents', 'monthly_limit_cents', 'spend_cap_cents', 'credit_limit_cents',
-  ])
-  const spendingLimitUsd = spendingLimitCents !== undefined ? centsToUsd(spendingLimitCents) : pickUsd(record, [
+  ]) ?? (tokenSpend ? pickCents(tokenSpend, ['limit_in_cents']) : undefined)
+  let spendingLimitUsd = spendingLimitCents !== undefined ? centsToUsd(spendingLimitCents) : pickUsd(record, [
     'spend_limit', 'limit', 'monthly_limit', 'spend_cap', 'credit_limit',
   ])
+
+  if (includedUsd === undefined && spendingLimitUsd === undefined) {
+    const defaultLimit = planDefaultLimit(planKey)
+    if (defaultLimit !== undefined) {
+      includedUsd = defaultLimit
+    }
+  }
+
   const cap = (includedUsd ?? 0) + (spendingLimitUsd ?? 0)
-  if (spentUsd === undefined) return []
-  // When a limit exists, show used+limit+remaining like model_requests. When
-  // only the used dollar amount is disclosed (no cap), surface an uncapped
-  // used window so consumption is never blank.
+  if (spentUsd === undefined) {
+    if (cap > 0) spentUsd = 0
+    else return []
+  }
+
   const base: UsageWindow = {
     kind: 'weekly',
     scope: 'Hosted models',
@@ -490,21 +548,34 @@ export function parseZedUsage(me: unknown, billing?: unknown): ProviderUsage {
   if (typeof me !== 'object' || me === null) return { supported: false }
   const root = me as Record<string, unknown>
   const planInfo = (typeof root.plan === 'object' && root.plan !== null ? root.plan : root) as Record<string, unknown>
-  const plan = planDisplayName(planInfo.plan_v3 ?? planInfo.plan)
+  const defaultOrg = typeof root.default_organization_id === 'string' ? root.default_organization_id : undefined
+  const plansByOrg = typeof root.plans_by_organization === 'object' && root.plans_by_organization !== null
+    ? root.plans_by_organization as Record<string, unknown>
+    : undefined
+  const orgPlan = defaultOrg && plansByOrg ? plansByOrg[defaultOrg] : undefined
+  const rawPlan = planInfo.plan_v3 ?? planInfo.plan ?? orgPlan
+  const plan = planDisplayName(rawPlan)
   const period = typeof planInfo.subscription_period === 'object' && planInfo.subscription_period !== null
     ? planInfo.subscription_period as Record<string, unknown>
     : undefined
   const resetsAt = timestampMs(period?.ended_at ?? period?.ends_at)
   const usage = planInfo.usage ?? root.usage
+
+  const planKey = typeof rawPlan === 'string' ? rawPlan : undefined
+  const billingSpend = typeof billing === 'object' && billing !== null
+    ? spendWindow(billing as Record<string, unknown>, resetsAt, planKey)
+    : []
+  const usageSpend = typeof usage === 'object' && usage !== null
+    ? spendWindow(usage as Record<string, unknown>, resetsAt, planKey)
+    : []
+  const planSpend = spendWindow(planInfo, resetsAt, planKey)
+  const modelRequests = modelRequestsWindow(usage, resetsAt)
+
+  const hostedWindow = billingSpend[0] ?? usageSpend[0] ?? planSpend[0] ?? modelRequests[0]
+
   const windows: UsageWindow[] = [
     ...editPredictionWindow(usage, resetsAt),
-    ...modelRequestsWindow(usage, resetsAt),
-    // Dollar spend can live on the plan root, on the nested `usage` object, or
-    // on an org billing payload. Try all three so the "$x used / $y limit"
-    // bucket shows whenever the cloud exposes any of them.
-    ...spendWindow(planInfo, resetsAt),
-    ...typeof usage === 'object' && usage !== null ? spendWindow(usage as Record<string, unknown>, resetsAt) : [],
-    ...typeof billing === 'object' && billing !== null ? spendWindow(billing as Record<string, unknown>, resetsAt) : [],
+    ...hostedWindow !== undefined ? [hostedWindow] : [],
   ]
   if (windows.length === 0 && plan === undefined) return { supported: false }
   return {
