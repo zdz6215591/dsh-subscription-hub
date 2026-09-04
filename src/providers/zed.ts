@@ -382,28 +382,71 @@ function limitedCount(limitRaw: unknown): number | undefined {
   return numberish(limitRaw)
 }
 
+/**
+ * The dollar-spend bucket for a Zed cloud payload (the plan root, the nested
+ * `usage` object, or an org billing response). Zed token plans mostly expose a
+ * *model_requests* count (handled by {@link modelRequestsWindow}), but when
+ * the account is on a spend/credit-bucket plan the cloud returns dollar figures
+ * under several different key spellings. Match across all of them so the
+ * "$x used / $y 额度" window shows whenever the payload exposes a dollar amount.
+ * A bare used-without-limit row is surfaced as an uncapped "used $x" window so
+ * the user still sees their consumption, not an absent-invisible bucket.
+ */
 function spendWindow(record: Record<string, unknown>, resetsAt?: number): UsageWindow[] {
-  const spentCents = numberish(record.spent_cents ?? record.used_cents ?? record.current_spend_cents
-    ?? record.token_spend_cents ?? record.spend_cents)
-  const spentUsd = spentCents !== undefined ? centsToUsd(spentCents)
-    : numberish(record.spent ?? record.used ?? record.current_spend ?? record.token_spend ?? record.spend)
-  const includedCents = numberish(record.included_cents ?? record.included_credit_cents ?? record.credit_cents)
-  const limitCents = numberish(record.spend_limit_cents ?? record.limit_cents ?? record.monthly_limit_cents)
-  const includedUsd = includedCents !== undefined ? centsToUsd(includedCents)
-    : numberish(record.included ?? record.included_credit ?? record.credit)
-  const limitUsd = limitCents !== undefined ? centsToUsd(limitCents)
-    : numberish(record.spend_limit ?? record.limit ?? record.monthly_limit)
-  const cap = (includedUsd ?? 0) + (limitUsd ?? 0)
-  if (spentUsd === undefined || cap <= 0) return []
-  return [{
+  const spentCents = pickCents(record, [
+    'spent_cents', 'used_cents', 'current_spend_cents', 'token_spend_cents',
+    'spend_cents', 'total_spent_cents', 'total_spend_cents', 'cost_cents', 'balance_used_cents',
+  ])
+  const spentUsd = spentCents !== undefined ? centsToUsd(spentCents) : pickUsd(record, [
+    'spent', 'used', 'current_spend', 'token_spend', 'spend',
+    'total_spent', 'total_spend', 'cost', 'balance_used',
+  ])
+  const includedCents = pickCents(record, [
+    'included_cents', 'included_credit_cents', 'credit_cents', 'included_spend_cents', 'limit_cents',
+  ])
+  const includedUsd = includedCents !== undefined ? centsToUsd(includedCents) : pickUsd(record, [
+    'included', 'included_credit', 'credit', 'included_spend', 'credit_limit',
+  ])
+  const spendingLimitCents = pickCents(record, [
+    'spend_limit_cents', 'limit_cents', 'monthly_limit_cents', 'spend_cap_cents', 'credit_limit_cents',
+  ])
+  const spendingLimitUsd = spendingLimitCents !== undefined ? centsToUsd(spendingLimitCents) : pickUsd(record, [
+    'spend_limit', 'limit', 'monthly_limit', 'spend_cap', 'credit_limit',
+  ])
+  const cap = (includedUsd ?? 0) + (spendingLimitUsd ?? 0)
+  if (spentUsd === undefined) return []
+  // When a limit exists, show used+limit+remaining like model_requests. When
+  // only the used dollar amount is disclosed (no cap), surface an uncapped
+  // used window so consumption is never blank.
+  const base: UsageWindow = {
     kind: 'weekly',
     scope: 'Hosted models',
-    usedPercent: usagePercent(spentUsd, cap),
+    usedPercent: cap > 0 ? usagePercent(spentUsd, cap) : 0,
     used: spentUsd,
-    limit: cap,
-    remaining: Math.max(cap - spentUsd, 0),
     ...resetsAt === undefined ? {} : { resetsAt },
+  }
+  return [{
+    ...base,
+    ...cap > 0 ? { limit: cap, remaining: Math.max(cap - spentUsd, 0) } : {},
   }]
+}
+
+/** First number found across `*_cents` dollar keys, applied to /100. */
+function pickCents(record: Record<string, unknown>, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const value = numberish(record[key])
+    if (value !== undefined) return value
+  }
+  return undefined
+}
+
+/** First number found across plain (whole-dollar) keys. */
+function pickUsd(record: Record<string, unknown>, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const value = numberish(record[key])
+    if (value !== undefined) return value
+  }
+  return undefined
 }
 
 /**
@@ -456,7 +499,11 @@ export function parseZedUsage(me: unknown, billing?: unknown): ProviderUsage {
   const windows: UsageWindow[] = [
     ...editPredictionWindow(usage, resetsAt),
     ...modelRequestsWindow(usage, resetsAt),
+    // Dollar spend can live on the plan root, on the nested `usage` object, or
+    // on an org billing payload. Try all three so the "$x used / $y limit"
+    // bucket shows whenever the cloud exposes any of them.
     ...spendWindow(planInfo, resetsAt),
+    ...typeof usage === 'object' && usage !== null ? spendWindow(usage as Record<string, unknown>, resetsAt) : [],
     ...typeof billing === 'object' && billing !== null ? spendWindow(billing as Record<string, unknown>, resetsAt) : [],
   ]
   if (windows.length === 0 && plan === undefined) return { supported: false }

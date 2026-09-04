@@ -26,7 +26,10 @@ function generateAntigravityRequestId(): string {
 export type AgyPart =
   | { text: string }
   | { thought: true; text: string }
-  | { thoughtSignature: string; functionCall: { id: string; name: string; args: unknown } }
+  // thoughtSignature optional: a replayed functionCall may lack one when the
+  // process-local cache lost it (e.g. after a DSH restart). The upstream then
+  // rejects the call itself; the adapter must not abort the whole turn.
+  | { thoughtSignature?: string; functionCall: { id: string; name: string; args: unknown } }
   | { functionResponse: { name: string; response: unknown } }
   | { inlineData: { mimeType: string; data: string } }
 
@@ -190,22 +193,18 @@ function blockToParts(
           // truncated/malformed JSON -> empty object
         }
       }
-      // Antigravity rejects functionCall parts without a thoughtSignature
+      // Antigravity requires functionCall parts without a thoughtSignature
       // (400, "missing a thought_signature"). Replay the signature captured
-      // for this tool call id on the PREVIOUS turn (signature-cache.ts). A
-      // missing signature means the cache was not primed — never fabricate an
-      // empty one; surface it so the upstream error is explainable instead.
+      // for this tool call id on the PREVIOUS turn (signature-cache.ts). The
+      // cache is process-local and evaporates on a DSH restart, so a historical
+      // turn re-sent after a reload has no entry — degrade to an unsigned
+      // functionCall rather than failing the whole turn. The request still goes
+      // out (the caller surfaces any upstream error) instead of aborting here.
       const signature = getToolSignature(block.id)
-      if (signature === undefined) {
-        throw new Error(
-          `agy translate: functionCall ${block.id} (${block.name}) has no cached thought_signature; `
-          + 'the Antigravity adapter must capture and replay the signature it returned with this tool call',
-        )
-      }
-      return [{
-        thoughtSignature: signature,
-        functionCall: { id: block.id, name: block.name, args },
-      }]
+      const functionCall = { id: block.id, name: block.name, args }
+      return signature !== undefined && signature.length > 0
+        ? [{ thoughtSignature: signature, functionCall }]
+        : [{ functionCall }]
     }
     case 'tool-result': {
       const name = toolNames.get(block.toolCallId) ?? block.toolCallId

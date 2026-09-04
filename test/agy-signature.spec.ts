@@ -11,7 +11,10 @@
  *      id→signature into the cache; and
  *   2. the NEXT turn's request re-attaches that exact signature onto the
  *      assistant functionCall part — never an invented empty value; and
- *   3. a tool-call with no cached signature raises the explainable error.
+ *   3. a tool-call with no cached signature degrades to an unsigned
+ *      functionCall instead of throwing (process-local cache evapates on a
+ *      DSH restart, so a re-sent historical turn may legitimately lack a
+ *      signature — aborting the turn would strand the whole reply).
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -137,15 +140,21 @@ test('agy: next-turn request replays the real thoughtSignature', () => {
   assert.ok(sawFunctionCall, 'the functionCall part must survive translation')
 })
 
-test('agy: a tool-call with no cached signature raises an explainable error', () => {
+test('agy: a tool-call with no cached signature degrades to an unsigned functionCall', () => {
   clearToolSignaturesForTests()
   const history: Message[] = [
     message('user', [{ type: 'text', text: 'hi' }]),
     message('assistant', [{ type: 'tool-call', id: ToolCallId('fc-missing'), name: 'default_api:pwsh', arguments: '{"command":"dir"}' }]),
   ]
-  assert.throws(
-    () => toAgyRequestBody(baseOptions(history), {}),
-    /no cached thought_signature/,
-    'an unreplayable functionCall must fail loudly instead of sending an empty sentinel',
-  )
+  // After a DSH restart the process-local signature cache is empty, so a
+  // historical turn re-sent for replay has no entry. The adapter must NOT
+  // abort the whole turn — it degrades to an unsigned functionCall the
+  // upstream can still reject cleanly (surfacing its own error) rather than
+  // crashing with no request at all.
+  const req = toAgyRequestBody(baseOptions(history), {})
+  const model = req.request.contents.find((c) => c.role === 'model')
+  assert.ok(model, 'assistant turn must still translate')
+  const fc = model.parts.find((p) => 'functionCall' in p) as { thoughtSignature?: string; functionCall: unknown }
+  assert.ok(fc, 'the functionCall part must survive translation without a cached signature')
+  assert.equal(fc.thoughtSignature, undefined, 'no cached signature → the replay is unsigned, not fabricated/aborted')
 })
