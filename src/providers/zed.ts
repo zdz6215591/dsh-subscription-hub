@@ -346,14 +346,11 @@ function editPredictionWindow(usage: unknown, resetsAt?: number): UsageWindow[] 
   const row = predictions as { used?: unknown; limit?: unknown }
   const used = numberish(row.used)
   if (used === undefined) return []
-  const limitRaw = row.limit
-  if (limitRaw === 'unlimited' || (typeof limitRaw === 'object' && limitRaw !== null && 'Unlimited' in (limitRaw as object))) {
+  const limited = limitedCount(row.limit)
+  if (limited === undefined) {
     return [{ kind: 'other', scope: 'Edit Predictions', usedPercent: 0, ...resetsAt === undefined ? {} : { resetsAt } }]
   }
-  const limited = typeof limitRaw === 'object' && limitRaw !== null && 'Limited' in (limitRaw as object)
-    ? numberish((limitRaw as { Limited?: unknown }).Limited)
-    : numberish(limitRaw)
-  if (limited === undefined || limited <= 0) {
+  if (limited <= 0) {
     return [{ kind: 'other', scope: 'Edit Predictions', usedPercent: 0, ...resetsAt === undefined ? {} : { resetsAt } }]
   }
   return [{
@@ -362,6 +359,27 @@ function editPredictionWindow(usage: unknown, resetsAt?: number): UsageWindow[] 
     usedPercent: usagePercent(used, limited),
     ...resetsAt === undefined ? {} : { resetsAt },
   }]
+}
+
+/**
+ * The numeric quota behind a Zed `limit` value. Accepts a bare number, an
+ * `"unlimited"` marker (returns `undefined` → open-ended, no cap), or an
+ * object `{ limited: N }` / `{ Limited: N }` — the live `/client/users/me`
+ * uses the LOWERCASE `limited` key, while the earlier port guessed the
+ * uppercase `Limited`; supporting both keeps the quota from silently showing
+ * zero/absent.
+ */
+function limitedCount(limitRaw: unknown): number | undefined {
+  if (limitRaw === 'unlimited' || (typeof limitRaw === 'object' && limitRaw !== null && 'Unlimited' in (limitRaw as object))) {
+    return undefined
+  }
+  if (typeof limitRaw === 'object' && limitRaw !== null) {
+    const record = limitRaw as Record<string, unknown>
+    if ('limited' in record || 'Limited' in record) {
+      return numberish(record.limited ?? record.Limited)
+    }
+  }
+  return numberish(limitRaw)
 }
 
 function spendWindow(record: Record<string, unknown>, resetsAt?: number): UsageWindow[] {
@@ -402,8 +420,8 @@ function modelRequestsWindow(usage: unknown, resetsAt?: number): UsageWindow[] {
   const row = requests as { used?: unknown; limit?: unknown }
   const used = numberish(row.used)
   if (used === undefined) return []
-  const limitRaw = row.limit
-  if (limitRaw === 'unlimited' || (typeof limitRaw === 'object' && limitRaw !== null && 'Unlimited' in (limitRaw as object))) {
+  const limited = limitedCount(row.limit)
+  if (limited === undefined) {
     return [{
       kind: 'weekly',
       scope: 'Hosted models',
@@ -412,10 +430,7 @@ function modelRequestsWindow(usage: unknown, resetsAt?: number): UsageWindow[] {
       ...resetsAt === undefined ? {} : { resetsAt },
     }]
   }
-  const limited = typeof limitRaw === 'object' && limitRaw !== null && 'Limited' in (limitRaw as object)
-    ? numberish((limitRaw as { Limited?: unknown }).Limited)
-    : numberish(limitRaw)
-  if (limited === undefined || limited <= 0) return []
+  if (limited <= 0) return []
   return [{
     kind: 'weekly',
     scope: 'Hosted models',
