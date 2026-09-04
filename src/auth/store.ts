@@ -141,6 +141,7 @@ export interface ZedSession {
   userId: string
   account?: string
   organizationId?: string
+  cookie?: string
   llmToken?: string
   llmExpiresAt?: number
 }

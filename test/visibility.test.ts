@@ -168,13 +168,12 @@ describe('zed paste and catalog', () => {
     }, { spent_cents: 250, included_cents: 500, spend_limit_cents: 1000 })
     assert.equal(usage.supported, true)
     assert.equal(usage.plan, 'Zed Pro')
-    assert.equal(usage.windows?.[0]?.scope, 'Edit Predictions')
-    assert.equal(Math.round(usage.windows?.[0]?.usedPercent ?? -1), 6)
-    assert.equal(usage.windows?.[1]?.scope, 'Hosted models')
-    assert.equal(Math.round(usage.windows?.[1]?.usedPercent ?? -1), 17)
+    assert.equal(usage.windows?.length, 1)
+    assert.equal(usage.windows?.[0]?.scope, 'Hosted models')
+    assert.equal(Math.round(usage.windows?.[0]?.usedPercent ?? -1), 17)
   })
 
-  it('maps /client/users/me zed_student bundled $5 credit when no spent_cents reported', () => {
+  it('maps /client/users/me zed_student bundled $10 credit when no spent_cents reported', () => {
     const usage = parseZedUsage({
       plan: {
         plan_v3: 'zed_student',
@@ -190,12 +189,35 @@ describe('zed paste and catalog', () => {
     })
     assert.equal(usage.supported, true)
     assert.equal(usage.plan, 'Zed Student')
-    assert.equal(usage.windows?.[0]?.scope, 'Edit Predictions')
-    assert.equal(usage.windows?.[1]?.scope, 'Hosted models')
-    assert.equal(usage.windows?.[1]?.used, 0)
-    assert.equal(usage.windows?.[1]?.limit, 5)
-    assert.equal(usage.windows?.[1]?.remaining, 5)
-    assert.equal(usage.windows?.[1]?.usedPercent, 0)
+    assert.equal(usage.windows?.length, 1)
+    assert.equal(usage.windows?.[0]?.scope, 'Hosted models')
+    assert.equal(usage.windows?.[0]?.used, 0)
+    assert.equal(usage.windows?.[0]?.limit, 10)
+    assert.equal(usage.windows?.[0]?.remaining, 10)
+    assert.equal(usage.windows?.[0]?.usedPercent, 0)
+  })
+
+  it('maps dashboard /frontend/billing/usage token_spend ($0.21 used of $10)', () => {
+    const usage = parseZedUsage({
+      plan: { plan_v3: 'zed_student' },
+    }, {
+      plan: 'token_based_zed_student',
+      current_usage: {
+        token_spend_in_cents: 21,
+        token_spend: {
+          spend_in_cents: 21,
+          limit_in_cents: 1000,
+        },
+      },
+    })
+    assert.equal(usage.supported, true)
+    assert.equal(usage.plan, 'Zed Student')
+    assert.equal(usage.windows?.length, 1)
+    assert.equal(usage.windows?.[0]?.scope, 'Hosted models')
+    assert.equal(usage.windows?.[0]?.used, 0.21)
+    assert.equal(usage.windows?.[0]?.limit, 10)
+    assert.equal(usage.windows?.[0]?.remaining, 9.79)
+    assert.equal(Math.round(usage.windows?.[0]?.usedPercent ?? -1), 2)
   })
 
   it('unwraps NDJSON {event} lines into SSE data frames', async () => {

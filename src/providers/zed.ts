@@ -66,13 +66,14 @@ function normalizeZedToken(value: unknown): string {
   return token
 }
 
-function sessionFromFields(userId: string, token: string, account?: string): ZedSession {
+function sessionFromFields(userId: string, token: string, account?: string, cookie?: string): ZedSession {
   return {
     accessToken: token,
     refreshToken: token,
     expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000,
     userId,
     ...account === undefined ? {} : { account },
+    ...cookie === undefined ? {} : { cookie },
   }
 }
 
@@ -87,7 +88,9 @@ function sessionFromRecord(raw: Record<string, unknown>): ZedSession | undefined
   )
   if (userId.length === 0 || token.length === 0) return undefined
   const email = nested.email ?? raw.email
-  return sessionFromFields(userId, token, typeof email === 'string' ? email : undefined)
+  const cookie = typeof raw.cookie === 'string' && raw.cookie.trim().length > 0 ? raw.cookie.trim()
+    : typeof nested.cookie === 'string' && nested.cookie.trim().length > 0 ? nested.cookie.trim() : undefined
+  return sessionFromFields(userId, token, typeof email === 'string' ? email : undefined, cookie)
 }
 
 function zedCredentialPaths(): string[] {
@@ -220,16 +223,73 @@ async function importZedFromWindowsVault(): Promise<ZedSession | undefined> {
   return undefined
 }
 
+const CHROME_COOKIE_EXTRACT_SCRIPT = `
+$proc = Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | Where-Object { $_.CommandLine -match 'network.mojom.NetworkService' } | Select-Object -First 1
+if (-not $proc) { exit 0 }
+$dump = Join-Path $env:TEMP "dsh-chrome-$($proc.ProcessId).dmp"
+Add-Type @"
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Runtime.InteropServices;
+public class ChromeDump {
+    [DllImport("dbghelp.dll", SetLastError = true)]
+    public static extern bool MiniDumpWriteDump(IntPtr hProcess, uint pId, IntPtr hFile, int dumpType, IntPtr exp, IntPtr usr, IntPtr cb);
+    public static bool Dump(int pid, string path) {
+        using (var p = Process.GetProcessById(pid)) {
+            using (var fs = new FileStream(path, FileMode.Create)) {
+                return MiniDumpWriteDump(p.Handle, (uint)pid, fs.SafeFileHandle.DangerousGetHandle(), 2, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            }
+        }
+    }
+}
+"@
+try {
+    if ([ChromeDump]::Dump($proc.ProcessId, $dump) -and (Test-Path $dump)) {
+        $bytes = [System.IO.File]::ReadAllBytes($dump)
+        $str = [System.Text.Encoding]::ASCII.GetString($bytes)
+        $match = [regex]::Match($str, 'zed\\.session=([A-Za-z0-9+/=]+=\\{"sid":"[^"]+"\\})')
+        if ($match.Success) {
+            Write-Output ("zed.session=" + $match.Groups[1].Value)
+        }
+    }
+} finally {
+    Remove-Item $dump -Force -ErrorAction SilentlyContinue
+}
+`
+
+export async function importZedCookieFromChrome(): Promise<string | undefined> {
+  if (process.platform !== 'win32') return undefined
+  const scriptPath = join(tmpdir(), `dsh-zed-cookie-${process.pid}-${Date.now()}.ps1`)
+  try {
+    await writeFile(scriptPath, CHROME_COOKIE_EXTRACT_SCRIPT, 'utf8')
+    const { stdout } = await execFileAsync(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
+      { timeout: 15_000, windowsHide: true, encoding: 'utf8' },
+    )
+    const text = stdout.trim()
+    if (text.startsWith('zed.session=')) return text
+  } catch { /* chrome not running or unprivileged */ } finally {
+    await rm(scriptPath, { force: true }).catch(() => undefined)
+  }
+  return undefined
+}
+
 export async function importZedDesktop(): Promise<ZedSession> {
-  const fromFile = await importZedFromFiles()
-  if (fromFile !== undefined) return fromFile
-  const fromVault = await importZedFromWindowsVault()
-  if (fromVault !== undefined) return fromVault
-  throw new Error(
-    'Zed desktop is signed in, but this plugin could not read Windows Credential Manager '
-    + '(target zed:url=https://zed.dev). Use the two fields below: userId is the numeric id '
-    + 'shown as 用户 in that credential; token is its password. There is no credentials.json in the Zed app.',
-  )
+  let session = await importZedFromFiles() ?? await importZedFromWindowsVault()
+  if (session === undefined) {
+    throw new Error(
+      'Zed desktop is signed in, but this plugin could not read Windows Credential Manager '
+      + '(target zed:url=https://zed.dev). Use the two fields below: userId is the numeric id '
+      + 'shown as 用户 in that credential; token is its password. There is no credentials.json in the Zed app.',
+    )
+  }
+  const cookie = await importZedCookieFromChrome()
+  if (cookie !== undefined) {
+    session = { ...session, cookie }
+  }
+  return session
 }
 
 export async function sessionFromZedPaste(input: string): Promise<ZedSession> {
@@ -244,24 +304,26 @@ export async function sessionFromZedPaste(input: string): Promise<ZedSession> {
   }
   const pairs: Record<string, string> = {}
   for (const line of trimmed.split(/\r?\n/)) {
-    const match = line.match(/^\s*(userId|user_id|username|token|accessToken|access_token)\s*[:=]\s*(.+)\s*$/i)
+    const match = line.match(/^\s*(userId|user_id|username|token|accessToken|access_token|cookie|zed\.session)\s*[:=]\s*(.+)\s*$/i)
     if (match !== null) pairs[match[1].toLowerCase()] = match[2].trim()
   }
+  const cookieMatch = trimmed.match(/zed\.session=[A-Za-z0-9+/=]+=\{[^\}]+\}/)
+  const cookie = pairs.cookie ?? pairs['zed.session'] ?? cookieMatch?.[0]
   if (Object.keys(pairs).length > 0) {
     const userId = pairs.userid ?? pairs.user_id ?? pairs.username ?? ''
     const token = normalizeZedToken(pairs.token ?? pairs.accesstoken ?? pairs.access_token)
-    if (userId.length > 0 && token.length > 0) return sessionFromFields(userId, token)
+    if (userId.length > 0 && token.length > 0) return sessionFromFields(userId, token, undefined, cookie)
   }
   const lines = trimmed.split(/\r?\n/).map(line => line.trim()).filter(line => line.length > 0)
   if (lines.length >= 2) {
-    return sessionFromFields(lines[0], normalizeZedToken(lines.slice(1).join('\n')))
+    return sessionFromFields(lines[0], normalizeZedToken(lines.slice(1).join('\n')), undefined, cookie)
   }
   const [userId, ...rest] = trimmed.split(/\s+/)
   const token = rest.join(' ')
   if (!userId || !token) {
     throw new Error('Zed paste needs userId + token (two fields, two lines, or JSON).')
   }
-  return sessionFromFields(userId, normalizeZedToken(token))
+  return sessionFromFields(userId, normalizeZedToken(token), undefined, cookie)
 }
 
 async function mintLlmToken(session: ZedSession, systemId: string, orgId?: string | null): Promise<{ token: string; expiresAt: number }> {
@@ -326,12 +388,18 @@ export function isZedPermanentRefreshError(error: unknown): boolean {
 
 function planDisplayName(plan: unknown): string | undefined {
   if (typeof plan !== 'string' || plan.length === 0) return undefined
-  switch (plan) {
+  switch (plan.toLowerCase().trim()) {
+    case 'token_based_zed_free':
     case 'zed_free': return 'Zed Free'
+    case 'token_based_zed_pro':
     case 'zed_pro': return 'Zed Pro'
+    case 'token_based_zed_pro_trial':
     case 'zed_pro_trial': return 'Zed Pro Trial'
+    case 'token_based_zed_business':
     case 'zed_business': return 'Zed Business'
+    case 'token_based_zed_vip':
     case 'zed_vip': return 'Zed VIP'
+    case 'token_based_zed_student':
     case 'zed_student': return 'Zed Student'
     default: return plan.replaceAll('_', ' ')
   }
@@ -417,10 +485,13 @@ function limitedCount(limitRaw: unknown): number | undefined {
 function planDefaultLimit(plan: unknown): number | undefined {
   if (typeof plan !== 'string') return undefined
   switch (plan.toLowerCase().trim()) {
+    case 'token_based_zed_student':
     case 'zed_student':
+    case 'token_based_zed_pro':
     case 'zed_pro':
+    case 'token_based_zed_pro_trial':
     case 'zed_pro_trial':
-      return 5
+    case 'token_based_zed_vip':
     case 'zed_vip':
       return 10
     default:
@@ -431,18 +502,25 @@ function planDefaultLimit(plan: unknown): number | undefined {
 /**
  * The dollar-spend bucket for a Zed cloud payload (the plan root, the nested
  * `usage` object, or an org billing response). Zed Pro / Zed Student bundles
- * $5 of included LLM tokens per monthly subscription period. When the account
+ * $10 of included LLM tokens per monthly subscription period. When the account
  * hasn't spent anything yet or when token spend is reported, this window
  * surfaces the "已用 $x / 总额 $y" dollars display.
  */
 function spendWindow(record: Record<string, unknown>, resetsAt?: number, planKey?: string): UsageWindow[] {
-  const tokenSpend = typeof record.token_spend === 'object' && record.token_spend !== null
-    ? record.token_spend as Record<string, unknown>
+  const currentUsage = typeof record.current_usage === 'object' && record.current_usage !== null
+    ? record.current_usage as Record<string, unknown>
     : undefined
+  const tokenSpend = (typeof record.token_spend === 'object' && record.token_spend !== null
+    ? record.token_spend as Record<string, unknown>
+    : undefined) ?? (currentUsage && typeof currentUsage.token_spend === 'object' && currentUsage.token_spend !== null
+    ? currentUsage.token_spend as Record<string, unknown>
+    : undefined)
+
   const spentCents = pickCents(record, [
     'spent_cents', 'used_cents', 'current_spend_cents', 'token_spend_cents',
     'spend_cents', 'total_spent_cents', 'total_spend_cents', 'cost_cents', 'balance_used_cents',
-  ]) ?? (tokenSpend ? pickCents(tokenSpend, ['spend_in_cents', 'spent_in_cents', 'spend_cents', 'spent_cents']) : undefined)
+  ]) ?? (currentUsage ? pickCents(currentUsage, ['token_spend_in_cents', 'spent_cents', 'used_cents', 'cost_cents']) : undefined)
+     ?? (tokenSpend ? pickCents(tokenSpend, ['spend_in_cents', 'spent_in_cents', 'spend_cents', 'spent_cents', 'cost_in_cents']) : undefined)
 
   let spentUsd = spentCents !== undefined ? centsToUsd(spentCents) : pickUsd(record, [
     'spent', 'used', 'current_spend', 'token_spend', 'spend',
@@ -458,7 +536,7 @@ function spendWindow(record: Record<string, unknown>, resetsAt?: number, planKey
 
   const spendingLimitCents = pickCents(record, [
     'spend_limit_cents', 'limit_cents', 'monthly_limit_cents', 'spend_cap_cents', 'credit_limit_cents',
-  ]) ?? (tokenSpend ? pickCents(tokenSpend, ['limit_in_cents']) : undefined)
+  ]) ?? (tokenSpend ? pickCents(tokenSpend, ['limit_in_cents', 'spend_limit_cents']) : undefined)
   let spendingLimitUsd = spendingLimitCents !== undefined ? centsToUsd(spendingLimitCents) : pickUsd(record, [
     'spend_limit', 'limit', 'monthly_limit', 'spend_cap', 'credit_limit',
   ])
@@ -553,7 +631,8 @@ export function parseZedUsage(me: unknown, billing?: unknown): ProviderUsage {
     ? root.plans_by_organization as Record<string, unknown>
     : undefined
   const orgPlan = defaultOrg && plansByOrg ? plansByOrg[defaultOrg] : undefined
-  const rawPlan = planInfo.plan_v3 ?? planInfo.plan ?? orgPlan
+  const billingObj = typeof billing === 'object' && billing !== null ? billing as Record<string, unknown> : undefined
+  const rawPlan = billingObj?.plan ?? planInfo.plan_v3 ?? planInfo.plan ?? orgPlan
   const plan = planDisplayName(rawPlan)
   const period = typeof planInfo.subscription_period === 'object' && planInfo.subscription_period !== null
     ? planInfo.subscription_period as Record<string, unknown>
@@ -562,8 +641,8 @@ export function parseZedUsage(me: unknown, billing?: unknown): ProviderUsage {
   const usage = planInfo.usage ?? root.usage
 
   const planKey = typeof rawPlan === 'string' ? rawPlan : undefined
-  const billingSpend = typeof billing === 'object' && billing !== null
-    ? spendWindow(billing as Record<string, unknown>, resetsAt, planKey)
+  const billingSpend = billingObj !== undefined
+    ? spendWindow(billingObj, resetsAt, planKey)
     : []
   const usageSpend = typeof usage === 'object' && usage !== null
     ? spendWindow(usage as Record<string, unknown>, resetsAt, planKey)
@@ -573,10 +652,13 @@ export function parseZedUsage(me: unknown, billing?: unknown): ProviderUsage {
 
   const hostedWindow = billingSpend[0] ?? usageSpend[0] ?? planSpend[0] ?? modelRequests[0]
 
-  const windows: UsageWindow[] = [
-    ...editPredictionWindow(usage, resetsAt),
-    ...hostedWindow !== undefined ? [hostedWindow] : [],
-  ]
+  // Surface ONLY the hosted models dollar window when present. This keeps the
+  // card clean (single progress bar) and avoids triggering the UI accordion
+  // fold that collapses the card whenever windows.length > 1.
+  const windows: UsageWindow[] = hostedWindow !== undefined
+    ? [hostedWindow]
+    : editPredictionWindow(usage, resetsAt)
+
   if (windows.length === 0 && plan === undefined) return { supported: false }
   return {
     supported: true,
@@ -604,7 +686,8 @@ function orgIdsFromMe(me: unknown): string[] {
 /**
  * Zed hosted-model usage from the same cloud API the dashboard reads.
  * Primary: `GET /client/users/me` (plan + edit-prediction quota + billing period).
- * Then try org billing routes for dollar spend (`/org_…/billing/usage` on the dashboard).
+ * Then try dashboard frontend billing route with the browser session cookie,
+ * followed by org billing routes for dollar spend (`/org_…/billing/usage`).
  */
 export async function fetchZedUsage(
   session: ZedSession,
@@ -621,22 +704,55 @@ export async function fetchZedUsage(
   const meResponse = await fetchFn(`${ZED_CLOUD}/client/users/me`, opts)
   if (!meResponse.ok) throw await httpLlmError(meResponse, 'zed usage')
   const me: unknown = await meResponse.json()
+
   let billing: unknown
-  for (const orgId of orgIdsFromMe(me)) {
+  let cookie = session.cookie
+  if (cookie === undefined) {
+    cookie = await importZedCookieFromChrome()
+    if (cookie !== undefined) session.cookie = cookie
+  }
+
+  if (typeof cookie === 'string' && cookie.length > 0) {
     for (const path of [
-      `/client/organizations/${orgId}/billing/usage`,
-      `/client/organizations/${orgId}/usage`,
-      `/client/organizations/${orgId}/billing`,
+      '/frontend/billing/usage',
+      ...orgIdsFromMe(me).map(orgId => `/frontend/organizations/${orgId}/billing/usage`),
     ]) {
       try {
-        const response = await fetchFn(`${ZED_CLOUD}${path}`, opts)
-        if (!response.ok) continue
-        billing = await response.json()
-        break
-      } catch { /* try the next path */ }
+        const response = await fetchFn(`${ZED_CLOUD}${path}`, {
+          headers: {
+            cookie,
+            accept: 'application/json',
+            'content-type': 'application/json',
+            ...attributionHeaders(),
+          },
+          ...signal === undefined ? {} : { signal },
+        })
+        if (response.ok) {
+          billing = await response.json()
+          break
+        }
+      } catch { /* try next path */ }
     }
-    if (billing !== undefined) break
   }
+
+  if (billing === undefined) {
+    for (const orgId of orgIdsFromMe(me)) {
+      for (const path of [
+        `/client/organizations/${orgId}/billing/usage`,
+        `/client/organizations/${orgId}/usage`,
+        `/client/organizations/${orgId}/billing`,
+      ]) {
+        try {
+          const response = await fetchFn(`${ZED_CLOUD}${path}`, opts)
+          if (!response.ok) continue
+          billing = await response.json()
+          break
+        } catch { /* try the next path */ }
+      }
+      if (billing !== undefined) break
+    }
+  }
+
   return parseZedUsage(me, billing)
 }
 
