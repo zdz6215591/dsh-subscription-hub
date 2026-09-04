@@ -75,6 +75,7 @@ import { buildAccountPools, poolKey } from './providers/pool-family.js'
 import type { PoolDefinition, PoolMemberRef } from './providers/pool-family.js'
 import { PoolHealthRegistry } from './providers/pool-health.js'
 import { PoolUsageTracker } from './providers/pool-usage.js'
+import { createPoolModeController } from './providers/pool-mode.js'
 import {
   CodexAdapter,
   codexFlow,
@@ -1064,6 +1065,13 @@ export function apply(ctx: Context, config: Config): void {
   // provider with fewer than two accounts simply has nothing to pool.
   const poolConfig = config.pool
   const autoAccounts = poolConfig?.autoAccounts ?? poolConfig?.autoFamilies ?? true
+  // Global multi-account call mode (依次 / 均衡), settable from Settings →
+  // Subscriptions. The file value wins over the YAML `pool.strategy`, if any.
+  const poolMode = createPoolModeController(poolConfig?.strategy, (mode) => poolAdapter?.setStrategy(mode))
+  // The adapter starts on the YAML value (or 均衡); bootstrap() re-tunes it to
+  // any saved file value once the async load lands.
+  const poolStrategy = poolConfig?.strategy ?? 'quota_aware'
+  poolMode.bootstrap()
   if (poolConfig?.enabled !== false && adapters.size >= 1) {
     // Every poll gets a hard timeout: a cold usage cache AWAITS the first
     // fetch during member selection, and a hanging usage endpoint must
@@ -1153,7 +1161,7 @@ export function apply(ctx: Context, config: Config): void {
       adapters: Object.fromEntries(adapters),
       health: poolHealth,
       usage: poolUsage,
-      strategy: poolConfig?.strategy ?? 'quota_aware',
+      strategy: poolStrategy,
       switchMargin: poolConfig?.switchMargin ?? 2,
       defaultAccount: provider => accountTokens.get(provider)?.defaultAccount() ?? Promise.resolve(undefined),
       families,
@@ -1275,7 +1283,7 @@ export function apply(ctx: Context, config: Config): void {
       await setModelVisible(provider, model, visible)
       handles.get(provider)?.replace([provider])
     },
-  })
+  }, poolMode)
 
   const codebuddyTokens = accountTokens.get('codebuddy') as AccountTokenManager<CodeBuddySession> | undefined
   if (codebuddyTokens !== undefined) {

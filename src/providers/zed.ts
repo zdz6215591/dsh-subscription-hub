@@ -381,6 +381,48 @@ function spendWindow(record: Record<string, unknown>, resetsAt?: number): UsageW
     kind: 'weekly',
     scope: 'Hosted models',
     usedPercent: usagePercent(spentUsd, cap),
+    used: spentUsd,
+    limit: cap,
+    remaining: Math.max(cap - spentUsd, 0),
+    ...resetsAt === undefined ? {} : { resetsAt },
+  }]
+}
+
+/**
+ * The token-based Zed Pro hosted-models quota: `usage.model_requests` carries
+ * `{ used, limit }` (a `{ limited: N }` / `"unlimited"` shape like
+ * `edit_predictions`). This is the "已用 / 总额度" the dashboard shows for
+ * `/client/users/me`, so surface it as a used/limit window instead of
+ * waiting for a dollar-spend bucket that token plans never return.
+ */
+function modelRequestsWindow(usage: unknown, resetsAt?: number): UsageWindow[] {
+  if (typeof usage !== 'object' || usage === null) return []
+  const requests = (usage as { model_requests?: unknown }).model_requests
+  if (typeof requests !== 'object' || requests === null) return []
+  const row = requests as { used?: unknown; limit?: unknown }
+  const used = numberish(row.used)
+  if (used === undefined) return []
+  const limitRaw = row.limit
+  if (limitRaw === 'unlimited' || (typeof limitRaw === 'object' && limitRaw !== null && 'Unlimited' in (limitRaw as object))) {
+    return [{
+      kind: 'weekly',
+      scope: 'Hosted models',
+      usedPercent: 0,
+      used,
+      ...resetsAt === undefined ? {} : { resetsAt },
+    }]
+  }
+  const limited = typeof limitRaw === 'object' && limitRaw !== null && 'Limited' in (limitRaw as object)
+    ? numberish((limitRaw as { Limited?: unknown }).Limited)
+    : numberish(limitRaw)
+  if (limited === undefined || limited <= 0) return []
+  return [{
+    kind: 'weekly',
+    scope: 'Hosted models',
+    usedPercent: usagePercent(used, limited),
+    used,
+    limit: limited,
+    remaining: Math.max(limited - used, 0),
     ...resetsAt === undefined ? {} : { resetsAt },
   }]
 }
@@ -395,8 +437,10 @@ export function parseZedUsage(me: unknown, billing?: unknown): ProviderUsage {
     ? planInfo.subscription_period as Record<string, unknown>
     : undefined
   const resetsAt = timestampMs(period?.ended_at ?? period?.ends_at)
+  const usage = planInfo.usage ?? root.usage
   const windows: UsageWindow[] = [
-    ...editPredictionWindow(planInfo.usage ?? root.usage, resetsAt),
+    ...editPredictionWindow(usage, resetsAt),
+    ...modelRequestsWindow(usage, resetsAt),
     ...spendWindow(planInfo, resetsAt),
     ...typeof billing === 'object' && billing !== null ? spendWindow(billing as Record<string, unknown>, resetsAt) : [],
   ]

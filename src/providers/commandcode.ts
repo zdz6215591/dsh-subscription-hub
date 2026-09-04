@@ -34,6 +34,11 @@ export const COMMANDCODE_API_BASE = 'https://api.commandcode.ai'
 const STUDIO_BASE = 'https://commandcode.ai'
 const LOGIN_ORIGINS = new Set(['https://commandcode.ai', 'https://staging.commandcode.ai', 'http://localhost:3000'])
 
+/** Output-token floor for code models when the catalog omits a max (matched to dsh-commandcode-provider). */
+const DEFAULT_MAX_OUTPUT_TOKENS = 65_536
+/** Hard ceiling for `max_tokens` sent to `/alpha/generate`, matching the reference adapter. */
+const DEFAULT_GENERATE_MAX_TOKENS = 64_000
+
 export async function refreshCommandCode(session: CommandCodeSession): Promise<CommandCodeSession> {
   return session
 }
@@ -499,6 +504,44 @@ export async function* parseCommandCodeStream(
   }
 }
 
+/**
+ * Parse one row of `/provider/v1/models` into a sized catalog model. The
+ * endpoint reports `context_length` (and possibly `max_tokens`); the output
+ * cap defaults to the context-relative ceiling like the reference adapter
+ * (`min(context_length, DEFAULT_MAX_OUTPUT_TOKENS)`).
+ */
+function parseCatalogModel(row: Record<string, unknown>): CommandCodeCatalogModel | undefined {
+  const id = typeof row.id === 'string' ? row.id : undefined
+  if (id === undefined || id.length === 0) return undefined
+  const name = typeof row.name === 'string' && row.name.length > 0 ? row.name : id
+  const contextLength = coercePositiveNumber(row.context_length ?? row.contextWindow ?? row.context)
+  if (contextLength === undefined) return undefined
+  const rawMax = coercePositiveNumber(row.max_tokens) ?? coercePositiveNumber(row.max_output_tokens)
+  return {
+    id,
+    name,
+    contextWindow: contextLength,
+    maxTokens: rawMax !== undefined ? rawMax : Math.min(contextLength, DEFAULT_MAX_OUTPUT_TOKENS),
+  }
+}
+
+/** Extract a positive finite number from a number or numeric string field. */
+function coercePositiveNumber(value: unknown): number | undefined {
+  const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN
+  if (!Number.isFinite(n) || n <= 0) return undefined
+  return n
+}
+
+/** Project a sized catalog model into the harness model-info shape. */
+function toModelInfo(catalog: CommandCodeCatalogModel, provider: string): LlmModelInfo {
+  return {
+    provider,
+    id: catalog.id,
+    name: catalog.name,
+    inputModalities: ['text'],
+  }
+}
+
 export interface CommandCodeAdapterOptions {
   models: readonly ModelEntry[]
   streamIdleTimeoutMs: number
@@ -513,8 +556,27 @@ export interface CommandCodeAdapterOptions {
 
 const COMMANDCODE_CATALOG_TTL_MS = 5 * 60_000
 
+/** A catalog model sized from the live `/provider/v1/models` response. */
+interface CommandCodeCatalogModel {
+  id: string
+  name: string
+  contextWindow: number
+  maxTokens: number
+}
+
 export class CommandCodeAdapter extends LlmAdapter {
-  private readonly catalogs = new Map<string, { at: number; models: LlmModelInfo[] }>()
+  /** Per-account live catalog, retaining each model's context window and output cap. */
+  private readonly catalogs = new Map<string, { at: number; models: CommandCodeCatalogModel[] }>()
+
+  /** The live catalog entry for a model from any account, preferring the most recent snapshot. */
+  private catalogModel(model: string): CommandCodeCatalogModel | undefined {
+    let best: { at: number; entry: CommandCodeCatalogModel } | undefined
+    for (const { at, models } of this.catalogs.values()) {
+      const entry = models.find(candidate => candidate.id === model)
+      if (entry !== undefined && (best === undefined || at > best.at)) best = { at, entry }
+    }
+    return best?.entry
+  }
 
   constructor(private readonly options: CommandCodeAdapterOptions) {
     super()
@@ -535,13 +597,34 @@ export class CommandCodeAdapter extends LlmAdapter {
 
   async resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     const configured = this.options.models.find(entry => entry.id === model)
+    let live = this.catalogModel(model)
+    if (live === undefined) {
+      // Prime the live catalog on the resolve path so a caller that resolves a
+      // model before discovery runs still gets the real context/output caps
+      // instead of the static fallbacks. Failures are non-fatal here.
+      try {
+        const accounts = (await this.options.tokens.list()).map(entry => entry.key)
+        if (accounts.length > 0) await this.listOwnModels(provider, accounts[0])
+        live = this.catalogModel(model)
+      } catch { /* best-effort warm */ }
+    }
+    if (live !== undefined) {
+      return {
+        provider,
+        id: model,
+        name: live.name ?? configured?.name ?? model,
+        inputModalities: configured?.inputModalities ?? ['text'],
+        context: { contextWindow: live.contextWindow },
+        defaultMaxTokens: Math.min(live.maxTokens, DEFAULT_GENERATE_MAX_TOKENS),
+      }
+    }
     return {
       provider,
       id: model,
       name: configured?.name ?? model,
       inputModalities: configured?.inputModalities ?? ['text'],
       context: { contextWindow: configured?.contextWindow ?? 128_000 },
-      defaultMaxTokens: configured?.maxTokens ?? 8192,
+      defaultMaxTokens: Math.min(configured?.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_GENERATE_MAX_TOKENS),
     }
   }
 
@@ -568,7 +651,9 @@ export class CommandCodeAdapter extends LlmAdapter {
     }
     if (!await this.options.tokens.hasSession(account)) return []
     const cached = this.catalogs.get(account)
-    if (cached !== undefined && Date.now() - cached.at < COMMANDCODE_CATALOG_TTL_MS) return cached.models
+    if (cached !== undefined && Date.now() - cached.at < COMMANDCODE_CATALOG_TTL_MS) {
+      return cached.models.map(model => toModelInfo(model, provider))
+    }
     try {
       const session = await this.options.tokens.session(account)
       const response = await proxiedFetch(`${COMMANDCODE_API_BASE}/provider/v1/models`, {
@@ -576,16 +661,21 @@ export class CommandCodeAdapter extends LlmAdapter {
         ...signal === undefined ? {} : { signal },
       })
       if (!response.ok) throw await httpLlmError(response, 'commandcode models')
-      const payload = await response.json() as { data?: Array<{ id?: string; name?: string }> }
-      const models = (payload.data ?? [])
-        .filter(row => typeof row.id === 'string' && row.id.length > 0)
-        .map(row => ({ provider, id: row.id as string, name: row.name ?? row.id as string }))
-      if (models.length > 0) {
-        this.catalogs.set(account, { at: Date.now(), models })
-        return models
+      const payload = await response.json() as unknown
+      const rows = Array.isArray(payload) ? payload
+        : isRecord(payload) && Array.isArray(payload.data) ? payload.data
+        : isRecord(payload) && Array.isArray(payload.models) ? payload.models
+        : []
+      const rawModels = rows
+        .filter(isRecord)
+        .map(row => parseCatalogModel(row as Record<string, unknown>))
+        .filter((entry): entry is CommandCodeCatalogModel => entry !== undefined)
+      if (rawModels.length > 0) {
+        this.catalogs.set(account, { at: Date.now(), models: rawModels })
+        return rawModels.map(model => toModelInfo(model, provider))
       }
     } catch (error) {
-      if (cached !== undefined) return cached.models
+      if (cached !== undefined) return cached.models.map(model => toModelInfo(model, provider))
       this.options.onWarn?.(`commandcode catalog failed (${error instanceof Error ? error.message : String(error)})`)
     }
     return this.options.models.map(model => ({ provider, id: model.id, name: model.name ?? model.id }))
@@ -612,6 +702,14 @@ export class CommandCodeAdapter extends LlmAdapter {
           role: m.role,
           content: m.content.filter(b => b.type === 'text').map(b => b.type === 'text' ? b.text : '').join(''),
         }))
+      const live = this.catalogModel(options.model)
+      const configured = this.options.models.find(entry => entry.id === options.model)
+      const modelMax = live?.maxTokens ?? configured?.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
+      const maxTokens = Math.min(
+        options.maxTokens ?? modelMax,
+        modelMax,
+        DEFAULT_GENERATE_MAX_TOKENS,
+      )
       const body = {
         config: { workingDir: process.cwd(), date: new Date().toISOString().slice(0, 10), environment: `${process.platform}`, structure: [], isGitRepo: false, currentBranch: '', mainBranch: '', gitStatus: '', recentCommits: [] },
         memory: null,
@@ -622,7 +720,7 @@ export class CommandCodeAdapter extends LlmAdapter {
           messages,
           tools: (options.tools ?? []).map(tool => ({ type: 'function', name: tool.name, description: tool.description, input_schema: tool.parameters })),
           system: systemText,
-          max_tokens: options.maxTokens ?? 8192,
+          max_tokens: maxTokens,
           temperature: options.temperature ?? 0.3,
           stream: true,
           ...options.reasoningEffort !== undefined && options.reasoningEffort !== 'off'

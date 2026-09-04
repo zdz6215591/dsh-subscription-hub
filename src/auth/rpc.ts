@@ -13,6 +13,7 @@ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { PROVIDER_IDS, type ProviderId } from './store.js'
 import type { ProviderUsage } from '../providers/common.js'
 import type { ProxyConfigView, ProxyDraft, ProxyInput, ProxyTestResult } from '../http.js'
+import type { PoolModeController, PoolModeInput } from '../providers/pool-mode.js'
 
 /** The RPC channel this plugin registers on the host connection. */
 export const SUBSCRIPTIONS_AUTH_CHANNEL = '/subscriptions-auth'
@@ -422,12 +423,25 @@ function readProxyTestPayload(payload: unknown): { url?: string; proxy?: ProxyDr
   }
 }
 
+/** Validate one `poolSet` payload into a global multi-account call mode. */
+function readPoolModeInput(payload: unknown): PoolModeInput {
+  if (typeof payload !== 'object' || payload === null) {
+    throw new BadRequest('payload must be an object')
+  }
+  const mode = (payload as Record<string, unknown>).mode
+  if (mode !== 'priority' && mode !== 'quota_aware') {
+    throw new BadRequest('payload.mode must be "priority" or "quota_aware"')
+  }
+  return { mode }
+}
+
 async function dispatch(
   controller: AuthController,
   speed: SpeedController,
   proxy: ProxyConfigController | undefined,
   modelDefaults: ModelDefaultsController | undefined,
   extras: ExtraOps | undefined,
+  poolMode: PoolModeController | undefined,
   endpoint: string,
   payload: unknown,
   signal: AbortSignal,
@@ -510,6 +524,12 @@ async function dispatch(
       await extras.setVisible(provider, readString(payload, 'model'), visible)
       return ok({ ok: true })
     }
+    case 'poolGet':
+      if (poolMode === undefined) throw new BadRequest('pool mode is unavailable')
+      return ok(await poolMode.view())
+    case 'poolSet':
+      if (poolMode === undefined) throw new BadRequest('pool mode is unavailable')
+      return ok(await poolMode.set(readPoolModeInput(payload)))
     default:
       throw new BadRequest(`unknown /subscriptions-auth endpoint "${endpoint}"`)
   }
@@ -530,6 +550,7 @@ export function registerAuthRpc(
   proxy: ProxyConfigController | undefined = undefined,
   modelDefaults: ModelDefaultsController | undefined = undefined,
   extras: ExtraOps | undefined = undefined,
+  poolMode: PoolModeController | undefined = undefined,
 ): void {
   // `connection` is not in this plugin's inject list (headless compositions
   // lack it), so its startup order is unconstrained: defer registration until
@@ -541,7 +562,7 @@ export function registerAuthRpc(
         SUBSCRIPTIONS_AUTH_CHANNEL,
         async (endpoint, payload, signal) => {
           try {
-            return await dispatch(controller, speed, proxy, modelDefaults, extras, endpoint, payload, signal)
+            return await dispatch(controller, speed, proxy, modelDefaults, extras, poolMode, endpoint, payload, signal)
           } catch (error) {
             return failure(error)
           }

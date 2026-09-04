@@ -69,6 +69,8 @@ export interface UsageWindow {
   resetsAt?: number
   remaining?: number
   limit?: number
+  /** Amount already consumed in the same units as {@link limit} (spend-style windows). */
+  used?: number
 }
 
 /** `usage` endpoint value: the node half owns this shape. */
@@ -120,6 +122,13 @@ export interface ProxyTestResult {
   viaProxy: boolean
   status?: number
   latencyMs?: number
+  error?: string
+}
+
+/** Global multi-account call mode as answered by the `poolGet`/`poolSet` endpoints. */
+export interface PoolModeView {
+  mode: 'priority' | 'quota_aware'
+  configured?: 'priority' | 'quota_aware'
   error?: string
 }
 
@@ -361,6 +370,17 @@ const styles: Record<string, CSSProperties> = {
   },
   proxyMessage: { margin: 0, fontSize: 12, lineHeight: '18px' },
   proxyActions: { display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', marginTop: 2 },
+  poolModeBadge: {
+    fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)',
+    background: 'var(--dsw-alias-bg-layer-1)', border: '1px solid var(--dsw-alias-border-l2)',
+    borderRadius: 8, padding: '1px 8px',
+  },
+  proxySelect: {
+    height: 28, boxSizing: 'border-box',
+    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8, padding: '0 6px',
+    font: 'inherit', fontSize: 13, lineHeight: '20px', cursor: 'pointer',
+    background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)',
+  },
   modalOverlay: {
     position: 'fixed', inset: 0, zIndex: 1000,
     display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
@@ -428,8 +448,18 @@ function formatAmount(value: number): string {
   return String(Math.round(value * 100) / 100)
 }
 
+/** Format a small currency amount ($ with up to 2 decimals). */
+function formatMoney(value: number): string {
+  const rounded = Math.round(value * 100) / 100
+  return `$${String(rounded)}`
+}
+
 function usageAmountText(t: SubscriptionsSectionInjected['t'], window: UsageWindow): string {
   const percent = `${String(Math.round(Math.min(100, Math.max(0, window.usedPercent))))}%`
+  // Spend-style window (e.g. Zed "Token Spend"): show "used / total" dollars.
+  if (window.used !== undefined && window.limit !== undefined) {
+    return `${t('usageSpentOf', { used: formatMoney(window.used), limit: formatMoney(window.limit) })} · ${percent}`
+  }
   if (window.remaining !== undefined && window.limit !== undefined) {
     return `${t('usageRemaining', { remaining: formatAmount(window.remaining), limit: formatAmount(window.limit) })} · ${percent}`
   }
@@ -604,6 +634,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [proxyTesting, setProxyTesting] = useState(false)
   const [proxyMessage, setProxyMessage] = useState<{ tone: 'success' | 'error'; text: string } | undefined>(undefined)
   const [proxyTestResult, setProxyTestResult] = useState<ProxyTestResult | undefined>(undefined)
+  /** Global multi-account call mode as answered by `poolGet`/`poolSet`. */
+  const [poolMode, setPoolMode] = useState<PoolModeView | undefined>(undefined)
+  const [poolModeError, setPoolModeError] = useState<string | undefined>(undefined)
+  const [poolModeSaving, setPoolModeSaving] = useState(false)
   /** Per-model default-effort picker state as answered by `modelDefaults`. */
   const [modelDefaults, setModelDefaults] = useState<Partial<Record<SubscriptionProvider, ModelDefaultsCatalog>>>({})
   const [modelDefaultsLoading, setModelDefaultsLoading] = useState(false)
@@ -1038,6 +1072,38 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     return () => { alive = false }
   }, [rpc])
 
+  // Global multi-account call mode: load once on mount.
+  useEffect(() => {
+    if (rpc === undefined) return
+    let alive = true
+    void callSubscriptionsAuth<PoolModeView>(rpc, 'poolGet', {}).then((view) => {
+      if (!alive) return
+      setPoolMode(view)
+      setPoolModeError(view.error)
+    }).catch((error) => {
+      if (alive) setPoolModeError(messageOf(error))
+    })
+    return () => { alive = false }
+  }, [rpc])
+
+  /** Save a new global multi-account call mode. */
+  const setPoolModeOption = useCallback((mode: 'priority' | 'quota_aware'): void => {
+    if (rpc === undefined || poolModeSaving) return
+    setPoolModeSaving(true)
+    const previous = poolMode
+    // Optimistically apply so the select reflects the choice immediately.
+    setPoolMode(current => current === undefined ? { mode } : { ...current, mode })
+    void callSubscriptionsAuth<PoolModeView>(rpc, 'poolSet', { mode }).then((view) => {
+      setPoolMode(view)
+      setPoolModeError(view.error ?? undefined)
+    }).catch((error) => {
+      setPoolMode(previous)
+      setPoolModeError(messageOf(error))
+    }).finally(() => {
+      setPoolModeSaving(false)
+    })
+  }, [rpc, poolMode, poolModeSaving])
+
   useEffect(() => {
     if (!proxyOpen) return
     const onKey = (event: KeyboardEvent): void => {
@@ -1122,6 +1188,33 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   return (
     <div style={styles.section}>
       <p style={styles.intro}>{t('intro')}</p>
+      <div style={styles.proxyCard}>
+        <div style={styles.cardHeader}>
+          <span style={styles.dot} />
+          <span style={styles.name}>{t('poolModeTitle')}</span>
+          <span style={styles.poolModeBadge}>{
+            poolMode?.mode === 'priority'
+              ? t('poolModeSequential')
+              : t('poolModeBalanced')
+          }</span>
+          <select
+            style={{ ...styles.proxySelect, marginLeft: 'auto', flexShrink: 0 }}
+            value={poolMode?.mode ?? 'quota_aware'}
+            disabled={poolModeSaving}
+            onChange={(event) => { void setPoolModeOption(event.target.value as 'priority' | 'quota_aware') }}
+          >
+            <option value="priority">{t('poolModeSequential')}</option>
+            <option value="quota_aware">{t('poolModeBalanced')}</option>
+          </select>
+        </div>
+        <p style={styles.statusLine}>
+          {poolModeError !== undefined
+            ? t('poolModeLoadFailed', { message: poolModeError })
+            : poolMode?.configured !== undefined && poolMode.mode !== poolMode.configured
+              ? t('poolModeReadOverride', { configured: poolMode.mode === 'priority' ? t('poolModeSequential') : t('poolModeBalanced') })
+              : t('poolModeHint')}
+        </p>
+      </div>
       <div style={styles.proxyCard}>
         <div style={styles.cardHeader}>
           <span style={{

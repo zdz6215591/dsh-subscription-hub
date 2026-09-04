@@ -440,6 +440,8 @@ export interface UsageWindow {
   remaining?: number
   /** Cap of this window in the same units as {@link remaining}. */
   limit?: number
+  /** Amount already consumed, in the same units as {@link limit} (spend-style windows). */
+  used?: number
 }
 
 /** Subscription usage of one provider, as served by the `usage` RPC endpoint. */

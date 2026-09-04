@@ -105,6 +105,13 @@ export async function* parseAgySse(
     text: string
   }
   let open: OpenBlock | null = null
+  /**
+   * Antigravity streams the thoughtSignature on the THOUGHT part that precedes
+   * the functionCall part (not on the functionCall itself). Carry it forward
+   * and attach it to the next functionCall in the same turn so capture and
+   * replay line up; cleared once consumed (or at the end of the stream).
+   */
+  let pendingSignature: string | undefined
 
   const closeBlock = (): StreamChunk | null => {
     if (!open) return null
@@ -185,6 +192,12 @@ export async function* parseAgySse(
               open!.text += part.text
               yield { type: 'text-delta', index: blockIndex, text: part.text }
             } else if (part.text !== undefined && part.thought === true) {
+              // A thought part may carry the thoughtSignature that the NEXT
+              // functionCall part must replay (Antigravity puts it here, not on
+              // the functionCall). Remember it for the following functionCall.
+              if (typeof part.thoughtSignature === 'string' && part.thoughtSignature.length > 0) {
+                pendingSignature = part.thoughtSignature
+              }
               for (const chunk of ensureBlock('reasoning')) yield chunk
               open!.text += part.text
               yield { type: 'reasoning-delta', index: blockIndex, text: part.text }
@@ -206,8 +219,12 @@ export async function* parseAgySse(
                 ...part.functionCall.name === undefined ? {} : { name: part.functionCall.name },
               })
               if (start.length > 0) yield start[0]!
-              if (part.thoughtSignature) {
-                options.onToolSignature?.(upstreamId, part.thoughtSignature)
+              // Two signature sources: on the functionCall part directly, or
+              // carried from the preceding thought part.
+              const signature = part.thoughtSignature ?? pendingSignature
+              pendingSignature = undefined
+              if (typeof signature === 'string' && signature.length > 0) {
+                options.onToolSignature?.(upstreamId, signature)
               }
               const argsJson = typeof part.functionCall.args === 'string'
                 ? part.functionCall.args

@@ -17,12 +17,11 @@
 import { createHash, randomBytes } from 'node:crypto'
 import type { ContentBlock, GenerateOptions, Message, ToolSchema } from '@deepseek-ai/dsh-llm'
 import { catalogModel, isLevelThinkingModel } from './catalog.js'
+import { getToolSignature } from './signature-cache.js'
 
 function generateAntigravityRequestId(): string {
   return `agent/${Date.now()}/${randomBytes(4).toString('hex')}`
 }
-function getThoughtSignature(_id: string): string | undefined { return undefined }
-const THOUGHT_SIGNATURE_SENTINEL = ''
 
 export type AgyPart =
   | { text: string }
@@ -192,10 +191,17 @@ function blockToParts(
         }
       }
       // Antigravity rejects functionCall parts without a thoughtSignature
-      // (400). Replay the signature captured for this tool call id on the
-      // previous turn; the sentinel is the established bypass when nothing is
-      // cached (both reference implementations default to it).
-      const signature = getThoughtSignature(block.id) ?? THOUGHT_SIGNATURE_SENTINEL
+      // (400, "missing a thought_signature"). Replay the signature captured
+      // for this tool call id on the PREVIOUS turn (signature-cache.ts). A
+      // missing signature means the cache was not primed — never fabricate an
+      // empty one; surface it so the upstream error is explainable instead.
+      const signature = getToolSignature(block.id)
+      if (signature === undefined) {
+        throw new Error(
+          `agy translate: functionCall ${block.id} (${block.name}) has no cached thought_signature; `
+          + 'the Antigravity adapter must capture and replay the signature it returned with this tool call',
+        )
+      }
       return [{
         thoughtSignature: signature,
         functionCall: { id: block.id, name: block.name, args },

@@ -46,6 +46,7 @@ import {
 import { AGY_PUBLIC_MODELS, catalogModel } from './agy/catalog.js'
 import { fetchAvailableModels, listAgyModels, parseAgyQuotaUsage, resolveAgyModel } from './agy/models.js'
 import { parseAgySse } from './agy/parse.js'
+import { recordToolSignature } from './agy/signature-cache.js'
 import { toAgyRequestBody } from './agy/translate.js'
 
 export const AGY_PREEMPT_MS = 2 * 60_000
@@ -541,7 +542,13 @@ export class AgyAdapter extends LlmAdapter {
       }
       if (!response.ok) throw await httpLlmError(response, 'agy')
       if (response.body === null) throw new LlmError('agy returned an empty stream', 'EMPTY_RESPONSE')
-      for await (const chunk of parseAgySse(response.body, { signal: watchdog.signal })) {
+      for await (const chunk of parseAgySse(response.body, {
+        signal: watchdog.signal,
+        // Persist each thoughtSignature the upstream returned alongside a
+        // functionCall so the NEXT request can replay it on the assistant
+        // functionCall part (the API rejects a missing/empty signature).
+        onToolSignature: recordToolSignature,
+      })) {
         watchdog.pulse()
         yield chunk
       }

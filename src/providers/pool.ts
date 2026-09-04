@@ -79,6 +79,11 @@ export class PoolAdapter extends LlmAdapter {
     super()
   }
 
+  /** Re-tune member selection (e.g. when the user changes the global mode). */
+  setStrategy(strategy: PoolStrategy): void {
+    this.options.strategy = strategy
+  }
+
   /** Drop the pools snapshot so the next read reflects the current accounts. */
   invalidate(): void {
     this.generation += 1
