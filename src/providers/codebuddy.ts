@@ -15,7 +15,7 @@ import type { CodeBuddySession } from '../auth/store.js'
 import type { ProviderId } from '../auth/store.js'
 import { proxiedFetch } from '../http.js'
 import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from './accounts.js'
-import { effortDisplayName, httpLlmError, idleWatchdog, mapFetchFailure } from './common.js'
+import { effortDisplayName, httpLlmError, idleWatchdog, mapFetchFailure, mergeReasoning } from './common.js'
 import type { FetchFn, ModelEntry, ProviderUsage } from './common.js'
 import type { PoolAdapter } from './pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, DEFAULT_RETRY, subscriptionRetryPolicy } from './rate-limit.js'
@@ -261,6 +261,7 @@ export interface CodeBuddyAdapterOptions {
   fetchFn?: FetchFn
   resolveAttachments?: () => AttachmentStore | undefined
   rateLimit?: RateLimitWait
+  defaultEffortOf?: (model: string) => string | undefined
 }
 
 const CATALOG_TTL_MS = 5 * 60_000
@@ -326,6 +327,7 @@ export class CodeBuddyAdapter extends LlmAdapter {
         ...defaultEffort !== undefined ? { defaultEffort } : {},
       }
     }
+    const mergedReasoning = mergeReasoning(this.options.defaultEffortOf?.(model), reasoning)
     return {
       provider,
       id: model,
@@ -333,7 +335,7 @@ export class CodeBuddyAdapter extends LlmAdapter {
       inputModalities: entry?.supportsImages === true ? ['text', 'image'] : ['text', 'image'],
       context: { contextWindow },
       defaultMaxTokens: maxTokens,
-      ...reasoning !== undefined ? { reasoning } : {},
+      ...mergedReasoning !== undefined ? { reasoning: mergedReasoning } : {},
     }
   }
 

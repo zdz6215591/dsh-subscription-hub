@@ -1017,6 +1017,7 @@ export function apply(ctx: Context, config: Config): void {
           discovery: !overridden.has('codebuddy'),
           onWarn,
           resolveAttachments,
+          defaultEffortOf: (model: string) => defaultEffortOf('codebuddy', model),
           pool: () => poolAdapter,
         })
         adapters.set('codebuddy', adapter)
@@ -1045,6 +1046,7 @@ export function apply(ctx: Context, config: Config): void {
           discovery: !overridden.has('zed'),
           onWarn,
           resolveAttachments,
+          defaultEffortOf: (model: string) => defaultEffortOf('zed', model),
           pool: () => poolAdapter,
         })
         adapters.set('zed', adapter)

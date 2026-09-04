@@ -26,7 +26,7 @@ import type { ZedSession } from '../auth/store.js'
 import type { ProviderId } from '../auth/store.js'
 import { proxiedFetch } from '../http.js'
 import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from './accounts.js'
-import { effortDisplayName, httpLlmError, idleWatchdog, mapFetchFailure } from './common.js'
+import { effortDisplayName, httpLlmError, idleWatchdog, mapFetchFailure, mergeReasoning } from './common.js'
 import type { FetchFn, ModelEntry, ProviderUsage, UsageWindow } from './common.js'
 import type { PoolAdapter } from './pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, DEFAULT_RETRY, subscriptionRetryPolicy } from './rate-limit.js'
@@ -882,6 +882,12 @@ export function buildZedProviderRequest(
         stream: true,
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
         ...cleanTools !== undefined && cleanTools.length > 0 ? { tools: toAnthropicTools(cleanTools) } : {},
+        ...meta?.supportsThinking && options.reasoningEffort !== undefined
+          ? {
+              thinking: { type: 'adaptive', display: 'summarized' },
+              output_config: { effort: String(options.reasoningEffort) },
+            }
+          : {},
       },
     }
   }
@@ -979,6 +985,7 @@ export interface ZedAdapterOptions {
   fetchFn?: FetchFn
   resolveAttachments?: () => AttachmentStore | undefined
   rateLimit?: RateLimitWait
+  defaultEffortOf?: (model: string) => string | undefined
 }
 
 export class ZedAdapter extends LlmAdapter {
@@ -1008,6 +1015,7 @@ export class ZedAdapter extends LlmAdapter {
     }
     const cached = [...this.catalogs.values()].flat().find(entry => entry.id === model)
     const configured = this.options.models.find(entry => entry.id === model)
+    const reasoning = mergeReasoning(this.options.defaultEffortOf?.(model), cached?.reasoning)
     return {
       provider,
       id: model,
@@ -1015,7 +1023,7 @@ export class ZedAdapter extends LlmAdapter {
       inputModalities: cached?.supportsImages === false ? ['text'] : ['text', 'image'],
       context: { contextWindow: cached?.contextWindow ?? configured?.contextWindow ?? 200_000 },
       defaultMaxTokens: cached?.maxTokens ?? configured?.maxTokens ?? 16_384,
-      ...cached?.reasoning !== undefined ? { reasoning: cached.reasoning } : {},
+      ...reasoning !== undefined ? { reasoning } : {},
     }
   }
 
