@@ -2,7 +2,7 @@
  * Tencent CodeBuddy: browser OAuth poll + OpenAI-compatible chat + check-in.
  */
 
-import { attributionHeaders, LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -31,6 +31,7 @@ import {
   CODEBUDDY_CHAT_BASE,
   CODEBUDDY_CLI_VERSION,
   CODEBUDDY_DISPLAY_NAME,
+  CODEBUDDY_IDE_VERSION,
 } from './codebuddy-lib/constants.js'
 import { serializeRequest } from './codebuddy-lib/serialize.js'
 import { parseSse } from './codebuddy-lib/sse.js'
@@ -108,7 +109,7 @@ function billingHeaders(session: CodeBuddySession): Record<string, string> {
   return {
     accept: 'application/json',
     'content-type': 'application/json',
-    'user-agent': `CodeBuddy/${CODEBUDDY_CLI_VERSION}`,
+    'user-agent': `CodeBuddyIDE/${CODEBUDDY_IDE_VERSION} CodeBuddy/${CODEBUDDY_IDE_VERSION}`,
     authorization: `Bearer ${session.accessToken}`,
     'x-domain': session.domain,
     'x-user-id': session.uid,
@@ -116,7 +117,6 @@ function billingHeaders(session: CodeBuddySession): Record<string, string> {
       'x-enterprise-id': session.enterpriseId,
       'x-tenant-id': session.enterpriseId,
     },
-    ...attributionHeaders(),
   }
 }
 
@@ -351,8 +351,8 @@ export class CodeBuddyAdapter extends LlmAdapter {
             authorization: `Bearer ${session.accessToken}`,
             'x-domain': session.domain,
             'x-user-id': session.uid,
-            'user-agent': `CodeBuddy/${CODEBUDDY_CLI_VERSION}`,
-            ...attributionHeaders(),
+            ...session.enterpriseId === undefined ? {} : { 'x-enterprise-id': session.enterpriseId },
+            'user-agent': `CLI/${CODEBUDDY_CLI_VERSION} CodeBuddy/${CODEBUDDY_CLI_VERSION}`,
           },
           body: JSON.stringify(request),
           signal: watchdog.signal,

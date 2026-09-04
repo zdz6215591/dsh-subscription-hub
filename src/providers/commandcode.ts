@@ -130,6 +130,92 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
+export const COMMANDCODE_PLANS: Readonly<Record<string, { name: string; monthlyCredits: number }>> = {
+  'individual-go': { name: 'Go', monthlyCredits: 10 },
+  'individual-goat': { name: 'GOAT', monthlyCredits: 70 },
+  'individual-pro': { name: 'Pro', monthlyCredits: 30 },
+  'individual-pro-v1': { name: 'Pro', monthlyCredits: 80 },
+  'individual-provider': { name: 'Provider', monthlyCredits: 15 },
+  'individual-max': { name: 'Max', monthlyCredits: 150 },
+  'individual-ultra': { name: 'Ultra', monthlyCredits: 300 },
+  'teams-pro': { name: 'Teams Pro', monthlyCredits: 40 },
+}
+
+const COMMANDCODE_PLAN_PREFIXES = Object.keys(COMMANDCODE_PLANS).sort((a, b) => b.length - a.length)
+
+export function commandCodePlanInfo(planId: string): { name: string; monthlyCredits: number } | undefined {
+  const normalized = planId.toLowerCase().replace(/_/g, '-')
+  const prefix = COMMANDCODE_PLAN_PREFIXES.find(candidate => normalized.startsWith(candidate))
+  return prefix === undefined ? undefined : COMMANDCODE_PLANS[prefix]
+}
+
+function creditWindow(
+  kind: 'session' | 'weekly' | 'other',
+  used: number | undefined,
+  cap: number | undefined,
+  resetAt?: number,
+  scope?: string,
+): NonNullable<ProviderUsage['windows']>[number] | undefined {
+  if (typeof used !== 'number' || typeof cap !== 'number' || !(cap > 0)) return undefined
+  return {
+    kind,
+    usedPercent: Math.min(100, Math.max(0, (used / cap) * 100)),
+    remaining: Math.max(cap - used, 0),
+    limit: cap,
+    ...typeof resetAt === 'number' ? { resetsAt: resetAt } : {},
+    ...scope === undefined ? {} : { scope },
+  }
+}
+
+export function parseCommandCodeCredits(
+  body: unknown,
+  planCap?: number,
+  planName?: string,
+): ProviderUsage {
+  if (!isRecord(body)) return { supported: false }
+  const credits = isRecord(body.credits) ? body.credits : undefined
+  const windowLimits = isRecord(body.windowLimits) ? body.windowLimits : undefined
+  const monthlyRemaining = numberValue(credits?.monthlyCredits)
+  const purchased = numberValue(credits?.purchasedCredits) ?? 0
+  const free = numberValue(credits?.freeCredits) ?? 0
+  const planId = stringValue(credits?.planId)
+  const info = planId === undefined ? undefined : commandCodePlanInfo(planId)
+  const monthlyLimit = planCap ?? info?.monthlyCredits
+  const windows: NonNullable<ProviderUsage['windows']> = []
+  if (monthlyRemaining !== undefined) {
+    const cap = monthlyLimit !== undefined && monthlyLimit > 0 ? monthlyLimit : undefined
+    const used = cap === undefined ? undefined : Math.max(cap - monthlyRemaining, 0)
+    windows.push({
+      kind: 'other',
+      scope: 'monthly',
+      usedPercent: cap !== undefined && used !== undefined
+        ? Math.min(100, Math.max(0, (used / cap) * 100))
+        : 0,
+      remaining: monthlyRemaining,
+      ...cap === undefined ? {} : { limit: cap },
+    })
+  }
+  const five = isRecord(windowLimits?.fiveHour) ? windowLimits.fiveHour : undefined
+  const weekly = isRecord(windowLimits?.weekly) ? windowLimits.weekly : undefined
+  const fiveWindow = creditWindow('session', numberValue(five?.used), numberValue(five?.cap), numberValue(five?.resetAt))
+  const weeklyWindow = creditWindow('weekly', numberValue(weekly?.used), numberValue(weekly?.cap), numberValue(weekly?.resetAt))
+  if (fiveWindow !== undefined) windows.push(fiveWindow)
+  if (weeklyWindow !== undefined) windows.push(weeklyWindow)
+  const onDemand = purchased + free
+  if (onDemand > 0) {
+    windows.push({ kind: 'other', scope: 'on-demand', usedPercent: 0, remaining: onDemand })
+  }
+  if (windows.length === 0) return { supported: false }
+  const plan = planName ?? info?.name
+  return {
+    supported: true,
+    windows,
+    ...monthlyRemaining === undefined ? {} : { remaining: monthlyRemaining },
+    ...monthlyLimit === undefined ? {} : { limit: monthlyLimit },
+    ...plan === undefined ? {} : { plan },
+  }
+}
+
 export async function fetchCommandCodeUsage(
   session: CommandCodeSession,
   fetchFn: FetchFn = proxiedFetch,
@@ -137,41 +223,36 @@ export async function fetchCommandCodeUsage(
 ): Promise<ProviderUsage> {
   const headers = { authorization: `Bearer ${session.accessToken}`, accept: 'application/json', ...attributionHeaders() }
   const opts = { headers, ...signal === undefined ? {} : { signal } }
-  let plan: string | undefined
+  let planName: string | undefined
+  let planCap: number | undefined
+  let orgId: string | undefined
   try {
     const whoami = await fetchFn(`${COMMANDCODE_API_BASE}/alpha/whoami`, opts)
     if (whoami.ok) {
       const body = await whoami.json() as { user?: { name?: string }; org?: { id?: string } }
-      if (typeof body.user?.name === 'string') plan = body.user.name
+      if (typeof body.user?.name === 'string') planName = body.user.name
+      if (typeof body.org?.id === 'string' && body.org.id.length > 0) orgId = body.org.id
     }
   } catch { /* identity is optional */ }
   try {
-    const credits = await fetchFn(`${COMMANDCODE_API_BASE}/alpha/billing/credits`, opts)
-    if (!credits.ok) return { supported: false }
-    const body = await credits.json() as {
-      windowLimits?: {
-        fiveHour?: { used?: number; cap?: number; resetAt?: number }
-        weekly?: { used?: number; cap?: number; resetAt?: number }
+    const subPath = orgId === undefined
+      ? '/alpha/billing/subscriptions'
+      : `/alpha/billing/subscriptions?orgId=${encodeURIComponent(orgId)}`
+    const subscription = await fetchFn(`${COMMANDCODE_API_BASE}${subPath}`, opts)
+    if (subscription.ok) {
+      const body = await subscription.json() as { data?: { planId?: string; currentPeriodEnd?: number } }
+      const planId = typeof body.data?.planId === 'string' ? body.data.planId : undefined
+      const info = planId === undefined ? undefined : commandCodePlanInfo(planId)
+      if (info !== undefined) {
+        planName = info.name
+        planCap = info.monthlyCredits
       }
     }
-    const windows: ProviderUsage['windows'] = []
-    const five = body.windowLimits?.fiveHour
-    if (typeof five?.used === 'number' && typeof five.cap === 'number' && five.cap > 0) {
-      windows.push({
-        kind: 'session',
-        usedPercent: Math.min(100, Math.max(0, (five.used / five.cap) * 100)),
-        ...typeof five.resetAt === 'number' ? { resetsAt: five.resetAt } : {},
-      })
-    }
-    const weekly = body.windowLimits?.weekly
-    if (typeof weekly?.used === 'number' && typeof weekly.cap === 'number' && weekly.cap > 0) {
-      windows.push({
-        kind: 'weekly',
-        usedPercent: Math.min(100, Math.max(0, (weekly.used / weekly.cap) * 100)),
-        ...typeof weekly.resetAt === 'number' ? { resetsAt: weekly.resetAt } : {},
-      })
-    }
-    return { supported: true, ...plan === undefined ? {} : { plan }, windows }
+  } catch { /* plan cap is optional */ }
+  try {
+    const credits = await fetchFn(`${COMMANDCODE_API_BASE}/alpha/billing/credits`, opts)
+    if (!credits.ok) return { supported: false }
+    return parseCommandCodeCredits(await credits.json(), planCap, planName)
   } catch {
     return { supported: false }
   }

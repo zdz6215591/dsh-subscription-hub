@@ -177,6 +177,11 @@ export class AccountTokenManager<S extends TimedSession> {
     return (await this.peek(account)) !== undefined
   }
 
+  /** Overwrite one account's stored session (e.g. persist a healed project id). */
+  async update(account: string, session: S): Promise<void> {
+    await this.io.save(account, session)
+  }
+
   /** The TokenManager bound to one account (created lazily, then cached). */
   tokensFor(account: string): TokenManager<S> {
     let manager = this.managers.get(account)

@@ -67,6 +67,8 @@ export interface UsageWindow {
   scope?: string
   usedPercent: number
   resetsAt?: number
+  remaining?: number
+  limit?: number
 }
 
 /** `usage` endpoint value: the node half owns this shape. */
@@ -74,6 +76,8 @@ export interface ProviderUsage {
   supported: boolean
   windows?: UsageWindow[]
   plan?: string
+  remaining?: number
+  limit?: number
 }
 
 /** One model's default-effort picker state as answered by `modelDefaults`. */
@@ -249,6 +253,22 @@ const styles: Record<string, CSSProperties> = {
     display: 'flex', justifyContent: 'space-between', gap: 8,
     fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)',
   },
+  usageDetailsToggle: {
+    boxSizing: 'border-box', display: 'inline-flex', alignItems: 'center', gap: 4,
+    height: 22, padding: 0, border: 'none', background: 'transparent',
+    font: 'inherit', fontSize: 12, lineHeight: '18px', textAlign: 'left',
+    color: 'var(--dsw-alias-label-secondary)', cursor: 'pointer',
+  },
+  visibilityGrid: {
+    display: 'flex', flexWrap: 'wrap', gap: '6px 12px',
+    maxHeight: MODEL_LIST_MAX_HEIGHT, overflowY: 'auto', paddingRight: 2,
+  },
+  visibilityItem: {
+    display: 'inline-flex', alignItems: 'center', gap: 6,
+    flex: '1 1 180px', minWidth: 160, maxWidth: '100%',
+    fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-primary)',
+    cursor: 'pointer',
+  },
   accountRow: {
     display: 'flex', flexDirection: 'column', gap: 6,
     border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8,
@@ -393,10 +413,29 @@ function statusText(t: SubscriptionsSectionInjected['t'], status: ProviderStatus
  * @returns e.g. "5-hour window" or "Weekly · Opus".
  */
 function usageWindowLabel(t: SubscriptionsSectionInjected['t'], window: UsageWindow): string {
+  if (window.scope === 'monthly') return t('usageMonthly')
+  if (window.scope === 'on-demand') return t('usageOnDemand')
+  if (window.scope === 'credits') return t('usageCredits')
   const base = window.kind === 'session'
     ? t('usageSession')
     : window.kind === 'weekly' ? t('usageWeekly') : t('usageWindow')
   return window.scope !== undefined && window.scope !== '' ? `${base} · ${window.scope}` : base
+}
+
+function formatAmount(value: number): string {
+  if (Number.isInteger(value)) return String(value)
+  return String(Math.round(value * 100) / 100)
+}
+
+function usageAmountText(t: SubscriptionsSectionInjected['t'], window: UsageWindow): string {
+  const percent = `${String(Math.round(Math.min(100, Math.max(0, window.usedPercent))))}%`
+  if (window.remaining !== undefined && window.limit !== undefined) {
+    return `${t('usageRemaining', { remaining: formatAmount(window.remaining), limit: formatAmount(window.limit) })} · ${percent}`
+  }
+  if (window.remaining !== undefined) {
+    return `${t('usageRemainingOnly', { remaining: formatAmount(window.remaining) })} · ${percent}`
+  }
+  return percent
 }
 
 /** Bar fill color: success normally, warn from 80%, error from 95%. */
@@ -538,6 +577,9 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [usages, setUsages] = useState<Record<string, ProviderUsage>>({})
   const [usageErrors, setUsageErrors] = useState<Record<string, string>>({})
   const [usageLoading, setUsageLoading] = useState<Record<string, boolean>>({})
+  const [usageDetailsOpen, setUsageDetailsOpen] = useState<Record<string, boolean>>({})
+  const [zedUserId, setZedUserId] = useState('')
+  const [zedToken, setZedToken] = useState('')
   const mountedRef = useRef(true)
   const pollersRef = useRef(new Map<SubscriptionProvider, ReturnType<typeof setInterval>>())
   /** Accounts with a `usage` call in flight; guards the auto-fetch effect against re-entry. */
@@ -917,17 +959,30 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
 
   const submitManual = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
     if (rpc === undefined) return
-    const input = manualDrafts[provider].trim()
+    let input = manualDrafts[provider].trim()
+    if (provider === 'zed') {
+      const userId = zedUserId.trim()
+      const token = zedToken.trim()
+      if (userId.startsWith('{')) input = userId
+      else if (userId !== '' && token !== '') input = JSON.stringify({ userId, token })
+      else if (userId !== '') input = userId
+    }
     if (input === '') return
     setProviderError(provider, undefined)
     try {
       await callSubscriptionsAuth<{ ok: true }>(rpc, 'manual', { provider, input })
-      if (mountedRef.current) setManualDrafts(prev => ({ ...prev, [provider]: '' }))
+      if (mountedRef.current) {
+        setManualDrafts(prev => ({ ...prev, [provider]: '' }))
+        if (provider === 'zed') {
+          setZedUserId('')
+          setZedToken('')
+        }
+      }
     } catch (error) {
       setProviderError(provider, messageOf(error))
     }
     await refresh()
-  }, [rpc, manualDrafts, setProviderError, refresh])
+  }, [rpc, manualDrafts, zedUserId, zedToken, setProviderError, refresh])
 
   const logout = useCallback(async (provider: SubscriptionProvider, account: string, display: string, name: string): Promise<void> => {
     if (rpc === undefined) return
@@ -1162,27 +1217,72 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                       {usageError !== undefined && (
                         <p style={styles.errorLine}>{t('usageError', { message: usageError })}</p>
                       )}
-                      {usage?.windows !== undefined && usage.windows.length === 0 && (
+                      {usage?.windows !== undefined && usage.windows.length === 0 && usage.remaining === undefined && (
                         <p style={styles.statusLine}>{t('usageEmpty')}</p>
                       )}
-                      {(usage?.windows ?? []).map((window, index) => {
-                        const percent = Math.min(100, Math.max(0, window.usedPercent))
-                        return (
-                          <div key={index} style={styles.usageRow}>
-                            <div style={styles.usageMeta}>
-                              <span>{usageWindowLabel(t, window)}</span>
-                              <span>
-                                {`${String(Math.round(percent))}%`}
-                                {window.resetsAt !== undefined
-                                  && ` · ${t('usageResets', { date: new Date(window.resetsAt).toLocaleString() })}`}
-                              </span>
-                            </div>
-                            <div style={styles.usageTrack}>
-                              <div style={{ ...styles.usageFill, width: `${String(percent)}%`, background: usageBarColor(percent) }} />
-                            </div>
+                      {usage?.remaining !== undefined && (
+                        <div style={styles.usageRow}>
+                          <div style={styles.usageMeta}>
+                            <span>{t('usageCredits')}</span>
+                            <span>
+                              {usage.limit !== undefined
+                                ? t('usageRemaining', { remaining: formatAmount(usage.remaining), limit: formatAmount(usage.limit) })
+                                : t('usageRemainingOnly', { remaining: formatAmount(usage.remaining) })}
+                            </span>
                           </div>
+                          {usage.limit !== undefined && usage.limit > 0 && (
+                            <div style={styles.usageTrack}>
+                              {(() => {
+                                const percent = Math.min(100, Math.max(0, ((usage.limit - usage.remaining) / usage.limit) * 100))
+                                return (
+                                  <div style={{ ...styles.usageFill, width: `${String(percent)}%`, background: usageBarColor(percent) }} />
+                                )
+                              })()}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {(() => {
+                        const windows = usage?.windows ?? []
+                        if (windows.length === 0) return null
+                        const collapse = usage?.remaining !== undefined || windows.length > 1
+                        const open = collapse ? usageDetailsOpen[usageKey] === true : true
+                        return (
+                          <>
+                            {collapse && (
+                              <button
+                                type="button"
+                                style={styles.usageDetailsToggle}
+                                aria-expanded={open}
+                                onClick={() => {
+                                  setUsageDetailsOpen(prev => ({ ...prev, [usageKey]: prev[usageKey] !== true }))
+                                }}
+                              >
+                                {open ? t('usageDetailsHide') : t('usageDetails')}
+                                {` ${open ? '▲' : '▼'}`}
+                              </button>
+                            )}
+                            {open && windows.map((window, index) => {
+                              const percent = Math.min(100, Math.max(0, window.usedPercent))
+                              return (
+                                <div key={index} style={styles.usageRow}>
+                                  <div style={styles.usageMeta}>
+                                    <span>{usageWindowLabel(t, window)}</span>
+                                    <span>
+                                      {usageAmountText(t, window)}
+                                      {window.resetsAt !== undefined
+                                        && ` · ${t('usageResets', { date: new Date(window.resetsAt).toLocaleString() })}`}
+                                    </span>
+                                  </div>
+                                  <div style={styles.usageTrack}>
+                                    <div style={{ ...styles.usageFill, width: `${String(percent)}%`, background: usageBarColor(percent) }} />
+                                  </div>
+                                </div>
+                              )
+                            })}
+                          </>
                         )
-                      })}
+                      })()}
                     </div>
                   )}
                 </div>
@@ -1415,9 +1515,9 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                               {t('visibilityHideAll')}
                             </button>
                           </div>
-                          <div style={styles.defaultEffortList}>
+                          <div style={styles.visibilityGrid}>
                             {models.map(model => (
-                              <label key={model.id} style={styles.defaultEffortRow}>
+                              <label key={model.id} style={styles.visibilityItem}>
                                 <input
                                   type="checkbox"
                                   checked={model.visible}
@@ -1459,17 +1559,43 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                     : id === 'commandcode' ? t('commandCodePasteHint')
                       : t('manualSummary')}
                 </summary>
-                <div style={styles.manualRow}>
-                  <input
-                    style={styles.manualInput}
-                    value={manualDrafts[id]}
-                    placeholder={t('manualPlaceholder')}
-                    onChange={event => setManualDrafts(prev => ({ ...prev, [id]: event.target.value }))}
-                  />
-                  <button type="button" style={styles.button} onClick={() => { void submitManual(id) }}>
-                    {t('submit')}
-                  </button>
-                </div>
+                {id === 'zed' ? (
+                  <>
+                    <div style={styles.manualRow}>
+                      <input
+                        style={styles.manualInput}
+                        value={zedUserId}
+                        placeholder={t('zedUserIdPlaceholder')}
+                        autoComplete="off"
+                        onChange={event => setZedUserId(event.target.value)}
+                      />
+                    </div>
+                    <div style={styles.manualRow}>
+                      <input
+                        style={styles.manualInput}
+                        value={zedToken}
+                        placeholder={t('zedTokenPlaceholder')}
+                        autoComplete="off"
+                        onChange={event => setZedToken(event.target.value)}
+                      />
+                      <button type="button" style={styles.button} onClick={() => { void submitManual(id) }}>
+                        {t('submit')}
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <div style={styles.manualRow}>
+                    <input
+                      style={styles.manualInput}
+                      value={manualDrafts[id]}
+                      placeholder={t('manualPlaceholder')}
+                      onChange={event => setManualDrafts(prev => ({ ...prev, [id]: event.target.value }))}
+                    />
+                    <button type="button" style={styles.button} onClick={() => { void submitManual(id) }}>
+                      {t('submit')}
+                    </button>
+                  </div>
+                )}
               </details>
             )}
           </div>

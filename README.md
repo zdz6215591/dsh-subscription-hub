@@ -15,7 +15,7 @@ One Settings → **Subscriptions** page for:
 | `agy` | Google Antigravity | **HTTP OAuth only** — no `agy` CLI, no flashing `cmd.exe` windows |
 | `commandcode` | Command Code Go | Import `~/.commandcode/auth.json` or paste API key (Studio optional) |
 | `codebuddy` | Tencent CodeBuddy | browser OAuth, **check-in** button |
-| `zed` | Zed Pro | import Zed desktop credentials or paste `userId` + token; usage from `cloud.zed.dev/client/users/me` |
+| `zed` | Zed Pro | Windows import from Credential Manager, or paste userId + token; usage from `cloud.zed.dev/client/users/me` |
 
 Also: multi-account pool (quota-aware rotation), usage bars, **visible-model checkboxes** (composer picker only), `image_generate` / `video_generate` / `x_search`.
 

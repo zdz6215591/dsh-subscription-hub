@@ -8,7 +8,9 @@ import type { AgySession, CodeBuddySession, CommandCodeSession, ZedSession } fro
 import { filterVisible, setModelVisible, hiddenIds } from '../src/model-visibility.js'
 import { sessionFromZedPaste, parseZedModels, ndjsonToSse, parseZedUsage } from '../src/providers/zed.js'
 import { parseMeterUsage } from '../src/providers/codebuddy-lib/usage.js'
-import { parseCommandCodeAuthFile, parseCommandCodeStream, sessionFromCommandCodePaste } from '../src/providers/commandcode.js'
+import { parseCommandCodeAuthFile, parseCommandCodeCredits, parseCommandCodeStream, sessionFromCommandCodePaste } from '../src/providers/commandcode.js'
+import { extractAgyProjectId } from '../src/providers/agy.js'
+import { parseAgyQuotaUsage } from '../src/providers/agy/models.js'
 import { toAgyRequestBody } from '../src/providers/agy/translate.js'
 import { parseSseDataLine } from '../src/providers/agy/parse.js'
 import { checkinCodeBuddy } from '../src/providers/codebuddy.js'
@@ -97,6 +99,12 @@ describe('zed paste and catalog', () => {
     assert.equal(json.userId, 'u1')
     assert.equal(json.accessToken, 't1')
     assert.equal(json.account, 'a@b.c')
+    const lines = await sessionFromZedPaste('user-a\ntoken-b')
+    assert.equal(lines.userId, 'user-a')
+    assert.equal(lines.accessToken, 'token-b')
+    const labeled = await sessionFromZedPaste('userId: aaa\ntoken: bbb')
+    assert.equal(labeled.userId, 'aaa')
+    assert.equal(labeled.accessToken, 'bbb')
   })
 
   it('parses the live /models payload', () => {
@@ -160,6 +168,7 @@ describe('codebuddy meter + check-in', () => {
           Data: {
             Accounts: [
               { PackageCode: 'pro', CycleCapacitySizePrecise: 100, CycleCapacityRemainPrecise: 40, CycleEndTime: '2026-09-10 23:59:59' },
+              { PackageCode: 'TCACA_code_007_nzdH5h4Nl0', CycleCapacitySizePrecise: 50, CycleCapacityRemainPrecise: 0 },
             ],
           },
         },
@@ -168,6 +177,11 @@ describe('codebuddy meter + check-in', () => {
     assert.equal(usage?.supported, true)
     assert.equal(usage?.windows?.[0]?.usedPercent, 60)
     assert.equal(usage?.windows?.[0]?.scope, 'pro')
+    assert.equal(usage?.windows?.[0]?.remaining, 40)
+    assert.equal(usage?.windows?.[0]?.limit, 100)
+    assert.equal(usage?.windows?.[1]?.scope, 'credits-2')
+    assert.equal(usage?.remaining, 40)
+    assert.equal(usage?.limit, 150)
   })
 
   it('treats already-checked-in as success', async () => {
@@ -199,6 +213,26 @@ describe('codebuddy meter + check-in', () => {
     })
     assert.equal(result.ok, false)
     assert.match(result.message, /Global/)
+  })
+})
+
+describe('commandcode credits', () => {
+  it('maps monthly remaining plus window limits', () => {
+    const usage = parseCommandCodeCredits({
+      credits: { monthlyCredits: 8.5, purchasedCredits: 2, freeCredits: 0, planId: 'individual-go' },
+      windowLimits: {
+        fiveHour: { used: 1, cap: 10, resetAt: 1_800_000_000_000 },
+        weekly: { used: 3, cap: 20, resetAt: 1_800_100_000_000 },
+      },
+    })
+    assert.equal(usage.supported, true)
+    assert.equal(usage.remaining, 8.5)
+    assert.equal(usage.limit, 10)
+    assert.equal(usage.plan, 'Go')
+    assert.equal(usage.windows?.[0]?.scope, 'monthly')
+    assert.equal(usage.windows?.[0]?.remaining, 8.5)
+    assert.equal(usage.windows?.[1]?.kind, 'session')
+    assert.equal(usage.windows?.some(window => window.scope === 'on-demand'), true)
   })
 })
 
@@ -241,6 +275,24 @@ describe('commandcode stream', () => {
 })
 
 describe('agy request body EOTP', () => {
+  it('extracts a Cloud Code project id', () => {
+    assert.equal(extractAgyProjectId({ cloudaicompanionProject: { id: 'proj-1' } }), 'proj-1')
+    assert.equal(extractAgyProjectId({ cloudaicompanionProject: 'proj-str' }), 'proj-str')
+    assert.equal(extractAgyProjectId({}), '')
+  })
+
+  it('aggregates catalog quotaInfo by family', () => {
+    const usage = parseAgyQuotaUsage({
+      models: {
+        'gemini-3.5-flash': { quotaInfo: { remainingFraction: 0.4, resetTime: '2099-01-01T00:00:00Z' } },
+        'claude-sonnet-4-6': { quotaInfo: { remainingFraction: 0.6 } },
+      },
+    })
+    assert.equal(usage.supported, true)
+    assert.equal(usage.windows?.some(window => window.scope === 'Gemini'), true)
+    assert.equal(usage.windows?.some(window => window.scope === 'Claude'), true)
+  })
+
   it('omits project when projectId is absent', () => {
     const body = toAgyRequestBody(
       { model: 'gemini-3.7-flash-tiered', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] } as Parameters<typeof toAgyRequestBody>[0],

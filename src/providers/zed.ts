@@ -4,10 +4,14 @@
  * then stream via POST /completions (NDJSON wrapped native provider events).
  */
 
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { readFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
+
+const execFileAsync = promisify(execFile)
 import { attributionHeaders, LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
@@ -71,43 +75,161 @@ function sessionFromFields(userId: string, token: string, account?: string): Zed
   }
 }
 
-export async function importZedDesktop(): Promise<ZedSession> {
+function sessionFromRecord(raw: Record<string, unknown>): ZedSession | undefined {
+  const nested = typeof raw.auth === 'object' && raw.auth !== null
+    ? raw.auth as Record<string, unknown>
+    : raw
+  const userId = String(nested.userId ?? nested.user_id ?? nested.username ?? raw.userId ?? raw.user_id ?? '')
+  const token = normalizeZedToken(
+    nested.token ?? nested.access_token ?? nested.accessToken ?? nested.password
+    ?? raw.token ?? raw.access_token ?? raw.accessToken,
+  )
+  if (userId.length === 0 || token.length === 0) return undefined
+  const email = nested.email ?? raw.email
+  return sessionFromFields(userId, token, typeof email === 'string' ? email : undefined)
+}
+
+function zedCredentialPaths(): string[] {
   const appData = process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming')
-  const candidates = [
+  const local = process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local')
+  return [
+    join(local, 'Zed', 'credentials.json'),
+    join(local, 'Zed', 'credentials'),
     join(appData, 'Zed', 'credentials.json'),
     join(homedir(), 'AppData', 'Roaming', 'Zed', 'credentials.json'),
+    join(homedir(), 'AppData', 'Local', 'Zed', 'credentials.json'),
     join(homedir(), '.config', 'zed', 'credentials.json'),
     join(homedir(), 'Library', 'Application Support', 'Zed', 'credentials.json'),
   ]
-  for (const path of candidates) {
+}
+
+async function importZedFromFiles(): Promise<ZedSession | undefined> {
+  for (const path of zedCredentialPaths()) {
     try {
-      const raw = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>
-      const userId = String(raw.userId ?? raw.user_id ?? '')
-      const token = normalizeZedToken(raw.token ?? raw.access_token ?? raw.accessToken)
-      if (userId.length > 0 && token.length > 0) {
-        return sessionFromFields(userId, token, typeof raw.email === 'string' ? raw.email : undefined)
+      const text = (await readFile(path, 'utf8')).trim()
+      if (text.startsWith('{')) {
+        const session = sessionFromRecord(JSON.parse(text) as Record<string, unknown>)
+        if (session !== undefined) return session
       }
     } catch { /* try next */ }
   }
-  throw new Error('No Zed desktop credentials found. Sign in to Zed, or paste userId + token JSON.')
+  return undefined
+}
+
+const WINDOWS_CRED_SCRIPT = `
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public class DshZedCred {
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  public struct CREDENTIAL {
+    public int Flags; public int Type; public IntPtr TargetName; public IntPtr Comment;
+    public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
+    public int CredentialBlobSize; public IntPtr CredentialBlob; public int Persist;
+    public int AttributeCount; public IntPtr Attributes; public IntPtr TargetAlias; public IntPtr UserName;
+  }
+  [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  public static extern bool CredEnumerate(string filter, int flag, out int count, out IntPtr credentials);
+  [DllImport("advapi32.dll")] public static extern void CredFree(IntPtr buffer);
+}
+"@
+$count = 0; $ptr = [IntPtr]::Zero
+if (-not [DshZedCred]::CredEnumerate($null, 1, [ref]$count, [ref]$ptr)) { exit 0 }
+try {
+  $size = [Runtime.InteropServices.Marshal]::SizeOf([type][DshZedCred+CREDENTIAL])
+  $rows = @()
+  for ($i = 0; $i -lt $count; $i++) {
+    $credPtr = [Runtime.InteropServices.Marshal]::ReadIntPtr($ptr, $i * [IntPtr]::Size)
+    $cred = [Runtime.InteropServices.Marshal]::PtrToStructure($credPtr, [type][DshZedCred+CREDENTIAL])
+    $target = [Runtime.InteropServices.Marshal]::PtrToStringUni($cred.TargetName)
+    if ($target -notmatch '(?i)zed') { continue }
+    $user = [Runtime.InteropServices.Marshal]::PtrToStringUni($cred.UserName)
+    $secret = ''
+    if ($cred.CredentialBlob -ne [IntPtr]::Zero -and $cred.CredentialBlobSize -gt 0) {
+      $bytes = New-Object byte[] $cred.CredentialBlobSize
+      [Runtime.InteropServices.Marshal]::Copy($cred.CredentialBlob, $bytes, 0, $cred.CredentialBlobSize)
+      $secret = [Text.Encoding]::Unicode.GetString($bytes).Trim([char]0)
+    }
+    $rows += [pscustomobject]@{ target = $target; user = $user; secret = $secret }
+  }
+  $rows | ConvertTo-Json -Compress
+} finally { [DshZedCred]::CredFree($ptr) }
+`
+
+interface WindowsCredRow {
+  target?: string
+  user?: string
+  secret?: string
+}
+
+async function importZedFromWindowsVault(): Promise<ZedSession | undefined> {
+  if (process.platform !== 'win32') return undefined
+  try {
+    const { stdout } = await execFileAsync(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', WINDOWS_CRED_SCRIPT],
+      { timeout: 15_000, windowsHide: true, encoding: 'utf8' },
+    )
+    const text = stdout.trim()
+    if (text.length === 0) return undefined
+    const parsed: unknown = JSON.parse(text)
+    const rows: WindowsCredRow[] = Array.isArray(parsed) ? parsed as WindowsCredRow[] : [parsed as WindowsCredRow]
+    for (const row of rows) {
+      const userId = typeof row.user === 'string' ? row.user.trim() : ''
+      const token = normalizeZedToken(row.secret)
+      if (userId.length > 0 && token.length > 0) return sessionFromFields(userId, token)
+      if (typeof row.secret === 'string' && row.secret.trim().startsWith('{')) {
+        try {
+          const session = sessionFromRecord(JSON.parse(row.secret) as Record<string, unknown>)
+          if (session !== undefined) return session
+        } catch { /* next row */ }
+      }
+    }
+  } catch { /* vault unavailable */ }
+  return undefined
+}
+
+export async function importZedDesktop(): Promise<ZedSession> {
+  const fromFile = await importZedFromFiles()
+  if (fromFile !== undefined) return fromFile
+  const fromVault = await importZedFromWindowsVault()
+  if (fromVault !== undefined) return fromVault
+  throw new Error(
+    'No Zed desktop credentials found. On Windows they live in Credential Manager, not credentials.json. '
+    + 'Sign in to Zed, click Import again, or paste userId and token in the two fields below.',
+  )
 }
 
 export async function sessionFromZedPaste(input: string): Promise<ZedSession> {
   const trimmed = input.trim()
+  if (trimmed.length === 0) {
+    throw new Error('Zed paste is empty — fill userId and token, or paste JSON {"userId":"...","token":"..."}')
+  }
   if (trimmed.startsWith('{')) {
-    const parsed = JSON.parse(trimmed) as Record<string, unknown>
-    const nested = typeof parsed.auth === 'object' && parsed.auth !== null
-      ? parsed.auth as Record<string, unknown>
-      : parsed
-    const userId = String(nested.userId ?? nested.user_id ?? parsed.userId ?? parsed.user_id ?? '')
-    const token = normalizeZedToken(nested.token ?? nested.access_token ?? nested.accessToken ?? parsed.token)
-    if (userId.length === 0 || token.length === 0) throw new Error('Zed paste needs userId and token')
-    const email = nested.email ?? parsed.email
-    return sessionFromFields(userId, token, typeof email === 'string' ? email : undefined)
+    const session = sessionFromRecord(JSON.parse(trimmed) as Record<string, unknown>)
+    if (session === undefined) throw new Error('Zed JSON needs userId and token')
+    return session
+  }
+  const pairs: Record<string, string> = {}
+  for (const line of trimmed.split(/\r?\n/)) {
+    const match = line.match(/^\s*(userId|user_id|username|token|accessToken|access_token)\s*[:=]\s*(.+)\s*$/i)
+    if (match !== null) pairs[match[1].toLowerCase()] = match[2].trim()
+  }
+  if (Object.keys(pairs).length > 0) {
+    const userId = pairs.userid ?? pairs.user_id ?? pairs.username ?? ''
+    const token = normalizeZedToken(pairs.token ?? pairs.accesstoken ?? pairs.access_token)
+    if (userId.length > 0 && token.length > 0) return sessionFromFields(userId, token)
+  }
+  const lines = trimmed.split(/\r?\n/).map(line => line.trim()).filter(line => line.length > 0)
+  if (lines.length >= 2) {
+    return sessionFromFields(lines[0], normalizeZedToken(lines.slice(1).join('\n')))
   }
   const [userId, ...rest] = trimmed.split(/\s+/)
   const token = rest.join(' ')
-  if (!userId || !token) throw new Error('Zed paste needs "<userId> <token>" or JSON with userId + token')
+  if (!userId || !token) {
+    throw new Error('Zed paste needs userId + token (two fields, two lines, or JSON).')
+  }
   return sessionFromFields(userId, normalizeZedToken(token))
 }
 

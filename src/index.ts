@@ -959,6 +959,7 @@ export function apply(ctx: Context, config: Config): void {
           discovery: !overridden.has('agy'),
           onWarn,
           resolveAttachments,
+          catalogStore: catalogStore('agy'),
           pool: () => poolAdapter,
         })
         adapters.set('agy', adapter)

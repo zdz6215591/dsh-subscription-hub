@@ -4,7 +4,7 @@
 
 [English](README.md) | 中文
 
-一个 **设置 → 订阅** 页面覆盖：Codex、Claude、SuperGrok、Copilot、Antigravity（纯 HTTP OAuth，不弹 `cmd.exe`）、Command Code Go（导入 CLI / 粘贴 key，Studio 可选）、CodeBuddy（含签到）、Zed Pro。
+一个 **设置 → 订阅** 页面覆盖：Codex、Claude、SuperGrok、Copilot、Antigravity（纯 HTTP OAuth，不弹 `cmd.exe`）、Command Code Go（导入 CLI / 粘贴 key，Studio 可选）、CodeBuddy（含签到）、Zed Pro（Windows 从凭据管理器导入，或分别粘贴 userId / token）。
 
 多账号池轮换、用量查询、模型显示勾选（只在对话选择器里选一次）、以及 V1ki 原有的生图 / 生视频 / x_search。
 

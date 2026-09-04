@@ -67,21 +67,38 @@ function todayRange(): { begin: string; end: string } {
   return { begin: formatLocal(midnight), end: formatLocal(endOfDay) }
 }
 
-function personalWindows(accounts: unknown[]): UsageWindow[] {
-  return accounts.map((resource, index): UsageWindow => {
-    const limit = number(resource, 'CycleCapacitySizePrecise') ?? 0
+function packageLabel(resource: unknown, index: number): string {
+  const named = string(resource, 'PackageName')
+    ?? string(resource, 'ResourceName')
+    ?? string(resource, 'ProductName')
+    ?? string(resource, 'Alias')
+  if (named !== undefined) return named
+  const code = string(resource, 'PackageCode') ?? string(resource, 'ResourceId')
+  if (code !== undefined && !/^TCACA_/i.test(code)) return code
+  return `credits-${index + 1}`
+}
+
+function personalWindows(accounts: unknown[]): { windows: UsageWindow[]; remaining: number; limit: number } {
+  let remaining = 0
+  let limit = 0
+  const windows = accounts.map((resource, index): UsageWindow => {
+    const cap = number(resource, 'CycleCapacitySizePrecise') ?? 0
     const left = number(resource, 'CycleCapacityRemainPrecise') ?? 0
-    const used = Math.max(limit - left, 0)
-    const name = string(resource, 'PackageCode') ?? string(resource, 'ResourceId') ?? `resource_${index}`
+    const used = Math.max(cap - left, 0)
+    remaining += Math.max(left, 0)
+    limit += Math.max(cap, 0)
     const reset = string(resource, 'CycleEndTime')
     const resetsAt = reset === undefined ? undefined : Date.parse(reset.replace(' ', 'T'))
     return {
       kind: 'weekly',
-      scope: name,
-      usedPercent: limit > 0 ? Math.min(100, Math.max(0, (used / limit) * 100)) : 0,
+      scope: packageLabel(resource, index),
+      usedPercent: cap > 0 ? Math.min(100, Math.max(0, (used / cap) * 100)) : 0,
+      remaining: left,
+      limit: cap,
       ...resetsAt !== undefined && Number.isFinite(resetsAt) ? { resetsAt } : {},
     }
   })
+  return { windows, remaining, limit }
 }
 
 export function parseMeterUsage(raw: unknown): ProviderUsage | undefined {
@@ -93,21 +110,32 @@ export function parseMeterUsage(raw: unknown): ProviderUsage | undefined {
   for (const path of accountsRoots) {
     const candidate = pointer(raw, path)
     if (Array.isArray(candidate)) {
-      return { supported: true, windows: personalWindows(candidate) }
+      const parsed = personalWindows(candidate)
+      return {
+        supported: true,
+        windows: parsed.windows,
+        remaining: parsed.remaining,
+        limit: parsed.limit,
+      }
     }
   }
   const data = pointer(raw, ['data', 'data']) ?? pointer(raw, ['data']) ?? raw
   const limit = number(data, 'limitNum')
   if (limit === undefined) return undefined
   const used = number(data, 'credit') ?? 0
+  const left = Math.max(limit - used, 0)
   const reset = string(data, 'cycleResetTime')
   const resetsAt = reset === undefined ? undefined : Date.parse(reset)
   return {
     supported: true,
+    remaining: left,
+    limit,
     windows: [{
       kind: 'weekly',
       scope: 'enterprise',
       usedPercent: limit > 0 ? Math.min(100, Math.max(0, (used / limit) * 100)) : 0,
+      remaining: left,
+      limit,
       ...resetsAt !== undefined && Number.isFinite(resetsAt) ? { resetsAt } : {},
     }],
   }

@@ -40,6 +40,8 @@ interface ProviderUsageDisplay {
   provider: SubscriptionProvider
   name: string
   windows: UsageWindow[]
+  remaining?: number
+  limit?: number
 }
 
 /** Brand display names (short form for the compact badge). */
@@ -138,11 +140,17 @@ export function SubscriptionUsageBadge({ rpc }: SubscriptionUsageBadgeProps) {
       for (const r of results) {
         if (r.status !== 'fulfilled') continue // keep whatever is cached for this provider
         const { provider, usage } = r.value
-        if (!usage.supported || !usage.windows || usage.windows.length === 0) {
+        if (!usage.supported || ((usage.windows === undefined || usage.windows.length === 0) && usage.remaining === undefined)) {
           lastKnown.delete(provider)
           continue
         }
-        lastKnown.set(provider, { provider, name: PROVIDER_NAMES[provider], windows: usage.windows })
+        lastKnown.set(provider, {
+          provider,
+          name: PROVIDER_NAMES[provider],
+          windows: usage.windows ?? [],
+          ...usage.remaining === undefined ? {} : { remaining: usage.remaining },
+          ...usage.limit === undefined ? {} : { limit: usage.limit },
+        })
       }
       // Render in a stable order (the account map's insertion order, which
       // follows Object.keys(statusResp.providers)) so a segment doesn't jump
@@ -170,6 +178,13 @@ export function SubscriptionUsageBadge({ rpc }: SubscriptionUsageBadgeProps) {
 
   const segments: string[] = []
   for (const d of displays) {
+    if (d.remaining !== undefined) {
+      const left = Number.isInteger(d.remaining) ? String(d.remaining) : String(Math.round(d.remaining * 100) / 100)
+      segments.push(d.limit !== undefined
+        ? `${d.name} ${left}/${Number.isInteger(d.limit) ? String(d.limit) : String(Math.round(d.limit * 100) / 100)}`
+        : `${d.name} ${left}`)
+      continue
+    }
     const parts = d.windows.map(w => `${windowLabel(w)} ${Math.round(Math.min(100, Math.max(0, w.usedPercent)))}%`)
     segments.push(`${d.name} ${parts.join(' · ')}`)
   }

@@ -5,9 +5,10 @@
  */
 
 import { ReasoningEffortId, type LlmModelInfo, type LlmModelReasoningInfo, type LlmResolvedModelInfo, type ModelModality } from '@deepseek-ai/dsh-llm'
-import { AGY_ENDPOINT_FALLBACKS, getAgyBootstrapUserAgent } from './constants.js'
+import { AGY_ENDPOINT_FALLBACKS, getAgyBootstrapClientMetadata, getAgyBootstrapUserAgent } from './constants.js'
 import { proxiedFetch } from '../../http.js'
 import { AGY_PUBLIC_MODELS, catalogModel, isChatCallableModelId, isLevelThinkingModel } from './catalog.js'
+import type { ProviderUsage, UsageWindow } from '../common.js'
 
 export const AGY_PROVIDER = 'agy'
 
@@ -64,6 +65,7 @@ export async function fetchAvailableModels(
           Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
           'User-Agent': getAgyBootstrapUserAgent(),
+          'Client-Metadata': getAgyBootstrapClientMetadata(),
         },
         body: JSON.stringify(body),
       })
@@ -93,6 +95,42 @@ export function mergeModelCatalog(dynamic: DiscoveredModels): LlmModelInfo[] {
     })
   }
   return entries
+}
+
+function familyScope(modelId: string): string {
+  const id = modelId.toLowerCase()
+  if (id.startsWith('claude-')) return 'Claude'
+  if (id.startsWith('gemini-') || id.startsWith('gemma-')) return 'Gemini'
+  if (id.startsWith('gpt-') || id.startsWith('openai/')) return 'GPT'
+  return 'Other'
+}
+
+/** Aggregate per-model quotaInfo into family usage windows. */
+export function parseAgyQuotaUsage(dynamic: DiscoveredModels): ProviderUsage {
+  const families = new Map<string, { remaining: number; resetsAt?: number }>()
+  for (const [modelId, entry] of Object.entries(dynamic.models ?? {})) {
+    const remaining = entry.quotaInfo?.remainingFraction
+    if (typeof remaining !== 'number' || !Number.isFinite(remaining)) continue
+    const scope = familyScope(modelId)
+    const current = families.get(scope)
+    const reset = typeof entry.quotaInfo?.resetTime === 'string' ? Date.parse(entry.quotaInfo.resetTime) : undefined
+    const resetsAt = reset !== undefined && Number.isFinite(reset) ? reset : current?.resetsAt
+    families.set(scope, {
+      remaining: current === undefined ? remaining : Math.min(current.remaining, remaining),
+      ...resetsAt === undefined ? {} : { resetsAt },
+    })
+  }
+  const windows: UsageWindow[] = [...families.entries()].map(([scope, row]) => ({
+    kind: 'other' as const,
+    scope,
+    usedPercent: Math.max(0, Math.min(100, Math.round((1 - row.remaining) * 100))),
+    remaining: Math.round(row.remaining * 1000) / 10,
+    limit: 100,
+    ...row.resetsAt === undefined ? {} : { resetsAt: row.resetsAt },
+  }))
+  if (windows.length === 0) return { supported: false }
+  const worst = Math.min(...windows.map(window => window.remaining ?? 100))
+  return { supported: true, windows, remaining: worst, limit: 100 }
 }
 
 /** Catalog-only model list used when the endpoint is unreachable. */

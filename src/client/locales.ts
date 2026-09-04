@@ -36,6 +36,13 @@ export const en = {
   usageSession: '5-hour window',
   usageWeekly: 'Weekly',
   usageWindow: 'Window',
+  usageMonthly: 'Monthly remaining',
+  usageOnDemand: 'On-demand credits',
+  usageCredits: 'Credits remaining',
+  usageRemaining: '{remaining} / {limit} left',
+  usageRemainingOnly: '{remaining} left',
+  usageDetails: 'Package details',
+  usageDetailsHide: 'Hide details',
   usageResets: 'resets {date}',
   usagePlan: 'Plan: {plan}',
   modelDefaultsTitle: 'Default reasoning effort',
@@ -118,7 +125,9 @@ export const en = {
   visibilityLoading: 'Loading models…',
   visibilityEmpty: 'No models yet — log in first, then expand this list.',
   visibilityLoadFailed: 'Failed to load models: {message}',
-  zedPasteHint: 'Paste Zed userId + token, or the credentials JSON from the Zed app.',
+  zedPasteHint: 'If Zed desktop is already signed in, click “Import from Zed desktop” first (Windows reads Credential Manager, not a JSON file). Or fill the two fields: userId from Zed → Account, token from Windows Credential Manager → Windows Credentials → search “Zed”. JSON also works: {"userId":"…","token":"…"}.',
+  zedUserIdPlaceholder: 'Zed userId',
+  zedTokenPlaceholder: 'Zed token',
 } satisfies Record<string, string>
 
 /** zh strings, one per {@link en} key. */
@@ -157,6 +166,13 @@ export const zh = {
   usageSession: '5 小时窗口',
   usageWeekly: '每周',
   usageWindow: '窗口',
+  usageMonthly: '月额度剩余',
+  usageOnDemand: '加购额度',
+  usageCredits: '剩余积分',
+  usageRemaining: '剩余 {remaining} / {limit}',
+  usageRemainingOnly: '剩余 {remaining}',
+  usageDetails: '套餐明细',
+  usageDetailsHide: '收起明细',
   usageResets: '{date} 重置',
   usagePlan: '计划：{plan}',
   modelDefaultsTitle: '默认推理档',
@@ -239,7 +255,9 @@ export const zh = {
   visibilityLoading: '加载模型中…',
   visibilityEmpty: '还没有模型 — 先登录，再展开此列表。',
   visibilityLoadFailed: '模型加载失败：{message}',
-  zedPasteHint: '粘贴 Zed 的 userId + token，或桌面端 credentials JSON。',
+  zedPasteHint: '桌面已登录时先点「从 Zed 桌面导入」（Windows 会读凭据管理器，不是 credentials.json）。也可以在下面两栏分别填 userId 和 token：userId 在 Zed → Account；token 在 Windows「凭据管理器」→ Windows 凭据里搜 Zed。也可以把 JSON 贴到 userId 栏：{"userId":"...","token":"..."}。',
+  zedUserIdPlaceholder: 'Zed userId',
+  zedTokenPlaceholder: 'Zed token',
 } satisfies Record<keyof typeof en, string>
 
 /** The Subscriptions namespace key union (en is the key-set source of truth). */

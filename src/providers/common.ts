@@ -436,6 +436,10 @@ export interface UsageWindow {
   usedPercent: number
   /** Epoch milliseconds at which the window resets, when the provider discloses it. */
   resetsAt?: number
+  /** Remaining allowance in the provider's own units, when disclosed. */
+  remaining?: number
+  /** Cap of this window in the same units as {@link remaining}. */
+  limit?: number
 }
 
 /** Subscription usage of one provider, as served by the `usage` RPC endpoint. */
@@ -446,6 +450,10 @@ export interface ProviderUsage {
   windows?: UsageWindow[]
   /** Plan name the usage endpoint reported, when present. */
   plan?: string
+  /** Total remaining credits across windows, when the provider reports a credit pool. */
+  remaining?: number
+  /** Total credit cap matching {@link remaining}, when disclosed. */
+  limit?: number
 }
 
 /** One model discovered from a provider's live model-list endpoint. */
