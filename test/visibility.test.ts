@@ -109,35 +109,61 @@ describe('zed paste and catalog', () => {
     assert.equal(labeled.accessToken, 'bbb')
   })
 
-  it('parses the live /models payload', () => {
+  it('parses the live /models payload with thinking effort levels and max-mode context', () => {
     const models = parseZedModels({
       models: [
-        { id: 'claude-sonnet-4', display_name: 'Claude Sonnet 4', provider: 'anthropic', supports_images: true, max_token_count: 200000 },
+        {
+          id: 'claude-sonnet-5',
+          display_name: 'Claude Sonnet 5',
+          provider: 'anthropic',
+          supports_images: true,
+          supports_thinking: true,
+          max_token_count: 1000000,
+          max_token_count_in_max_mode: 2000000,
+          max_output_tokens: 128000,
+          supported_effort_levels: [
+            { name: 'Low', value: 'low' },
+            { name: 'Medium', value: 'medium' },
+            { name: 'High', value: 'high', is_default: true },
+            { name: 'Extra High', value: 'xhigh' },
+            { name: 'Max', value: 'max' },
+          ],
+        },
         { id: 'gpt-5-nano', name: 'GPT-5 nano', provider: 'open_ai' },
       ],
     })
     assert.equal(models.length, 2)
     assert.equal(models[0].provider, 'anthropic')
     assert.equal(models[0].supportsImages, true)
+    assert.equal(models[0].supportsThinking, true)
+    assert.equal(models[0].contextWindow, 1000000)
+    assert.equal(models[0].contextWindowInMaxMode, 2000000)
+    assert.equal(models[0].maxTokens, 128000)
+    assert.equal(models[0].reasoning?.efforts.length, 5)
+    assert.equal(models[0].reasoning?.defaultEffort, 'high')
+    assert.equal(models[0].reasoning?.efforts[0]?.id, 'low')
     assert.equal(models[1].name, 'GPT-5 nano')
   })
 
-  it('reads alternate context-window fields', () => {
-    const models = parseZedModels({
-      models: [
-        { id: 'gpt-wide', provider: 'open_ai', max_tokens: 400_000, max_output_tokens: 32_000 },
-      ],
-    })
-    assert.equal(models[0].contextWindow, 400_000)
-    assert.equal(models[0].maxTokens, 32_000)
-  })
-
-  it('builds OpenAI Responses provider_request with top-level tool name', () => {
+  it('builds OpenAI Responses provider_request with top-level tool name and strips speculative sandbox_permissions in danger-full-access', () => {
     const { provider, body } = buildZedProviderRequest(
       {
         model: 'gpt-5.6-luna',
+        system: 'You are an AI agent. Current DSH file policy: danger-full-access. Approval prompts are disabled in this session.',
         messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
-        tools: [{ name: 'search', description: 's', parameters: { type: 'object' } }],
+        tools: [{
+          name: 'pwsh',
+          description: 'run powershell',
+          parameters: {
+            type: 'object',
+            properties: {
+              command: { type: 'string' },
+              sandbox_permissions: { type: 'string', enum: ['danger-full-access'] },
+              justification: { type: 'string' },
+            },
+            required: ['command', 'sandbox_permissions'],
+          },
+        }],
       } as unknown as Parameters<typeof buildZedProviderRequest>[0],
       {
         id: 'gpt-5.6-luna',
@@ -152,8 +178,11 @@ describe('zed paste and catalog', () => {
     )
     assert.equal(provider, 'open_ai')
     assert.equal(Array.isArray(body.input), true)
-    assert.equal((body.tools as { name?: string }[])[0]?.name, 'search')
-    assert.equal('function' in ((body.tools as object[])[0] as object), false)
+    assert.equal((body.tools as { name?: string }[])[0]?.name, 'pwsh')
+    const toolParams = (body.tools as { parameters?: { properties?: Record<string, unknown>; required?: string[] } }[])[0]?.parameters
+    assert.equal('sandbox_permissions' in (toolParams?.properties ?? {}), false)
+    assert.equal('justification' in (toolParams?.properties ?? {}), false)
+    assert.equal(toolParams?.required?.includes('sandbox_permissions'), false)
   })
 
   it('maps /client/users/me plan + edit-prediction usage', () => {

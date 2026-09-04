@@ -12,20 +12,21 @@ import { readFile, rm, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 
 const execFileAsync = promisify(execFile)
-import { attributionHeaders, LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
+import { attributionHeaders, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
   LlmProviderInfo,
   LlmResolvedModelInfo,
   StreamChunk,
+  ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { ZedSession } from '../auth/store.js'
 import type { ProviderId } from '../auth/store.js'
 import { proxiedFetch } from '../http.js'
 import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from './accounts.js'
-import { httpLlmError, idleWatchdog, mapFetchFailure } from './common.js'
+import { effortDisplayName, httpLlmError, idleWatchdog, mapFetchFailure } from './common.js'
 import type { FetchFn, ModelEntry, ProviderUsage, UsageWindow } from './common.js'
 import type { PoolAdapter } from './pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, DEFAULT_RETRY, subscriptionRetryPolicy } from './rate-limit.js'
@@ -45,8 +46,13 @@ export interface ZedCatalogModel {
   provider: string
   supportsImages: boolean
   supportsThinking: boolean
+  reasoning?: {
+    efforts: { id: ReasoningEffortId; name: string }[]
+    defaultEffort?: ReasoningEffortId
+  }
   contextWindow: number
   maxTokens: number
+  contextWindowInMaxMode?: number
 }
 
 function authHeader(session: ZedSession): string {
@@ -776,6 +782,34 @@ export function parseZedModels(payload: unknown): ZedCatalogModel[] {
     if (typeof row !== 'object' || row === null) continue
     const record = row as Record<string, unknown>
     if (typeof record.id !== 'string' || record.id.length === 0) continue
+
+    let reasoning: { efforts: { id: ReasoningEffortId; name: string }[]; defaultEffort?: ReasoningEffortId } | undefined
+    if (record.supports_thinking === true && Array.isArray(record.supported_effort_levels)) {
+      const efforts: { id: ReasoningEffortId; name: string }[] = []
+      let defaultEffort: ReasoningEffortId | undefined
+      for (const level of record.supported_effort_levels) {
+        if (typeof level === 'object' && level !== null) {
+          const l = level as { name?: string; value?: string; is_default?: boolean }
+          if (typeof l.value === 'string' && l.value.length > 0) {
+            const effortId = ReasoningEffortId(l.value.toLowerCase())
+            const effortName = typeof l.name === 'string' && l.name.length > 0 ? l.name : effortDisplayName(l.value)
+            efforts.push({ id: effortId, name: effortName })
+            if (l.is_default === true && defaultEffort === undefined) {
+              defaultEffort = effortId
+            }
+          }
+        }
+      }
+      if (efforts.length > 0) {
+        reasoning = {
+          efforts,
+          ...defaultEffort !== undefined ? { defaultEffort } : {},
+        }
+      }
+    }
+
+    const maxTokensInMaxMode = numberField(record, 'max_token_count_in_max_mode')
+
     models.push({
       id: record.id,
       name: typeof record.display_name === 'string' ? record.display_name
@@ -783,12 +817,47 @@ export function parseZedModels(payload: unknown): ZedCatalogModel[] {
       provider: typeof record.provider === 'string' ? record.provider : 'open_ai',
       supportsImages: record.supports_images === true,
       supportsThinking: record.supports_thinking === true,
+      ...reasoning !== undefined ? { reasoning } : {},
       contextWindow: numberField(record, 'max_token_count', 'max_tokens', 'context_window', 'max_input_tokens')
         ?? 200_000,
       maxTokens: numberField(record, 'max_output_tokens', 'max_completion_tokens') ?? 16_384,
+      ...maxTokensInMaxMode !== undefined ? { contextWindowInMaxMode: maxTokensInMaxMode } : {},
     })
   }
   return models
+}
+
+/**
+ * Filter out speculative sandbox escalation parameters when the execution
+ * environment already provides unconfined access or has approval disabled.
+ * Eager models (like GPT-5 series) proactively populate sandbox_permissions
+ * if advertised in the tool schema, which trips DSH's strictly-wider policy.
+ */
+function sanitizeToolsForModel(tools: readonly ToolSchema[] | undefined, system?: string): readonly ToolSchema[] | undefined {
+  if (tools === undefined || tools.length === 0) return tools
+  const isFullAccess = typeof system === 'string'
+    && (system.includes('danger-full-access') || system.includes('Approval prompts are disabled in this session'))
+  if (!isFullAccess) return tools
+  return tools.map(tool => {
+    if (!tool.parameters || typeof tool.parameters !== 'object') return tool
+    const params = tool.parameters as Record<string, unknown>
+    const props = params.properties as Record<string, unknown> | undefined
+    if (!props || (!('sandbox_permissions' in props) && !('justification' in props))) return tool
+    const cleanProps = { ...props }
+    delete cleanProps.sandbox_permissions
+    delete cleanProps.justification
+    const required = Array.isArray(params.required)
+      ? params.required.filter(r => r !== 'sandbox_permissions' && r !== 'justification')
+      : params.required
+    return {
+      ...tool,
+      parameters: {
+        ...params,
+        properties: cleanProps,
+        ...required !== undefined ? { required } : {},
+      },
+    }
+  })
 }
 
 /** Build the native provider_request Zed wraps in POST /completions. */
@@ -799,6 +868,7 @@ export function buildZedProviderRequest(
 ): { provider: string; body: Record<string, unknown> } {
   const zedProvider = meta?.provider ?? (options.model.startsWith('claude') ? 'anthropic'
     : options.model.startsWith('gemini') ? 'google' : 'open_ai')
+  const cleanTools = sanitizeToolsForModel(options.tools, options.system)
   if (zedProvider === 'anthropic') {
     return {
       provider: zedProvider,
@@ -811,7 +881,7 @@ export function buildZedProviderRequest(
         max_tokens: options.maxTokens ?? meta?.maxTokens ?? 8192,
         stream: true,
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
-        ...options.tools !== undefined && options.tools.length > 0 ? { tools: toAnthropicTools(options.tools) } : {},
+        ...cleanTools !== undefined && cleanTools.length > 0 ? { tools: toAnthropicTools(cleanTools) } : {},
       },
     }
   }
@@ -828,7 +898,7 @@ export function buildZedProviderRequest(
         ...options.maxTokens === undefined && meta?.maxTokens === undefined
           ? {}
           : { max_output_tokens: options.maxTokens ?? meta?.maxTokens },
-        ...options.tools !== undefined && options.tools.length > 0 ? { tools: toResponsesTools(options.tools) } : {},
+        ...cleanTools !== undefined && cleanTools.length > 0 ? { tools: toResponsesTools(cleanTools) } : {},
         ...meta?.supportsThinking && options.reasoningEffort !== undefined
           ? { reasoning: { effort: String(options.reasoningEffort), summary: 'auto' } }
           : {},
@@ -843,7 +913,7 @@ export function buildZedProviderRequest(
       stream: true,
       ...options.temperature === undefined ? {} : { temperature: options.temperature },
       ...options.maxTokens === undefined ? {} : { max_tokens: options.maxTokens },
-      ...options.tools !== undefined && options.tools.length > 0 ? { tools: toChatTools(options.tools) } : {},
+      ...cleanTools !== undefined && cleanTools.length > 0 ? { tools: toChatTools(cleanTools) } : {},
     },
   }
 }
@@ -945,6 +1015,7 @@ export class ZedAdapter extends LlmAdapter {
       inputModalities: cached?.supportsImages === false ? ['text'] : ['text', 'image'],
       context: { contextWindow: cached?.contextWindow ?? configured?.contextWindow ?? 200_000 },
       defaultMaxTokens: cached?.maxTokens ?? configured?.maxTokens ?? 16_384,
+      ...cached?.reasoning !== undefined ? { reasoning: cached.reasoning } : {},
     }
   }
 
@@ -978,6 +1049,7 @@ export class ZedAdapter extends LlmAdapter {
         name: model.name,
         inputModalities: model.supportsImages ? ['text', 'image'] as const : ['text'] as const,
         context: { contextWindow: model.contextWindow },
+        ...model.reasoning !== undefined ? { reasoning: model.reasoning } : {},
       }))
     }
     try {
@@ -1004,6 +1076,7 @@ export class ZedAdapter extends LlmAdapter {
           name: model.name,
           inputModalities: model.supportsImages ? ['text', 'image'] as const : ['text'] as const,
           context: { contextWindow: model.contextWindow },
+          ...model.reasoning !== undefined ? { reasoning: model.reasoning } : {},
         }))
       }
     } catch (error) {
@@ -1063,9 +1136,27 @@ export class ZedAdapter extends LlmAdapter {
       if (response.body === null) throw new LlmError('zed returned an empty stream', 'EMPTY_RESPONSE')
       const sse = ndjsonToSse(response.body)
       const pulse = (): void => { watchdog.pulse() }
-      if (zedProvider === 'anthropic') yield* streamAnthropic(sse, pulse)
-      else if (zedProvider === 'open_ai') yield* streamResponses(sse, pulse)
-      else yield* streamChatCompletions(sse, pulse)
+      const isFullAccess = typeof options.system === 'string'
+        && (options.system.includes('danger-full-access') || options.system.includes('Approval prompts are disabled in this session'))
+      const stream = zedProvider === 'anthropic' ? streamAnthropic(sse, pulse)
+        : zedProvider === 'open_ai' ? streamResponses(sse, pulse)
+        : streamChatCompletions(sse, pulse)
+      for await (const chunk of stream) {
+        if (isFullAccess && chunk.type === 'block-end' && chunk.block.type === 'tool-call') {
+          const args = chunk.block.arguments
+          if (typeof args === 'string' && (args.includes('sandbox_permissions') || args.includes('justification'))) {
+            try {
+              const parsed = JSON.parse(args) as Record<string, unknown>
+              if ('sandbox_permissions' in parsed || 'justification' in parsed) {
+                delete parsed.sandbox_permissions
+                delete parsed.justification
+                chunk.block.arguments = JSON.stringify(parsed)
+              }
+            } catch { /* leave as-is */ }
+          }
+        }
+        yield chunk
+      }
     } finally {
       watchdog.stop()
     }

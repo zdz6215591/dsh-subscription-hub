@@ -2,7 +2,7 @@
  * Tencent CodeBuddy: browser OAuth poll + OpenAI-compatible chat + check-in.
  */
 
-import { LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -15,7 +15,7 @@ import type { CodeBuddySession } from '../auth/store.js'
 import type { ProviderId } from '../auth/store.js'
 import { proxiedFetch } from '../http.js'
 import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from './accounts.js'
-import { httpLlmError, idleWatchdog, mapFetchFailure } from './common.js'
+import { effortDisplayName, httpLlmError, idleWatchdog, mapFetchFailure } from './common.js'
 import type { FetchFn, ModelEntry, ProviderUsage } from './common.js'
 import type { PoolAdapter } from './pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, DEFAULT_RETRY, subscriptionRetryPolicy } from './rate-limit.js'
@@ -310,6 +310,22 @@ export class CodeBuddyAdapter extends LlmAdapter {
     const maxTokens = entry?.maxOutputTokens !== undefined && entry.maxOutputTokens > 0
       ? entry.maxOutputTokens
       : configured?.maxTokens ?? 8_192
+    let reasoning: { efforts: { id: ReasoningEffortId; name: string }[]; defaultEffort?: ReasoningEffortId } | undefined
+    if (entry?.supportsReasoning === true || entry?.reasoning !== undefined) {
+      const supported = entry?.reasoning?.supportedEfforts ?? ['low', 'medium', 'high']
+      const efforts = supported.map(eff => ({
+        id: ReasoningEffortId(eff.toLowerCase()),
+        name: effortDisplayName(eff),
+      }))
+      const def = entry?.reasoning?.defaultEffort ?? entry?.reasoning?.effort
+      const defaultEffort = def !== undefined && efforts.some(e => e.id === ReasoningEffortId(def.toLowerCase()))
+        ? ReasoningEffortId(def.toLowerCase())
+        : efforts[0]?.id
+      reasoning = {
+        efforts,
+        ...defaultEffort !== undefined ? { defaultEffort } : {},
+      }
+    }
     return {
       provider,
       id: model,
@@ -317,6 +333,7 @@ export class CodeBuddyAdapter extends LlmAdapter {
       inputModalities: entry?.supportsImages === true ? ['text', 'image'] : ['text', 'image'],
       context: { contextWindow },
       defaultMaxTokens: maxTokens,
+      ...reasoning !== undefined ? { reasoning } : {},
     }
   }
 
