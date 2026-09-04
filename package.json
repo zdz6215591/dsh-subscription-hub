@@ -1,0 +1,94 @@
+{
+  "name": "dsh-subscription-hub",
+  "version": "0.1.0",
+  "description": "Unified DeepSeek Harness subscription hub: Codex, Claude, SuperGrok, Copilot, Antigravity, Command Code, CodeBuddy, and Zed Pro — multi-account pool, usage, model visibility, image/video tools",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zdz6215591/dsh-subscription-hub.git"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "llm",
+    "oauth",
+    "chatgpt",
+    "codex",
+    "claude",
+    "grok",
+    "antigravity",
+    "codebuddy",
+    "commandcode",
+    "zed"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "tsc && tsdown",
+    "test": "tsc -p tsconfig.test.json && node --test lib-test/test/",
+    "prepare": "tsdown -c tsdown.prepare.config.ts",
+    "prepublishOnly": "pnpm build && pnpm test"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-attachment": "^0.1.1-rc.2 || ^0.1.2-alpha.1",
+    "@deepseek-ai/dsh-home-paths": "^0.1.1-rc.2 || ^0.1.2-alpha.1",
+    "@deepseek-ai/dsh-llm": "^0.1.1-rc.2 || ^0.1.2-alpha.1",
+    "@deepseek-ai/dsh-tools": "^0.1.1-rc.2 || ^0.1.2-alpha.1",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-api-remotes": "0.1.2-alpha.3",
+    "@deepseek-ai/dsh-attachment": "0.1.2-alpha.3",
+    "@deepseek-ai/dsh-client-connection": "0.1.2-alpha.3",
+    "@deepseek-ai/dsh-client-locale": "0.1.2-alpha.3",
+    "@deepseek-ai/dsh-client-ui-settings": "0.1.2-alpha.3",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.1.2-alpha.3",
+    "@deepseek-ai/dsh-client-ui-commands": "0.1.2-alpha.3",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.1.2-alpha.3",
+    "@deepseek-ai/dsh-client-ui-renderer": "0.1.2-alpha.3",
+    "@deepseek-ai/dsh-client-ui-slots": "0.1.2-alpha.3",
+    "@deepseek-ai/dsh-home-paths": "0.1.2-alpha.3",
+    "@deepseek-ai/dsh-llm": "0.1.2-alpha.3",
+    "@deepseek-ai/dsh-tools": "0.1.2-alpha.3",
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "@types/node": "^24.0.0",
+    "@types/react": "~18.3.1",
+    "react": "^18.2.0",
+    "tsdown": "^0.15.0",
+    "typescript": "^5.8.0"
+  },
+  "dependencies": {
+    "undici": "^7.0.0"
+  }
+}

@@ -1,0 +1,7 @@
+# Overlay for `dsh --profile <name> --patch <this file>` (node half only —
+# the Settings page requires installing the package into the web profile, see
+# README.md). Copy to overlay.yml and replace the name with the absolute path
+# to THIS checkout's built entry: <absolute-path>/lib/index.js
+- insert:
+    - id: llm-subscription-hub
+      name: /absolute/path/to/dsh-subscription-hub/lib/index.js

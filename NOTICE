@@ -1,0 +1,16 @@
+dsh-subscription-hub includes code derived from:
+
+- dsh-plugin-subscriptions (MIT) Copyright (c) 2026 V1ki
+  https://github.com/V1ki/dsh-plugin-subscriptions
+- dsh-agy (MIT) Copyright chaos-03x — Antigravity HTTP OAuth, catalog, SSE parse
+  https://github.com/chaos-03x/dsh-agy
+- dsh-llm-codebuddy (MIT) Copyright shatyuka — CodeBuddy control-plane client
+  https://github.com/shatyuka/dsh-llm-codebuddy
+- dsh-commandcode-provider (MIT) Copyright Mars-Sea — Command Code login/generate wire
+  https://github.com/Mars-Sea/dsh-commandcode-provider
+- opencode-zed-auth (see upstream license) — Zed cloud LLM token minting
+  https://github.com/KorigamiK/opencode-zed-auth
+
+Google Antigravity OAuth client id/secret are the public consumer credentials
+shipped inside the Antigravity product / `agy` CLI; they are not secrets owned
+by this project.

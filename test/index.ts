@@ -1,0 +1,27 @@
+/**
+ * Test entry so `node --test lib-test/test/` (a directory argument resolves
+ * to `lib-test/test/index.js`) picks up every compiled spec.
+ */
+import './keep-alive.js'
+import './translate.spec.js'
+import './chat-completions.spec.js'
+import './models.spec.js'
+import './catalog-store.spec.js'
+import './device-flow.spec.js'
+import './copilot.spec.js'
+import './tools.spec.js'
+import './rpc.spec.js'
+import './usage.spec.js'
+import './rate-limit.spec.js'
+import './detect-cli.spec.js'
+import './login.spec.js'
+import './store.spec.js'
+import './accounts.spec.js'
+import './pool.spec.js'
+import './pool-health.spec.js'
+import './pool-usage.spec.js'
+import './grok.spec.js'
+import './model-defaults.spec.js'
+import './model-defaults-rpc.spec.js'
+import './model-defaults-view.spec.js'
+import './visibility.test.js'
