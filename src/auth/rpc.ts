@@ -354,12 +354,27 @@ function readProxyInput(payload: unknown): ProxyInput {
     }
     bypass = record.bypass
   }
+  let providers: ProxyInput['providers']
+  if (record.providers !== undefined) {
+    if (typeof record.providers !== 'object' || record.providers === null || Array.isArray(record.providers)) {
+      throw new BadRequest('payload.providers must be an object when present')
+    }
+    const raw = record.providers as Record<string, unknown>
+    const next: NonNullable<ProxyInput['providers']> = {}
+    for (const id of PROVIDER_IDS) {
+      if (raw[id] === undefined) continue
+      if (typeof raw[id] !== 'boolean') throw new BadRequest(`payload.providers.${id} must be a boolean`)
+      next[id] = raw[id]
+    }
+    providers = next
+  }
   return {
     enabled: record.enabled,
     url: record.url,
     ...username === undefined ? {} : { username },
     ...password === undefined ? {} : { password },
     ...bypass === undefined ? {} : { bypass },
+    ...providers === undefined ? {} : { providers },
   }
 }
 

@@ -6,9 +6,9 @@
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { readFile } from 'node:fs/promises'
+import { readFile, rm, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 
 const execFileAsync = promisify(execFile)
@@ -116,8 +116,8 @@ async function importZedFromFiles(): Promise<ZedSession | undefined> {
   return undefined
 }
 
-const WINDOWS_CRED_SCRIPT = `
-Add-Type @"
+/** Zed's Windows keyring target is `zed:url=<server_url>`, not a JSON file. */
+const WINDOWS_ZED_CRED_SCRIPT = `Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -130,31 +130,56 @@ public class DshZedCred {
     public int AttributeCount; public IntPtr Attributes; public IntPtr TargetAlias; public IntPtr UserName;
   }
   [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  public static extern bool CredRead(string target, int type, int reservedFlag, out IntPtr credentialPtr);
+  [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
   public static extern bool CredEnumerate(string filter, int flag, out int count, out IntPtr credentials);
   [DllImport("advapi32.dll")] public static extern void CredFree(IntPtr buffer);
 }
 "@
-$count = 0; $ptr = [IntPtr]::Zero
-if (-not [DshZedCred]::CredEnumerate($null, 1, [ref]$count, [ref]$ptr)) { exit 0 }
-try {
-  $size = [Runtime.InteropServices.Marshal]::SizeOf([type][DshZedCred+CREDENTIAL])
-  $rows = @()
-  for ($i = 0; $i -lt $count; $i++) {
-    $credPtr = [Runtime.InteropServices.Marshal]::ReadIntPtr($ptr, $i * [IntPtr]::Size)
-    $cred = [Runtime.InteropServices.Marshal]::PtrToStructure($credPtr, [type][DshZedCred+CREDENTIAL])
-    $target = [Runtime.InteropServices.Marshal]::PtrToStringUni($cred.TargetName)
-    if ($target -notmatch '(?i)zed') { continue }
-    $user = [Runtime.InteropServices.Marshal]::PtrToStringUni($cred.UserName)
-    $secret = ''
-    if ($cred.CredentialBlob -ne [IntPtr]::Zero -and $cred.CredentialBlobSize -gt 0) {
-      $bytes = New-Object byte[] $cred.CredentialBlobSize
-      [Runtime.InteropServices.Marshal]::Copy($cred.CredentialBlob, $bytes, 0, $cred.CredentialBlobSize)
-      $secret = [Text.Encoding]::Unicode.GetString($bytes).Trim([char]0)
-    }
-    $rows += [pscustomobject]@{ target = $target; user = $user; secret = $secret }
+function Decode-Blob([IntPtr]$ptr, [int]$size) {
+  if ($ptr -eq [IntPtr]::Zero -or $size -le 0) { return '' }
+  $bytes = New-Object byte[] $size
+  [Runtime.InteropServices.Marshal]::Copy($ptr, $bytes, 0, $size)
+  $uni = [Text.Encoding]::Unicode.GetString($bytes).Trim([char]0)
+  $utf = [Text.Encoding]::UTF8.GetString($bytes).Trim([char]0)
+  if ($uni -match '^[\\x20-\\x7E]{8,}$') { return $uni }
+  if ($utf -match '^[\\x20-\\x7E]{8,}$') { return $utf }
+  if ($uni.Length -ge $utf.Length) { return $uni }
+  return $utf
+}
+function Row-FromPtr([IntPtr]$credPtr) {
+  $cred = [Runtime.InteropServices.Marshal]::PtrToStructure($credPtr, [type][DshZedCred+CREDENTIAL])
+  return [pscustomobject]@{
+    target = [Runtime.InteropServices.Marshal]::PtrToStringUni($cred.TargetName)
+    user = [Runtime.InteropServices.Marshal]::PtrToStringUni($cred.UserName)
+    secret = Decode-Blob $cred.CredentialBlob $cred.CredentialBlobSize
   }
-  $rows | ConvertTo-Json -Compress
-} finally { [DshZedCred]::CredFree($ptr) }
+}
+$rows = @()
+$targets = @(
+  'zed:url=https://zed.dev',
+  'zed:url=https://collab.zed.dev',
+  'LegacyGeneric:target=zed:url=https://zed.dev',
+  'https://zed.dev',
+  'Zed'
+)
+foreach ($target in $targets) {
+  $ptr = [IntPtr]::Zero
+  if ([DshZedCred]::CredRead($target, 1, 0, [ref]$ptr) -and $ptr -ne [IntPtr]::Zero) {
+    try { $rows += Row-FromPtr $ptr } finally { [DshZedCred]::CredFree($ptr) }
+  }
+}
+$count = 0; $enumPtr = [IntPtr]::Zero
+if ([DshZedCred]::CredEnumerate($null, 1, [ref]$count, [ref]$enumPtr)) {
+  try {
+    for ($i = 0; $i -lt $count; $i++) {
+      $credPtr = [Runtime.InteropServices.Marshal]::ReadIntPtr($enumPtr, $i * [IntPtr]::Size)
+      $row = Row-FromPtr $credPtr
+      if ($row.target -match '(?i)zed') { $rows += $row }
+    }
+  } finally { [DshZedCred]::CredFree($enumPtr) }
+}
+$rows | ConvertTo-Json -Compress
 `
 
 interface WindowsCredRow {
@@ -165,11 +190,13 @@ interface WindowsCredRow {
 
 async function importZedFromWindowsVault(): Promise<ZedSession | undefined> {
   if (process.platform !== 'win32') return undefined
+  const scriptPath = join(tmpdir(), `dsh-zed-cred-${process.pid}-${Date.now()}.ps1`)
   try {
+    await writeFile(scriptPath, WINDOWS_ZED_CRED_SCRIPT, 'utf8')
     const { stdout } = await execFileAsync(
       'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', WINDOWS_CRED_SCRIPT],
-      { timeout: 15_000, windowsHide: true, encoding: 'utf8' },
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
+      { timeout: 20_000, windowsHide: true, encoding: 'utf8' },
     )
     const text = stdout.trim()
     if (text.length === 0) return undefined
@@ -186,7 +213,9 @@ async function importZedFromWindowsVault(): Promise<ZedSession | undefined> {
         } catch { /* next row */ }
       }
     }
-  } catch { /* vault unavailable */ }
+  } catch { /* vault unavailable */ } finally {
+    await rm(scriptPath, { force: true }).catch(() => undefined)
+  }
   return undefined
 }
 
@@ -196,8 +225,9 @@ export async function importZedDesktop(): Promise<ZedSession> {
   const fromVault = await importZedFromWindowsVault()
   if (fromVault !== undefined) return fromVault
   throw new Error(
-    'No Zed desktop credentials found. On Windows they live in Credential Manager, not credentials.json. '
-    + 'Sign in to Zed, click Import again, or paste userId and token in the two fields below.',
+    'Zed desktop is signed in, but this plugin could not read Windows Credential Manager '
+    + '(target zed:url=https://zed.dev). Use the two fields below: userId is the numeric id '
+    + 'shown as 用户 in that credential; token is its password. There is no credentials.json in the Zed app.',
   )
 }
 

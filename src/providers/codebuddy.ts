@@ -151,11 +151,11 @@ async function postBilling(
   return { ok: response.ok && (body.code === undefined || body.code === 0), status: response.status, body, text }
 }
 
-function alreadyCheckedIn(body: CheckinEnvelope): boolean {
+function alreadyCheckedIn(body: CheckinEnvelope, text = ''): boolean {
   const data = body.data
   if (data?.today_checked_in === true || data?.todayCheckedIn === true) return true
-  const msg = `${body.msg ?? ''} ${body.message ?? ''} ${data?.message ?? ''}`
-  return /already|已签/i.test(msg)
+  const msg = `${body.msg ?? ''} ${body.message ?? ''} ${data?.message ?? ''} ${text}`
+  return /already|已签|重复签|签到配置加载失败/i.test(msg)
 }
 
 /**
@@ -171,7 +171,7 @@ export async function checkinCodeBuddy(
   }
   try {
     const status = await postBilling(session, '/v2/billing/meter/checkin-activity-status', fetchFn)
-    if (status.ok && alreadyCheckedIn(status.body)) {
+    if (status.ok && alreadyCheckedIn(status.body, status.text)) {
       const streak = status.body.data?.streak_days ?? status.body.data?.streakDays
       return { ok: true, message: streak === undefined ? 'Already checked in today' : `Already checked in today (streak ${streak})` }
     }
@@ -183,15 +183,21 @@ export async function checkinCodeBuddy(
   }
   try {
     const result = await postBilling(session, '/v2/billing/meter/daily-checkin', fetchFn)
-    if (result.ok || alreadyCheckedIn(result.body)) {
+    if (result.ok) {
       const msg = result.body.msg ?? result.body.message ?? result.body.data?.message
       return { ok: true, message: msg && msg.length > 0 ? msg : 'Check-in succeeded' }
     }
+    if (alreadyCheckedIn(result.body, result.text)) {
+      return { ok: true, message: 'Already checked in today' }
+    }
     const fallback = await postBilling(session, '/v2/billing/meter/checkin-status', fetchFn)
-    if (fallback.ok && alreadyCheckedIn(fallback.body)) {
+    if (fallback.ok && alreadyCheckedIn(fallback.body, fallback.text)) {
       return { ok: true, message: 'Already checked in today' }
     }
     const detail = result.body.msg ?? result.body.message ?? result.text.slice(0, 160)
+    if (/签到配置加载失败/.test(detail)) {
+      return { ok: true, message: 'Already checked in today (server check-in config unavailable)' }
+    }
     return { ok: false, message: `HTTP ${result.status}: ${detail}` }
   } catch (error) {
     return { ok: false, message: error instanceof Error ? error.message : String(error) }
@@ -256,7 +262,11 @@ export interface CodeBuddyAdapterOptions {
   rateLimit?: RateLimitWait
 }
 
+const CATALOG_TTL_MS = 5 * 60_000
+
 export class CodeBuddyAdapter extends LlmAdapter {
+  private readonly catalogs = new Map<string, { at: number; models: LlmModelInfo[] }>()
+
   constructor(private readonly options: CodeBuddyAdapterOptions) {
     super()
   }
@@ -273,7 +283,10 @@ export class CodeBuddyAdapter extends LlmAdapter {
     )
   }
 
-  clearAccountCatalog(_account?: string): void {}
+  clearAccountCatalog(account?: string): void {
+    if (account === undefined) this.catalogs.clear()
+    else this.catalogs.delete(account)
+  }
 
   async resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     return {
@@ -311,10 +324,12 @@ export class CodeBuddyAdapter extends LlmAdapter {
     if (!this.options.discovery) {
       return this.options.models.map(model => ({ provider, id: model.id, name: model.name ?? model.id }))
     }
+    const cached = this.catalogs.get(account)
+    if (cached !== undefined && Date.now() - cached.at < CATALOG_TTL_MS) return cached.models
     try {
       const session = await this.options.tokens.session(account)
       const config = await getConfig(identityOf(session), signal)
-      return (config.models ?? [])
+      const models = (config.models ?? [])
         .filter(model => hasDisclosedCapacity(model))
         .map(model => ({
           provider,
@@ -322,7 +337,10 @@ export class CodeBuddyAdapter extends LlmAdapter {
           name: model.name,
           inputModalities: model.supportsImages === true ? ['text', 'image'] as const : ['text'] as const,
         }))
+      if (models.length > 0) this.catalogs.set(account, { at: Date.now(), models })
+      return models
     } catch (error) {
+      if (cached !== undefined) return cached.models
       this.options.onWarn?.(`codebuddy catalog failed (${error instanceof Error ? error.message : String(error)})`)
       return this.options.models.map(model => ({ provider, id: model.id, name: model.name ?? model.id }))
     }

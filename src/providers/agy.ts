@@ -90,7 +90,15 @@ function agyBootstrapHeaders(accessToken: string): Record<string, string> {
     authorization: `Bearer ${accessToken}`,
     'content-type': 'application/json',
     'user-agent': getAgyBootstrapUserAgent(),
-    'client-metadata': getAgyBootstrapClientMetadata(),
+    'Client-Metadata': getAgyBootstrapClientMetadata(),
+    'X-Goog-Api-Client': 'google-cloud-sdk vscode/1.96.0',
+  }
+}
+
+function agyGenerateHeaders(accessToken: string): Record<string, string> {
+  return {
+    ...agyBootstrapHeaders(accessToken),
+    accept: 'text/event-stream',
   }
 }
 
@@ -492,7 +500,8 @@ export class AgyAdapter extends LlmAdapter {
         }
       }
       const body = toAgyRequestBody(options, {
-        ...(session.projectId === undefined ? {} : { projectId: session.projectId }),
+        projectId: session.projectId,
+        ...(session.account === undefined ? {} : { sessionId: session.account }),
         ...(images.size > 0 ? { images } : {}),
       })
       let response: Response
@@ -500,10 +509,7 @@ export class AgyAdapter extends LlmAdapter {
         response = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {
           method: 'POST',
           headers: {
-            authorization: `Bearer ${session.accessToken}`,
-            'content-type': 'application/json',
-            accept: 'text/event-stream',
-            'user-agent': getAgyBootstrapUserAgent(),
+            ...agyGenerateHeaders(session.accessToken),
             ...attributionHeaders(),
           },
           body: JSON.stringify(body),

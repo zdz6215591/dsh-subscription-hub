@@ -167,10 +167,22 @@ function creditWindow(
   }
 }
 
+function periodEndMs(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return value < 1e12 ? value * 1000 : value
+  }
+  if (typeof value === 'string' && value.length > 0) {
+    const parsed = Date.parse(value)
+    return Number.isFinite(parsed) ? parsed : undefined
+  }
+  return undefined
+}
+
 export function parseCommandCodeCredits(
   body: unknown,
   planCap?: number,
   planName?: string,
+  periodEnd?: number,
 ): ProviderUsage {
   if (!isRecord(body)) return { supported: false }
   const credits = isRecord(body.credits) ? body.credits : undefined
@@ -193,6 +205,7 @@ export function parseCommandCodeCredits(
         : 0,
       remaining: monthlyRemaining,
       ...cap === undefined ? {} : { limit: cap },
+      ...periodEnd === undefined ? {} : { resetsAt: periodEnd },
     })
   }
   const five = isRecord(windowLimits?.fiveHour) ? windowLimits.fiveHour : undefined
@@ -225,6 +238,7 @@ export async function fetchCommandCodeUsage(
   const opts = { headers, ...signal === undefined ? {} : { signal } }
   let planName: string | undefined
   let planCap: number | undefined
+  let periodEnd: number | undefined
   let orgId: string | undefined
   try {
     const whoami = await fetchFn(`${COMMANDCODE_API_BASE}/alpha/whoami`, opts)
@@ -240,19 +254,20 @@ export async function fetchCommandCodeUsage(
       : `/alpha/billing/subscriptions?orgId=${encodeURIComponent(orgId)}`
     const subscription = await fetchFn(`${COMMANDCODE_API_BASE}${subPath}`, opts)
     if (subscription.ok) {
-      const body = await subscription.json() as { data?: { planId?: string; currentPeriodEnd?: number } }
+      const body = await subscription.json() as { data?: { planId?: string; currentPeriodEnd?: unknown } }
       const planId = typeof body.data?.planId === 'string' ? body.data.planId : undefined
       const info = planId === undefined ? undefined : commandCodePlanInfo(planId)
       if (info !== undefined) {
         planName = info.name
         planCap = info.monthlyCredits
       }
+      periodEnd = periodEndMs(body.data?.currentPeriodEnd)
     }
   } catch { /* plan cap is optional */ }
   try {
     const credits = await fetchFn(`${COMMANDCODE_API_BASE}/alpha/billing/credits`, opts)
     if (!credits.ok) return { supported: false }
-    return parseCommandCodeCredits(await credits.json(), planCap, planName)
+    return parseCommandCodeCredits(await credits.json(), planCap, planName, periodEnd)
   } catch {
     return { supported: false }
   }
@@ -496,7 +511,11 @@ export interface CommandCodeAdapterOptions {
   rateLimit?: RateLimitWait
 }
 
+const COMMANDCODE_CATALOG_TTL_MS = 5 * 60_000
+
 export class CommandCodeAdapter extends LlmAdapter {
+  private readonly catalogs = new Map<string, { at: number; models: LlmModelInfo[] }>()
+
   constructor(private readonly options: CommandCodeAdapterOptions) {
     super()
   }
@@ -509,7 +528,10 @@ export class CommandCodeAdapter extends LlmAdapter {
     return subscriptionRetryPolicy(DEFAULT_RETRY, this.options.rateLimit ?? DEFAULT_RATE_LIMIT_WAIT, `commandcode: "${provider}"`)
   }
 
-  clearAccountCatalog(_account?: string): void {}
+  clearAccountCatalog(account?: string): void {
+    if (account === undefined) this.catalogs.clear()
+    else this.catalogs.delete(account)
+  }
 
   async resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     const configured = this.options.models.find(entry => entry.id === model)
@@ -545,6 +567,8 @@ export class CommandCodeAdapter extends LlmAdapter {
       )
     }
     if (!await this.options.tokens.hasSession(account)) return []
+    const cached = this.catalogs.get(account)
+    if (cached !== undefined && Date.now() - cached.at < COMMANDCODE_CATALOG_TTL_MS) return cached.models
     try {
       const session = await this.options.tokens.session(account)
       const response = await proxiedFetch(`${COMMANDCODE_API_BASE}/provider/v1/models`, {
@@ -556,8 +580,12 @@ export class CommandCodeAdapter extends LlmAdapter {
       const models = (payload.data ?? [])
         .filter(row => typeof row.id === 'string' && row.id.length > 0)
         .map(row => ({ provider, id: row.id as string, name: row.name ?? row.id as string }))
-      if (models.length > 0) return models
+      if (models.length > 0) {
+        this.catalogs.set(account, { at: Date.now(), models })
+        return models
+      }
     } catch (error) {
+      if (cached !== undefined) return cached.models
       this.options.onWarn?.(`commandcode catalog failed (${error instanceof Error ? error.message : String(error)})`)
     }
     return this.options.models.map(model => ({ provider, id: model.id, name: model.name ?? model.id }))

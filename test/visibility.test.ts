@@ -11,6 +11,8 @@ import { parseMeterUsage } from '../src/providers/codebuddy-lib/usage.js'
 import { parseCommandCodeAuthFile, parseCommandCodeCredits, parseCommandCodeStream, sessionFromCommandCodePaste } from '../src/providers/commandcode.js'
 import { extractAgyProjectId } from '../src/providers/agy.js'
 import { parseAgyQuotaUsage } from '../src/providers/agy/models.js'
+import { isAgyUnusableEndpoint } from '../src/providers/agy/constants.js'
+import { providerForHostname } from '../src/http.js'
 import { toAgyRequestBody } from '../src/providers/agy/translate.js'
 import { parseSseDataLine } from '../src/providers/agy/parse.js'
 import { checkinCodeBuddy } from '../src/providers/codebuddy.js'
@@ -200,6 +202,24 @@ describe('codebuddy meter + check-in', () => {
     assert.match(result.message, /Already checked in/)
   })
 
+  it('treats check-in config 500 as already signed', async () => {
+    const session: CodeBuddySession = {
+      accessToken: 'a',
+      refreshToken: 'r',
+      expiresAt: Date.now() + 60_000,
+      domain: 'codebuddy.cn',
+      uid: 'u1',
+    }
+    let n = 0
+    const result = await checkinCodeBuddy(session, async () => {
+      n += 1
+      if (n === 1) return new Response(JSON.stringify({ code: 0, data: { active: true } }), { status: 200 })
+      return new Response(JSON.stringify({ code: 1, msg: '签到配置加载失败，请稍后重试' }), { status: 500 })
+    })
+    assert.equal(result.ok, true)
+    assert.match(result.message, /Already checked in/i)
+  })
+
   it('skips global workbuddy accounts', async () => {
     const session: CodeBuddySession = {
       accessToken: 'a',
@@ -224,13 +244,14 @@ describe('commandcode credits', () => {
         fiveHour: { used: 1, cap: 10, resetAt: 1_800_000_000_000 },
         weekly: { used: 3, cap: 20, resetAt: 1_800_100_000_000 },
       },
-    })
+    }, undefined, undefined, 1_800_200_000_000)
     assert.equal(usage.supported, true)
     assert.equal(usage.remaining, 8.5)
     assert.equal(usage.limit, 10)
     assert.equal(usage.plan, 'Go')
     assert.equal(usage.windows?.[0]?.scope, 'monthly')
     assert.equal(usage.windows?.[0]?.remaining, 8.5)
+    assert.equal(usage.windows?.[0]?.resetsAt, 1_800_200_000_000)
     assert.equal(usage.windows?.[1]?.kind, 'session')
     assert.equal(usage.windows?.some(window => window.scope === 'on-demand'), true)
   })
@@ -279,6 +300,20 @@ describe('agy request body EOTP', () => {
     assert.equal(extractAgyProjectId({ cloudaicompanionProject: { id: 'proj-1' } }), 'proj-1')
     assert.equal(extractAgyProjectId({ cloudaicompanionProject: 'proj-str' }), 'proj-str')
     assert.equal(extractAgyProjectId({}), '')
+  })
+
+  it('skips 400 API key is invalid as an unusable host', async () => {
+    const bad = new Response(JSON.stringify({ error: { message: 'API key is invalid' } }), { status: 400 })
+    const other = new Response('nope', { status: 401 })
+    assert.equal(await isAgyUnusableEndpoint(bad), true)
+    assert.equal(await isAgyUnusableEndpoint(other), false)
+  })
+
+  it('maps hostnames to subscription providers for per-provider proxy', () => {
+    assert.equal(providerForHostname('daily-cloudcode-pa.googleapis.com'), 'agy')
+    assert.equal(providerForHostname('copilot.tencent.com'), 'codebuddy')
+    assert.equal(providerForHostname('cloud.zed.dev'), 'zed')
+    assert.equal(providerForHostname('example.com'), undefined)
   })
 
   it('aggregates catalog quotaInfo by family', () => {

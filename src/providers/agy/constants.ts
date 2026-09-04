@@ -74,9 +74,22 @@ export const AGY_ENDPOINT_FALLBACKS: readonly string[] = [
 /** Statuses that mean "this endpoint is not usable for this account"; skip to the next. */
 export const AGY_ENDPOINT_SKIP_STATUSES = new Set([429, 403])
 
+/** Daily host often answers 400 "API key is invalid" for consumer accounts that actually live on prod. */
+export async function isAgyUnusableEndpoint(response: Response): Promise<boolean> {
+  if (AGY_ENDPOINT_SKIP_STATUSES.has(response.status)) return true
+  if (response.status !== 400) return false
+  try {
+    const text = await response.clone().text()
+    return /api key is invalid|API_KEY_INVALID|request had invalid authentication credentials/i.test(text)
+  } catch {
+    return false
+  }
+}
+
 /**
- * Try each runtime endpoint in order, skipping unusable ones (429/403/network).
- * Returns the first other response (2xx or a real error like 400/401); when
+ * Try each runtime endpoint in order, skipping unusable ones (429/403/network,
+ * and 400 "API key is invalid" which means the wrong Code Assist host).
+ * Returns the first other response (2xx or a real error like 401); when
  * every endpoint is unusable, returns the last skipped response so the caller's
  * classifier can still produce a meaningful error.
  */
@@ -89,8 +102,11 @@ export async function fetchAgyFirstOk(
   for (const baseEndpoint of AGY_ENDPOINT_FALLBACKS) {
     try {
       const response = await fetchImpl(`${baseEndpoint}${urlPath}`, init)
-      if (!AGY_ENDPOINT_SKIP_STATUSES.has(response.status)) return response
-      lastSkipped = response
+      if (await isAgyUnusableEndpoint(response)) {
+        lastSkipped = response
+        continue
+      }
+      return response
     } catch {
       // network error — try the next endpoint
     }

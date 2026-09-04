@@ -17,6 +17,7 @@ import { ProxyAgent, fetch as undiciFetch } from 'undici'
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
+import { PROVIDER_IDS, type ProviderId } from './auth/store.js'
 
 /**
  * undici's own fetch, typed to the DOM fetch signature: its bundled types are
@@ -38,6 +39,12 @@ export interface ProxyConfig {
   password?: string
   /** Hostnames (exact, suffix, or `*.example.com`) that stay direct. */
   bypass: string[]
+  /**
+   * Per-provider proxy switch. `false` sends that subscription direct even
+   * when {@link enabled} is true. Missing keys default to true (follow the
+   * global switch).
+   */
+  providers?: Partial<Record<ProviderId, boolean>>
 }
 
 /** The proxy config as served to the client: secrets replaced by a flag. */
@@ -48,6 +55,8 @@ export interface ProxyConfigView {
   /** Whether a password is stored (the password itself never leaves the host). */
   passwordSet: boolean
   bypass: string[]
+  /** Per-provider: true = use the proxy, false = go direct. */
+  providers: Record<ProviderId, boolean>
   /** Last load/apply failure, when the stored config is unusable. */
   error?: string
 }
@@ -60,6 +69,8 @@ export interface ProxyInput {
   /** `undefined` keeps the stored password, `null`/`''` clears it. */
   password?: string | null
   bypass?: string[]
+  /** Per-provider proxy switch; omitted keys keep the stored value (or default true). */
+  providers?: Partial<Record<ProviderId, boolean>>
 }
 
 /** One `proxyTest` result. */
@@ -90,6 +101,54 @@ export const DEFAULT_PROXY_TEST_TIMEOUT_MS = 15_000
 
 /** Disabled configuration: the module state before the first load. */
 const DISABLED: ProxyConfig = { enabled: false, url: '', bypass: [] }
+
+/** Hostname suffixes that belong to one subscription (longest match wins). */
+const PROVIDER_HOST_SUFFIXES: ReadonlyArray<readonly [string, ProviderId]> = [
+  ['daily-cloudcode-pa.googleapis.com', 'agy'],
+  ['cloudcode-pa.googleapis.com', 'agy'],
+  ['cloudcode-pa.sandbox.googleapis.com', 'agy'],
+  ['oauth2.googleapis.com', 'agy'],
+  ['accounts.google.com', 'agy'],
+  ['googleapis.com', 'agy'],
+  ['google.com', 'agy'],
+  ['copilot.tencent.com', 'codebuddy'],
+  ['codebuddy.cn', 'codebuddy'],
+  ['workbuddy.ai', 'codebuddy'],
+  ['commandcode.ai', 'commandcode'],
+  ['cloud.zed.dev', 'zed'],
+  ['zed.dev', 'zed'],
+  ['chatgpt.com', 'codex'],
+  ['openai.com', 'codex'],
+  ['auth.openai.com', 'codex'],
+  ['anthropic.com', 'claude'],
+  ['claude.ai', 'claude'],
+  ['cli-chat-proxy.grok.com', 'grok'],
+  ['x.ai', 'grok'],
+  ['grok.com', 'grok'],
+  ['githubcopilot.com', 'copilot'],
+  ['github.com', 'copilot'],
+]
+
+function defaultProviderFlags(overrides?: Partial<Record<ProviderId, boolean>>): Record<ProviderId, boolean> {
+  const flags = {} as Record<ProviderId, boolean>
+  for (const id of PROVIDER_IDS) flags[id] = overrides?.[id] !== false
+  return flags
+}
+
+/** Which subscription a request hostname belongs to, when known. */
+export function providerForHostname(hostname: string): ProviderId | undefined {
+  const host = hostname.toLowerCase()
+  for (const [suffix, provider] of PROVIDER_HOST_SUFFIXES) {
+    if (host === suffix || host.endsWith(`.${suffix}`)) return provider
+  }
+  return undefined
+}
+
+function providerUsesProxy(hostname: string, cfg: ProxyConfig): boolean {
+  const provider = providerForHostname(hostname)
+  if (provider === undefined) return true
+  return cfg.providers?.[provider] !== false
+}
 
 /** Current config; updated by every load/apply/save. */
 let current: ProxyConfig = DISABLED
@@ -211,6 +270,7 @@ function normalizeConfig(input: ProxyInput): ProxyConfig {
     ...input.username !== undefined && input.username !== '' ? { username: input.username.trim() } : {},
     ...input.password !== undefined && input.password !== '' && input.password !== null ? { password: input.password } : {},
     bypass,
+    providers: defaultProviderFlags(input.providers),
   }
 }
 
@@ -267,12 +327,20 @@ async function loadConfigFile(path: string): Promise<ProxyConfig> {
   const bypass = Array.isArray(record.bypass)
     ? record.bypass.filter((entry): entry is string => typeof entry === 'string')
     : []
+  const providers: Partial<Record<ProviderId, boolean>> = {}
+  if (typeof record.providers === 'object' && record.providers !== null && !Array.isArray(record.providers)) {
+    const raw = record.providers as Record<string, unknown>
+    for (const id of PROVIDER_IDS) {
+      if (typeof raw[id] === 'boolean') providers[id] = raw[id]
+    }
+  }
   return normalizeConfig({
     enabled,
     url,
     ...username === undefined ? {} : { username },
     ...password === undefined ? {} : { password },
     bypass,
+    providers,
   })
 }
 
@@ -330,6 +398,7 @@ export async function proxyGetConfig(): Promise<ProxyConfigView> {
     ...current.username === undefined ? {} : { username: current.username },
     passwordSet: current.password !== undefined && current.password !== '',
     bypass: [...current.bypass],
+    providers: defaultProviderFlags(current.providers),
     ...configError === undefined ? {} : { error: configError },
   }
 }
@@ -353,6 +422,7 @@ export async function proxySetConfig(input: ProxyInput): Promise<ProxyConfigView
     ...input.username === undefined ? {} : { username: input.username },
     ...password === undefined ? {} : { password },
     bypass: input.bypass ?? current.bypass,
+    providers: { ...defaultProviderFlags(current.providers), ...input.providers },
   })
   await persistConfig(next, proxyFilePath())
   await applyConfig(next)
@@ -379,7 +449,9 @@ export async function proxiedFetch(input: RequestInfo | URL, init: RequestInit =
     } catch {
       hostname = ''
     }
-    if (!matchesBypass(hostname, current.bypass)) dispatcher = agent
+    if (!matchesBypass(hostname, current.bypass) && providerUsesProxy(hostname, current)) {
+      dispatcher = agent
+    }
   }
   if (dispatcher === undefined) return fetch(input, init)
   const proxied = { ...init, dispatcher } as RequestInit

@@ -774,9 +774,9 @@ export function apply(ctx: Context, config: Config): void {
     poolHealth?.clear(provider, account)
     poolUsage?.invalidate(provider, account)
     poolAdapter?.invalidate()
-    // Pool membership follows the accounts: re-announce every route so the
-    // picker re-queries (the changed provider's own catalog may shift too).
-    for (const [route, handle] of handles) handle.replace([route])
+    // Re-announce only this provider. Replacing every route on every auth
+    // change makes the composer model picker refetch all catalogs and flicker.
+    handles.get(provider)?.replace([provider])
   }
   // Per-model default effort overrides: start the load so the adapters'
   // synchronous `defaultEffortOf` callbacks see the persisted state as soon

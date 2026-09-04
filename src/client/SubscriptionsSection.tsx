@@ -110,6 +110,7 @@ export interface ProxyConfigView {
   username?: string
   passwordSet: boolean
   bypass: string[]
+  providers: Record<SubscriptionProvider, boolean>
   error?: string
 }
 
@@ -595,6 +596,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [proxyPassword, setProxyPassword] = useState('')
   const [proxyClearPassword, setProxyClearPassword] = useState(false)
   const [proxyBypass, setProxyBypass] = useState('')
+  const [proxyProviders, setProxyProviders] = useState<Record<SubscriptionProvider, boolean>>({
+    codex: true, claude: true, grok: true, copilot: true,
+    agy: true, commandcode: true, codebuddy: true, zed: true,
+  })
   const [proxySaving, setProxySaving] = useState(false)
   const [proxyTesting, setProxyTesting] = useState(false)
   const [proxyMessage, setProxyMessage] = useState<{ tone: 'success' | 'error'; text: string } | undefined>(undefined)
@@ -1050,6 +1055,16 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     setProxyPassword('')
     setProxyClearPassword(false)
     setProxyBypass(proxy.bypass.join(', '))
+    setProxyProviders({
+      codex: proxy.providers.codex !== false,
+      claude: proxy.providers.claude !== false,
+      grok: proxy.providers.grok !== false,
+      copilot: proxy.providers.copilot !== false,
+      agy: proxy.providers.agy !== false,
+      commandcode: proxy.providers.commandcode !== false,
+      codebuddy: proxy.providers.codebuddy !== false,
+      zed: proxy.providers.zed !== false,
+    })
     setProxyMessage(undefined)
     setProxyTestResult(undefined)
     setProxyOpen(true)
@@ -1066,6 +1081,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
         username: proxyUsername,
         ...proxyClearPassword ? { password: null } : proxyPassword !== '' ? { password: proxyPassword } : {},
         bypass: proxyBypass.split(/[,\n]/).map(entry => entry.trim()).filter(entry => entry !== ''),
+        providers: proxyProviders,
       })
       setProxy(view)
       setProxyLoadError(undefined)
@@ -1076,7 +1092,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     } finally {
       setProxySaving(false)
     }
-  }, [rpc, proxyEnabled, proxyUrl, proxyUsername, proxyPassword, proxyClearPassword, proxyBypass, t])
+  }, [rpc, proxyEnabled, proxyUrl, proxyUsername, proxyPassword, proxyClearPassword, proxyBypass, proxyProviders, t])
 
   const testProxy = useCallback(async (): Promise<void> => {
     if (rpc === undefined || proxyTesting) return
@@ -1650,6 +1666,23 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 />
                 <span>{t('proxyClearPassword')}</span>
               </label>
+            </div>
+            <div style={styles.proxyField}>
+              <span style={styles.proxyLabel}>{t('proxyProviders')}</span>
+              <p style={styles.proxyHint}>{t('proxyProvidersHint')}</p>
+              {PROVIDERS.map(provider => (
+                <label key={provider.id} style={styles.proxyCheck}>
+                  <input
+                    type="checkbox"
+                    checked={proxyProviders[provider.id] !== false}
+                    disabled={!proxyEnabled}
+                    onChange={event => {
+                      setProxyProviders(prev => ({ ...prev, [provider.id]: event.target.checked }))
+                    }}
+                  />
+                  <span>{provider.name}</span>
+                </label>
+              ))}
             </div>
             <label style={styles.proxyField}>
               <span style={styles.proxyLabel}>{t('proxyBypass')}</span>
