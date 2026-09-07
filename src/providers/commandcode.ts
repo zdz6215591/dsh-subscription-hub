@@ -26,8 +26,8 @@ import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from 
 import { httpLlmError, idleWatchdog, mapFetchFailure } from './common.js'
 import type { FetchFn, ModelEntry, ProviderUsage } from './common.js'
 import type { PoolAdapter } from './pool.js'
-import { DEFAULT_RATE_LIMIT_WAIT, DEFAULT_RETRY, subscriptionRetryPolicy } from './rate-limit.js'
-import type { RateLimitWait } from './rate-limit.js'
+import { DEFAULT_RATE_LIMIT_WAIT, subscriptionRetryPolicy } from './rate-limit.js'
+import type { RateLimitWait, RetryDefaults } from './rate-limit.js'
 
 export const COMMANDCODE_PREEMPT_MS = 365 * 24 * 60 * 60 * 1000
 export const COMMANDCODE_API_BASE = 'https://api.commandcode.ai'
@@ -38,6 +38,19 @@ const LOGIN_ORIGINS = new Set(['https://commandcode.ai', 'https://staging.comman
 const DEFAULT_MAX_OUTPUT_TOKENS = 65_536
 /** Hard ceiling for `max_tokens` sent to `/alpha/generate`, matching the reference adapter. */
 const DEFAULT_GENERATE_MAX_TOKENS = 64_000
+
+/**
+ * Command Code's persistent retry shape (mirrors `Mars-Sea/dsh-commandcode-provider`):
+ * transient stream/server/rate-limit failures retry far longer than the generic
+ * pool default so a server-side blip or a limited window recovers in place instead
+ * of surfacing to the user as an interrupt that forces a manual "继续".
+ */
+const COMMANDCODE_RETRY: RetryDefaults = Object.freeze({
+  maxRetries: 500,
+  initialDelayMs: 500,
+  maxDelayMs: 900_000,
+  jitterRatio: 0.1,
+})
 
 export async function refreshCommandCode(session: CommandCodeSession): Promise<CommandCodeSession> {
   return session
@@ -133,6 +146,27 @@ function numberValue(value: unknown): number | undefined {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+function booleanValue(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined
+}
+
+/**
+ * Terminal stream-error markers from the official Command Code CLI (mirrors
+ * `Mars-Sea/dsh-commandcode-provider`): these always mean "retrying cannot
+ * succeed", so the adapter must not classify them as transient server errors
+ * that the retry policy would retry pointlessly.
+ */
+const TERMINAL_STREAM_ERROR_MARKERS = [
+  'premium_credits_exhausted',
+  'model_not_in_plan',
+  'insufficient credits',
+]
+
+function hasTerminalStreamMarker(message: string): boolean {
+  const lower = message.toLowerCase()
+  return TERMINAL_STREAM_ERROR_MARKERS.some((marker) => lower.includes(marker))
 }
 
 export const COMMANDCODE_PLANS: Readonly<Record<string, { name: string; monthlyCredits: number }>> = {
@@ -454,11 +488,31 @@ export async function* parseCommandCodeStream(
         return
       }
       case 'error': {
+        // Mirror the official Command Code CLI's stream-error classification
+        // (readStreamErrorEvent + isStreamErrorRetryable in command-code's
+        // cli.mjs), matching `Mars-Sea/dsh-commandcode-provider`: a stream
+        // error that is explicitly non-retryable, carries a terminal marker
+        // (quota/plan/credits), or reports a non-retryable HTTP status is a
+        // hard failure; anything else is a transient mid-stream drop that the
+        // harness's default retry policy should retry (SERVER is in the
+        // default retryable set, PROVIDER_STREAM_ERROR is not). Without this,
+        // a server-side blip that the official CLI silently recovers from
+        // fails the whole turn and forces the user to re-prompt manually.
         const err = isRecord(event.error) ? event.error : undefined
         const detail = err !== undefined
-          ? (stringValue(err.message) ?? JSON.stringify(err))
-          : (stringValue(event.message) ?? 'Stream error')
-        throw new LlmError(`Command Code stream error: ${detail}`, 'PROVIDER_STREAM_ERROR')
+          ? (stringValue(err.message) ?? stringValue(event.message) ?? JSON.stringify(err))
+          : (stringValue(event.message) ?? stringValue(event.delta) ?? 'Stream error')
+        const statusCode = err !== undefined ? numberValue(err.statusCode) : undefined
+        const isRetryable = err !== undefined ? booleanValue(err.isRetryable) : undefined
+        const retryableStatus = statusCode !== undefined && (statusCode === 429 || statusCode >= 500)
+        const terminal = hasTerminalStreamMarker(detail)
+        const retryable = isRetryable === true
+          || (statusCode !== undefined ? retryableStatus : (isRetryable !== false && !terminal))
+        const options = statusCode !== undefined ? { status: statusCode } : undefined
+        if (retryable) {
+          throw new LlmError(`Command Code stream error: ${detail}`, 'SERVER', options)
+        }
+        throw new LlmError(`Command Code stream error: ${detail}`, 'PROVIDER_STREAM_ERROR', options)
       }
       default: {
         const delta = stringValue(event.delta) ?? stringValue(event.text)
@@ -587,7 +641,7 @@ export class CommandCodeAdapter extends LlmAdapter {
   }
 
   override providerRetryPolicy(provider: string) {
-    return subscriptionRetryPolicy(DEFAULT_RETRY, this.options.rateLimit ?? DEFAULT_RATE_LIMIT_WAIT, `commandcode: "${provider}"`)
+    return subscriptionRetryPolicy(COMMANDCODE_RETRY, this.options.rateLimit ?? DEFAULT_RATE_LIMIT_WAIT, `commandcode: "${provider}"`)
   }
 
   clearAccountCatalog(account?: string): void {
