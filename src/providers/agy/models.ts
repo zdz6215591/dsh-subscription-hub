@@ -121,7 +121,7 @@ export function parseAgyQuotaUsage(dynamic: DiscoveredModels): ProviderUsage {
     })
   }
   const windows: UsageWindow[] = [...families.entries()].map(([scope, row]) => ({
-    kind: 'other' as const,
+    kind: 'session' as const,
     scope,
     usedPercent: Math.max(0, Math.min(100, Math.round((1 - row.remaining) * 100))),
     remaining: Math.round(row.remaining * 1000) / 10,

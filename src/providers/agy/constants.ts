@@ -90,20 +90,21 @@ export async function isAgyUnusableEndpoint(response: Response): Promise<boolean
  * Try each runtime endpoint in order, skipping unusable ones (429/403/network,
  * and 400 "API key is invalid" which means the wrong Code Assist host).
  * Returns the first other response (2xx or a real error like 401); when
- * every endpoint is unusable, returns the last skipped response so the caller's
- * classifier can still produce a meaningful error.
+ * every endpoint is unusable, returns the first skipped response (preferring
+ * the primary daily endpoint's real error rather than later sandbox/prod fake ones)
+ * so the caller's classifier can still produce a meaningful error.
  */
 export async function fetchAgyFirstOk(
   urlPath: string,
   init: RequestInit,
   fetchImpl: typeof fetch = proxiedFetch,
 ): Promise<Response> {
-  let lastSkipped: Response | null = null
+  let firstSkipped: Response | null = null
   for (const baseEndpoint of AGY_ENDPOINT_FALLBACKS) {
     try {
       const response = await fetchImpl(`${baseEndpoint}${urlPath}`, init)
       if (await isAgyUnusableEndpoint(response)) {
-        lastSkipped = response
+        firstSkipped ??= response
         continue
       }
       return response
@@ -111,7 +112,7 @@ export async function fetchAgyFirstOk(
       // network error — try the next endpoint
     }
   }
-  if (lastSkipped) return lastSkipped
+  if (firstSkipped) return firstSkipped
   throw new Error('all agy endpoints failed')
 }
 

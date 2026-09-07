@@ -26,10 +26,10 @@ import {
   ModelCatalogCache,
   oauthEndpointError,
 } from './common.js'
-import type { CatalogPersistence, DiscoveredModel, FetchFn, ModelEntry, ProviderUsage } from './common.js'
+import type { CatalogPersistence, DiscoveredModel, FetchFn, ModelEntry, ProviderUsage, UsageWindow } from './common.js'
 import type { PoolAdapter } from './pool.js'
-import { DEFAULT_RATE_LIMIT_WAIT, DEFAULT_RETRY, subscriptionRetryPolicy } from './rate-limit.js'
-import type { RateLimitWait } from './rate-limit.js'
+import { DEFAULT_RATE_LIMIT_WAIT, DEFAULT_RETRY, jsonBody, resetInstantFromValue, retryAfterInstant, subscriptionRetryPolicy } from './rate-limit.js'
+import type { RateLimitResetReader, RateLimitWait } from './rate-limit.js'
 import {
   AGY_CLIENT_ID,
   AGY_CLIENT_SECRET,
@@ -288,6 +288,110 @@ export function isAgyPermanentRefreshError(error: unknown): boolean {
   return error instanceof Error && /invalid_grant/i.test(error.message)
 }
 
+export const agyRateLimitReset: RateLimitResetReader = (response, body, now) => {
+  const parsed = jsonBody(body)
+  if (typeof parsed === 'object' && parsed !== null) {
+    const error = (parsed as { error?: { details?: Array<{ metadata?: { quotaResetTimeStamp?: string; quotaResetDelay?: string } }> } }).error
+    for (const detail of error?.details ?? []) {
+      const ts = detail.metadata?.quotaResetTimeStamp
+      if (typeof ts === 'string') {
+        const ms = resetInstantFromValue(ts, now)
+        if (ms !== undefined) return ms
+      }
+      const delay = detail.metadata?.quotaResetDelay
+      if (typeof delay === 'string') {
+        const ms = resetInstantFromValue(delay, now)
+        if (ms !== undefined) return ms
+      }
+    }
+  }
+  return retryAfterInstant(response, now)
+}
+
+interface AgyQuotaBucket {
+  bucketId?: string
+  displayName?: string
+  window?: string
+  resetTime?: string
+  remainingFraction?: number
+  description?: string
+}
+
+interface AgyQuotaGroup {
+  displayName?: string
+  description?: string
+  buckets?: AgyQuotaBucket[]
+}
+
+interface AgyQuotaSummaryPayload {
+  groups?: AgyQuotaGroup[]
+  description?: string
+  summaries?: Array<{ remainingFraction?: number; resetTime?: string; displayName?: string }>
+}
+
+/**
+ * Parse Code Assist quota groups (e.g. Gemini Models, Claude/GPT models)
+ * into UsageWindows covering both 5-hour rolling limits and weekly limits.
+ */
+export function parseAgyUserQuotaSummary(payload: unknown): UsageWindow[] {
+  if (typeof payload !== 'object' || payload === null) return []
+  const data = payload as AgyQuotaSummaryPayload
+  const windows: UsageWindow[] = []
+
+  if (Array.isArray(data.groups) && data.groups.length > 0) {
+    for (const group of data.groups) {
+      const scope = group.displayName && group.displayName.includes('Gemini')
+        ? 'Gemini'
+        : group.displayName && group.displayName.includes('Claude')
+          ? 'Claude / GPT'
+          : group.displayName ?? ''
+
+      // Keep 5-hour window first, then weekly window
+      const buckets = [...(group.buckets ?? [])].sort((a, b) => {
+        const orderA = a.window === 'weekly' ? 1 : 0
+        const orderB = b.window === 'weekly' ? 1 : 0
+        return orderA - orderB
+      })
+
+      for (const bucket of buckets) {
+        const remainingFraction = typeof bucket.remainingFraction === 'number' && Number.isFinite(bucket.remainingFraction)
+          ? bucket.remainingFraction
+          : 1
+        const kind: UsageWindow['kind'] = bucket.window === 'weekly' ? 'weekly' : 'session'
+        const resetsAt = typeof bucket.resetTime === 'string' ? Date.parse(bucket.resetTime) : undefined
+
+        windows.push({
+          kind,
+          scope,
+          usedPercent: Math.max(0, Math.min(100, Math.round((1 - remainingFraction) * 100))),
+          remaining: Math.round(remainingFraction * 1000) / 10,
+          limit: 100,
+          ...resetsAt !== undefined && Number.isFinite(resetsAt) ? { resetsAt } : {},
+        })
+      }
+    }
+  }
+
+  // Legacy summaries fallback
+  if (windows.length === 0 && Array.isArray(data.summaries)) {
+    for (const [index, row] of data.summaries.entries()) {
+      const remainingFraction = typeof row.remainingFraction === 'number' && Number.isFinite(row.remainingFraction)
+        ? row.remainingFraction
+        : 1
+      windows.push({
+        kind: index === 0 ? 'session' : 'weekly',
+        usedPercent: Math.max(0, Math.min(100, Math.round((1 - remainingFraction) * 100))),
+        remaining: Math.round(remainingFraction * 1000) / 10,
+        limit: 100,
+        ...typeof row.resetTime === 'string' ? { resetsAt: Date.parse(row.resetTime) } : {},
+        ...typeof row.displayName === 'string' ? { scope: row.displayName } : {},
+      })
+    }
+  }
+
+  return windows
+}
+
 export async function fetchAgyUsage(
   session: AgySession,
   fetchFn: FetchFn = proxiedFetch,
@@ -297,41 +401,37 @@ export async function fetchAgyUsage(
   if (ready.projectId !== undefined && ready.projectId !== session.projectId) {
     try { await saveAccountSession('agy', accountKeyOf('agy', ready), ready) } catch { /* cache is optional */ }
   }
+  const headers = {
+    ...attributionHeaders(),
+    ...agyBootstrapHeaders(ready.accessToken),
+  }
+  const body = JSON.stringify({
+    ...ready.projectId === undefined ? {} : { project: ready.projectId },
+  })
+  try {
+    const response = await fetchAgyFirstOk('/v1internal:retrieveUserQuotaSummary', {
+      method: 'POST',
+      headers,
+      body,
+      ...signal === undefined ? {} : { signal },
+    }, fetchFn)
+    if (response.ok) {
+      const payload: unknown = await response.json()
+      const windows = parseAgyUserQuotaSummary(payload)
+      if (windows.length > 0) {
+        const worst = Math.min(...windows.map(w => w.remaining ?? 100))
+        return { supported: true, windows, remaining: worst, limit: 100 }
+      }
+    }
+  } catch { /* fall through to fetchAvailableModels */ }
+
   try {
     const dynamic = await fetchAvailableModels(ready.accessToken, ready.projectId, fetchFn)
     const fromCatalog = parseAgyQuotaUsage(dynamic)
     if (fromCatalog.supported) return fromCatalog
-  } catch { /* fall through to the quota summary */ }
-  const headers = {
-    ...agyBootstrapHeaders(ready.accessToken),
-    ...attributionHeaders(),
-  }
-  const body = JSON.stringify({
-    metadata: { ideType: 'ANTIGRAVITY' },
-    ...ready.projectId === undefined ? {} : { project: ready.projectId },
-  })
-  const response = await fetchAgyFirstOk('/v1internal:retrieveUserQuotaSummary', {
-    method: 'POST',
-    headers,
-    body,
-    ...signal === undefined ? {} : { signal },
-  }, fetchFn)
-  if (!response.ok) {
-    if (response.status === 403 || response.status === 404) return { supported: true, windows: [] }
-    throw await oauthEndpointError(response, 'agy quota')
-  }
-  const payload = await response.json() as {
-    summaries?: Array<{ remainingFraction?: number; resetTime?: string; displayName?: string }>
-  }
-  const windows = (payload.summaries ?? []).map((row, index) => ({
-    kind: (index === 0 ? 'session' : 'weekly') as 'session' | 'weekly',
-    usedPercent: Math.max(0, Math.min(100, Math.round((1 - (row.remainingFraction ?? 1)) * 100))),
-    remaining: Math.round((row.remainingFraction ?? 1) * 1000) / 10,
-    limit: 100,
-    ...typeof row.resetTime === 'string' ? { resetsAt: Date.parse(row.resetTime) } : {},
-    ...typeof row.displayName === 'string' ? { scope: row.displayName } : {},
-  }))
-  return { supported: true, windows }
+  } catch { /* fall through */ }
+
+  return { supported: false }
 }
 
 export interface AgyAdapterOptions {
@@ -409,7 +509,11 @@ export class AgyAdapter extends LlmAdapter {
   }
 
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
-    return resolveAgyModel(provider, model)
+    const pool = this.options.pool?.()
+    if (pool !== undefined && await pool.owns(provider as ProviderId, model)) {
+      return pool.resolveModel(provider, model)
+    }
+    return this.resolveOwnModel(provider, model)
   }
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
@@ -485,8 +589,13 @@ export class AgyAdapter extends LlmAdapter {
     return this.streamCore(options, account)
   }
 
-  override stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    return this.streamCore(options)
+  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const pool = this.options.pool?.()
+    if (pool !== undefined && await pool.owns(options.provider as ProviderId, options.model)) {
+      yield* pool.stream(options)
+      return
+    }
+    yield* this.streamCore(options)
   }
 
   private async *streamCore(options: GenerateOptions, account?: string): AsyncIterable<StreamChunk> {
@@ -540,7 +649,12 @@ export class AgyAdapter extends LlmAdapter {
       } catch (error) {
         throw mapFetchFailure('agy', error, watchdog, options.signal)
       }
-      if (!response.ok) throw await httpLlmError(response, 'agy')
+      if (!response.ok) {
+        throw await httpLlmError(response, 'agy', {
+          rateLimitReset: agyRateLimitReset,
+          ...this.options.onWarn === undefined ? {} : { onWarn: this.options.onWarn },
+        })
+      }
       if (response.body === null) throw new LlmError('agy returned an empty stream', 'EMPTY_RESPONSE')
       for await (const chunk of parseAgySse(response.body, {
         signal: watchdog.signal,
