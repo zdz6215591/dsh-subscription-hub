@@ -9,11 +9,13 @@ import { join } from 'node:path'
 import { readFile } from 'node:fs/promises'
 import { attributionHeaders, LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
 import type {
+  ContentBlock,
   FinishReason,
   GenerateOptions,
   LlmModelInfo,
   LlmProviderInfo,
   LlmResolvedModelInfo,
+  Message,
   StreamChunk,
   TokenUsage,
 } from '@deepseek-ai/dsh-llm'
@@ -31,6 +33,8 @@ import type { RateLimitWait, RetryDefaults } from './rate-limit.js'
 
 export const COMMANDCODE_PREEMPT_MS = 365 * 24 * 60 * 60 * 1000
 export const COMMANDCODE_API_BASE = 'https://api.commandcode.ai'
+/** CLI version header — keep in lockstep with Mars-Sea/dsh-commandcode-provider. */
+export const COMMAND_CODE_CLI_VERSION = '1.47.0'
 const STUDIO_BASE = 'https://commandcode.ai'
 const LOGIN_ORIGINS = new Set(['https://commandcode.ai', 'https://staging.commandcode.ai', 'http://localhost:3000'])
 
@@ -167,6 +171,130 @@ const TERMINAL_STREAM_ERROR_MARKERS = [
 function hasTerminalStreamMarker(message: string): boolean {
   const lower = message.toLowerCase()
   return TERMINAL_STREAM_ERROR_MARKERS.some((marker) => lower.includes(marker))
+}
+
+function recordOrEmpty(value: unknown): Record<string, unknown> {
+  if (isRecord(value)) return value
+  if (typeof value === 'string') {
+    try {
+      const parsed: unknown = JSON.parse(value)
+      if (isRecord(parsed)) return parsed
+    } catch {
+      // Some providers stream incomplete JSON argument fragments.
+    }
+  }
+  return {}
+}
+
+/**
+ * Collect tool calls that have a paired tool result, plus each call's name.
+ * Matches Mars-Sea/dsh-commandcode-provider: only paired tool calls are
+ * replayed; unpaired ones would leave the wire conversation dangling.
+ */
+function pairedToolCalls(messages: readonly Message[]): {
+  ids: Set<string>
+  names: Map<string, string>
+} {
+  const callIds = new Set<string>()
+  const names = new Map<string, string>()
+  const resultIds = new Set<string>()
+  for (const message of messages) {
+    for (const block of message.content) {
+      if (message.role === 'assistant' && block.type === 'tool-call') {
+        callIds.add(block.id)
+        names.set(block.id, block.name)
+      }
+      if (block.type === 'tool-result') resultIds.add(block.toolCallId)
+    }
+  }
+  return { ids: new Set([...callIds].filter((id) => resultIds.has(id))), names }
+}
+
+function blockText(block: ContentBlock): string {
+  return block.type === 'text' || block.type === 'reasoning' ? block.text : ''
+}
+
+function toolResultText(block: Extract<ContentBlock, { type: 'tool-result' }>): string {
+  return block.content.map(blockText).filter(Boolean).join('\n')
+}
+
+/**
+ * Convert harness messages to the Command Code `/alpha/generate` wire shape.
+ *
+ * Critical difference from the previous naive text-only fold: tool calls and
+ * tool results MUST round-trip as structured parts. Folding everything to
+ * plain `role/content` text drops the tool loop, so the model re-reads the
+ * system prompt every turn, never sees prior tool output, and keeps
+ * "injecting context" with almost no real progress — matching the user report.
+ *
+ * Reasoning blocks are intentionally NOT replayed (matches the official CLI
+ * and the reference provider on the CLI transport).
+ */
+export function messagesToCommandCode(messages: readonly Message[]): unknown[] {
+  const out: unknown[] = []
+  const { ids: paired, names: toolNames } = pairedToolCalls(messages)
+
+  for (const message of messages) {
+    if (message.role === 'system') continue
+
+    if (message.role === 'user' && message.source.kind !== 'tool') {
+      const parts: unknown[] = []
+      for (const block of message.content) {
+        if (block.type === 'text') parts.push({ type: 'text', text: block.text })
+        // Images are not yet wired through the attachment service on this
+        // path; skip rather than invent a half-baked image part.
+      }
+      if (parts.length > 0) out.push({ role: 'user', content: parts })
+      continue
+    }
+
+    if (message.role === 'assistant') {
+      const parts: unknown[] = []
+      for (const block of message.content) {
+        if (block.type === 'text') {
+          parts.push({ type: 'text', text: block.text })
+        } else if (block.type === 'tool-call' && paired.has(block.id)) {
+          parts.push({
+            type: 'tool-call',
+            toolCallId: block.id,
+            toolName: block.name,
+            input: recordOrEmpty(block.arguments),
+          })
+        }
+      }
+      if (parts.length > 0) out.push({ role: 'assistant', content: parts })
+      continue
+    }
+
+    if (message.role === 'user' && message.source.kind === 'tool') {
+      const block = message.content[0]
+      if (!block || block.type !== 'tool-result' || !paired.has(block.toolCallId)) continue
+      out.push({
+        role: 'tool',
+        content: [
+          {
+            type: 'tool-result',
+            toolCallId: block.toolCallId,
+            toolName: toolNames.get(block.toolCallId) || 'unknown',
+            output: block.isError
+              ? { type: 'error-text', value: toolResultText(block) }
+              : { type: 'text', value: toolResultText(block) },
+          },
+        ],
+      })
+    }
+  }
+  return out
+}
+
+/** Working-dir → project slug header (mirrors the reference adapter). */
+function projectSlugFromPath(pathName: string): string {
+  const slug = pathName
+    .toLowerCase()
+    .replace(/^[a-z]:/i, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|(?<!-)-+$/g, '')
+  return slug || 'project'
 }
 
 export const COMMANDCODE_PLANS: Readonly<Record<string, { name: string; monthlyCredits: number }>> = {
@@ -747,15 +875,12 @@ export class CommandCodeAdapter extends LlmAdapter {
     const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
     try {
       const session = await this.options.tokens.session(account)
+      const workingDir = process.cwd()
       const systemText = [options.system ?? '', ...options.messages.filter(m => m.role === 'system')
-        .map(m => m.content.filter(b => b.type === 'text').map(b => b.type === 'text' ? b.text : '').join('\n'))]
+        .map(m => m.content.map(blockText).filter(Boolean).join('\n'))]
         .filter(Boolean).join('\n\n')
-      const messages = options.messages
-        .filter(m => m.role !== 'system')
-        .map(m => ({
-          role: m.role,
-          content: m.content.filter(b => b.type === 'text').map(b => b.type === 'text' ? b.text : '').join(''),
-        }))
+      // Structured wire messages (tool-call / tool-result parts), NOT a text fold.
+      const messages = messagesToCommandCode(options.messages)
       const live = this.catalogModel(options.model)
       const configured = this.options.models.find(entry => entry.id === options.model)
       const modelMax = live?.maxTokens ?? configured?.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
@@ -765,14 +890,29 @@ export class CommandCodeAdapter extends LlmAdapter {
         DEFAULT_GENERATE_MAX_TOKENS,
       )
       const body = {
-        config: { workingDir: process.cwd(), date: new Date().toISOString().slice(0, 10), environment: `${process.platform}`, structure: [], isGitRepo: false, currentBranch: '', mainBranch: '', gitStatus: '', recentCommits: [] },
+        config: {
+          workingDir,
+          date: new Date().toISOString().slice(0, 10),
+          environment: `${process.platform}-${process.arch}, Node.js ${process.version}`,
+          structure: [],
+          isGitRepo: false,
+          currentBranch: '',
+          mainBranch: '',
+          gitStatus: '',
+          recentCommits: [],
+        },
         memory: null,
         taste: null,
         skills: null,
         params: {
           model: options.model,
           messages,
-          tools: (options.tools ?? []).map(tool => ({ type: 'function', name: tool.name, description: tool.description, input_schema: tool.parameters })),
+          tools: (options.tools ?? []).map(tool => ({
+            type: 'function',
+            name: tool.name,
+            description: tool.description,
+            input_schema: tool.parameters,
+          })),
           system: systemText,
           max_tokens: maxTokens,
           temperature: options.temperature ?? 0.3,
@@ -790,8 +930,11 @@ export class CommandCodeAdapter extends LlmAdapter {
           headers: {
             'content-type': 'application/json',
             authorization: `Bearer ${session.accessToken}`,
-            'x-command-code-version': '1.37.0',
+            'x-command-code-version': COMMAND_CODE_CLI_VERSION,
             'x-cli-environment': 'production',
+            'x-project-slug': projectSlugFromPath(workingDir),
+            'x-taste-learning': 'true',
+            'x-co-flag': 'false',
             ...attributionHeaders(),
           },
           body: JSON.stringify(body),

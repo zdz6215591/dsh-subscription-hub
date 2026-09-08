@@ -8,7 +8,9 @@ import type { AgySession, CodeBuddySession, CommandCodeSession, ZedSession } fro
 import { filterVisible, setModelVisible, hiddenIds } from '../src/model-visibility.js'
 import { sessionFromZedPaste, parseZedModels, ndjsonToSse, parseZedUsage, buildZedProviderRequest } from '../src/providers/zed.js'
 import { parseMeterUsage } from '../src/providers/codebuddy-lib/usage.js'
-import { parseCommandCodeAuthFile, parseCommandCodeCredits, parseCommandCodeStream, sessionFromCommandCodePaste } from '../src/providers/commandcode.js'
+import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, Message } from '@deepseek-ai/dsh-llm'
+import { messagesToCommandCode, parseCommandCodeAuthFile, parseCommandCodeCredits, parseCommandCodeStream, sessionFromCommandCodePaste } from '../src/providers/commandcode.js'
 import { extractAgyProjectId } from '../src/providers/agy.js'
 import { parseAgyQuotaUsage } from '../src/providers/agy/models.js'
 import { isAgyUnusableEndpoint } from '../src/providers/agy/constants.js'
@@ -401,6 +403,60 @@ describe('commandcode stream', () => {
     assert.equal(chunks[1]?.type, 'text-delta')
     assert.equal(chunks.some(chunk => chunk.type === 'usage'), true)
     assert.equal(chunks.at(-1)?.type, 'finish')
+  })
+})
+
+describe('commandcode messagesToCommandCode', () => {
+  function msg(role: Message['role'], content: ContentBlock[], source: Message['source']): Message {
+    return { id: MessageId('m-' + Math.random().toString(36).slice(2)), role, content, source }
+  }
+
+  it('round-trips paired tool-call and tool-result as structured wire parts', () => {
+    const callId = ToolCallId('call_1')
+    const history: Message[] = [
+      msg('user', [{ type: 'text', text: 'list files' }], { kind: 'user' }),
+      msg('assistant', [
+        { type: 'text', text: 'checking' },
+        { type: 'reasoning', text: 'private thought' },
+        { type: 'tool-call', id: callId, name: 'pwsh', arguments: '{"command":"ls"}' },
+      ], { kind: 'model', provider: 'commandcode', model: 'x' }),
+      msg('user', [{
+        type: 'tool-result',
+        toolCallId: callId,
+        content: [{ type: 'text', text: 'a.txt\nb.txt' }],
+      }], { kind: 'tool', callId }),
+    ]
+    const wire = messagesToCommandCode(history)
+    assert.equal(wire.length, 3)
+    assert.deepEqual(wire[0], { role: 'user', content: [{ type: 'text', text: 'list files' }] })
+    const assistant = wire[1] as { role: string; content: Array<Record<string, unknown>> }
+    assert.equal(assistant.role, 'assistant')
+    assert.equal(assistant.content.length, 2, 'reasoning must not be replayed on the CLI transport')
+    assert.deepEqual(assistant.content[0], { type: 'text', text: 'checking' })
+    assert.deepEqual(assistant.content[1], {
+      type: 'tool-call',
+      toolCallId: callId,
+      toolName: 'pwsh',
+      input: { command: 'ls' },
+    })
+    assert.deepEqual(wire[2], {
+      role: 'tool',
+      content: [{
+        type: 'tool-result',
+        toolCallId: callId,
+        toolName: 'pwsh',
+        output: { type: 'text', value: 'a.txt\nb.txt' },
+      }],
+    })
+  })
+
+  it('drops unpaired tool calls so the wire conversation never dangles', () => {
+    const history: Message[] = [
+      msg('assistant', [
+        { type: 'tool-call', id: ToolCallId('orphan'), name: 'pwsh', arguments: '{}' },
+      ], { kind: 'model', provider: 'commandcode', model: 'x' }),
+    ]
+    assert.deepEqual(messagesToCommandCode(history), [])
   })
 })
 
