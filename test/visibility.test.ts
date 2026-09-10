@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { accountKeyOf } from '../src/auth/store.js'
 import type { AgySession, CodeBuddySession, CommandCodeSession, ZedSession } from '../src/auth/store.js'
 import { filterVisible, setModelVisible, hiddenIds } from '../src/model-visibility.js'
-import { sessionFromZedPaste, parseZedModels, ndjsonToSse, parseZedUsage, buildZedProviderRequest, stripSandboxArguments } from '../src/providers/zed.js'
+import { sessionFromZedPaste, parseZedModels, ndjsonToSse, parseZedUsage, buildZedProviderRequest, stripSandboxArguments, sandboxPolicyFacts, shouldStripSandboxArguments } from '../src/providers/zed.js'
 import { parseMeterUsage } from '../src/providers/codebuddy-lib/usage.js'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, Message } from '@deepseek-ai/dsh-llm'
@@ -187,8 +187,78 @@ describe('zed paste and catalog', () => {
     assert.equal(toolParams?.required?.includes('sandbox_permissions'), false)
   })
 
-  it('stripSandboxArguments removes speculative escalation keys from tool-call JSON', () => {
-    // The exact shape an eager model (gpt-5.6-luna) emits under full access.
+  it('reads the sandbox policy from the plugin snapshot message, not options.system', () => {
+    // Real shape captured from a failing gpt-5.6-luna session: DSH injects the
+    // runtime policy as a separate plugin-authored message and options.system
+    // contains NO policy text at all. A guard that string-matched
+    // options.system alone therefore never fired — the original bug.
+    const options = {
+      model: 'gpt-5.6-luna',
+      system: 'You are an AI agent powered by DeepSeek Harness.',
+      messages: [{
+        role: 'user',
+        id: 'm-1',
+        source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt', form: 'snapshot' },
+        content: [{
+          type: 'text',
+          text: 'Current runtime context.\n\nCurrent DSH file policy: danger-full-access. '
+            + 'Any available operation enforced by the DSH file sandbox may modify files under the session workspace.\n\n'
+            + 'Approval policy: never. Operations that require approval may ask through the configured answerers.',
+        }],
+      }],
+    } as unknown as Parameters<typeof sandboxPolicyFacts>[0]
+
+    const facts = sandboxPolicyFacts(options)
+    assert.equal(facts.mode, 'danger-full-access')
+    assert.equal(facts.approvalDisabled, true)
+    assert.equal(shouldStripSandboxArguments(facts), true)
+  })
+
+  it('still strips when the session is only workspace-write but approval is disabled', () => {
+    // The observed failing case: the model filled sandbox_permissions with
+    // "workspace-write" while the call already ran in workspace-write, so
+    // dsh-sandbox rejected it as non-widening 52 times in one session.
+    const options = {
+      model: 'gpt-5.6-luna',
+      system: '',
+      messages: [{
+        role: 'user',
+        id: 'm-2',
+        source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt', form: 'snapshot' },
+        content: [{
+          type: 'text',
+          text: 'Current DSH file policy: workspace-write. Approval prompts are disabled in this session.',
+        }],
+      }],
+    } as unknown as Parameters<typeof sandboxPolicyFacts>[0]
+
+    const facts = sandboxPolicyFacts(options)
+    assert.equal(facts.mode, 'workspace-write')
+    assert.equal(facts.approvalDisabled, true)
+    assert.equal(shouldStripSandboxArguments(facts), true, 'approval disabled forbids escalation outright')
+  })
+
+  it('keeps escalation arguments when approval is available and access is confined', () => {
+    // A legitimate upgrade path must survive: read-only + approvals on means
+    // the model may still ask to escalate, so the argument stays.
+    const options = {
+      model: 'gpt-5.6-luna',
+      system: 'plain system',
+      messages: [{
+        role: 'user',
+        id: 'm-3',
+        source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt', form: 'snapshot' },
+        content: [{ type: 'text', text: 'Current DSH file policy: read-only. Approval policy: ask.' }],
+      }],
+    } as unknown as Parameters<typeof sandboxPolicyFacts>[0]
+
+    const facts = sandboxPolicyFacts(options)
+    assert.equal(facts.mode, 'read-only')
+    assert.equal(facts.approvalDisabled, false)
+    assert.equal(shouldStripSandboxArguments(facts), false)
+  })
+
+  it('stripSandboxArguments removes speculative escalation keys from tool-call JSON', () => {    // The exact shape an eager model (gpt-5.6-luna) emits under full access.
     const args = JSON.stringify({
       command: 'Get-ChildItem',
       sandbox_permissions: 'danger-full-access',

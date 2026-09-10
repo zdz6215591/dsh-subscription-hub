@@ -828,16 +828,94 @@ export function parseZedModels(payload: unknown): ZedCatalogModel[] {
 }
 
 /**
+ * Sandbox policy an adapter can observe for one request.
+ *
+ * DSH injects the runtime policy as a SEPARATE plugin-authored message
+ * (`source.kind: 'plugin'`, from `@deepseek-ai/dsh-system-prompt`) — NOT in
+ * `options.system`. A guard that string-matches `options.system` alone never
+ * fires, which is exactly how `gpt-5.6-luna` kept emitting speculative
+ * `sandbox_permissions` and tripping dsh-sandbox's strictly-wider check with
+ * "sandbox escalation to \"workspace-write\" is not strictly wider than this
+ * call's current \"workspace-write\" mode".
+ */
+export interface SandboxPolicyFacts {
+  /** The session's effective sandbox mode, when the prompt disclosed one. */
+  mode?: string
+  /** Whether approval prompts are disabled (escalation is then forbidden outright). */
+  approvalDisabled: boolean
+}
+
+/** Every text surface a policy snapshot can arrive on. */
+function policyTexts(options: GenerateOptions): string[] {
+  const texts: string[] = []
+  if (typeof options.system === 'string' && options.system.length > 0) texts.push(options.system)
+  for (const message of options.messages ?? []) {
+    for (const block of message.content) {
+      if (block.type === 'text' && block.text.length > 0) texts.push(block.text)
+    }
+  }
+  return texts
+}
+
+/**
+ * Read the effective sandbox mode and approval state off the request.
+ *
+ * Sources, in order: the explicit `sandbox/mode` runtime snapshot sentence
+ * ("Current DSH file policy: <mode>."), then any bare mode mention. The
+ * approval fact matters on its own — dsh-tool-bash's own description states
+ * that with approval disabled a sandbox denial is final and the model "must
+ * not set `sandbox_permissions`", so the argument is dead weight there.
+ * @param options - the generation request.
+ * @returns the observable policy facts.
+ */
+export function sandboxPolicyFacts(options: GenerateOptions): SandboxPolicyFacts {
+  const texts = policyTexts(options)
+  let mode: string | undefined
+  let approvalDisabled = false
+  for (const text of texts) {
+    if (!approvalDisabled
+      && (text.includes('Approval prompts are disabled')
+        || text.includes('Approval policy: never')
+        || text.includes('approval prompts are disabled'))) {
+      approvalDisabled = true
+    }
+    if (mode === undefined) {
+      const snapshot = /DSH file policy:\s*([a-z-]+)/i.exec(text)
+      if (snapshot?.[1] !== undefined) mode = snapshot[1].toLowerCase()
+    }
+  }
+  return {
+    ...mode === undefined ? {} : { mode },
+    approvalDisabled,
+  }
+}
+
+/**
+ * Whether a speculative `sandbox_permissions` argument should be suppressed.
+ *
+ * True when approval is disabled (escalation can never succeed) or when the
+ * session already runs with unconfined access — the two cases where an eager
+ * model's auto-filled escalation argument is guaranteed to be rejected by
+ * dsh-sandbox's strictly-wider rule instead of doing anything useful.
+ * @param facts - the request's observable sandbox policy.
+ * @returns whether to strip the escalation arguments.
+ */
+export function shouldStripSandboxArguments(facts: SandboxPolicyFacts): boolean {
+  return facts.approvalDisabled || facts.mode === 'danger-full-access'
+}
+
+/**
  * Filter out speculative sandbox escalation parameters when the execution
  * environment already provides unconfined access or has approval disabled.
  * Eager models (like GPT-5 series) proactively populate sandbox_permissions
  * if advertised in the tool schema, which trips DSH's strictly-wider policy.
  */
-function sanitizeToolsForModel(tools: readonly ToolSchema[] | undefined, system?: string): readonly ToolSchema[] | undefined {
+function sanitizeToolsForModel(
+  tools: readonly ToolSchema[] | undefined,
+  strip: boolean,
+): readonly ToolSchema[] | undefined {
   if (tools === undefined || tools.length === 0) return tools
-  const isFullAccess = typeof system === 'string'
-    && (system.includes('danger-full-access') || system.includes('Approval prompts are disabled in this session'))
-  if (!isFullAccess) return tools
+  if (!strip) return tools
   return tools.map(tool => {
     if (!tool.parameters || typeof tool.parameters !== 'object') return tool
     const params = tool.parameters as Record<string, unknown>
@@ -897,7 +975,7 @@ export function buildZedProviderRequest(
 ): { provider: string; body: Record<string, unknown> } {
   const zedProvider = meta?.provider ?? (options.model.startsWith('claude') ? 'anthropic'
     : options.model.startsWith('gemini') ? 'google' : 'open_ai')
-  const cleanTools = sanitizeToolsForModel(options.tools, options.system)
+  const cleanTools = sanitizeToolsForModel(options.tools, shouldStripSandboxArguments(sandboxPolicyFacts(options)))
   if (zedProvider === 'anthropic') {
     return {
       provider: zedProvider,
@@ -1173,8 +1251,7 @@ export class ZedAdapter extends LlmAdapter {
       if (response.body === null) throw new LlmError('zed returned an empty stream', 'EMPTY_RESPONSE')
       const sse = ndjsonToSse(response.body)
       const pulse = (): void => { watchdog.pulse() }
-      const isFullAccess = typeof options.system === 'string'
-        && (options.system.includes('danger-full-access') || options.system.includes('Approval prompts are disabled in this session'))
+      const isFullAccess = shouldStripSandboxArguments(sandboxPolicyFacts(options))
       const stream = zedProvider === 'anthropic' ? streamAnthropic(sse, pulse)
         : zedProvider === 'open_ai' ? streamResponses(sse, pulse)
         : streamChatCompletions(sse, pulse)
