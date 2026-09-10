@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { accountKeyOf } from '../src/auth/store.js'
 import type { AgySession, CodeBuddySession, CommandCodeSession, ZedSession } from '../src/auth/store.js'
 import { filterVisible, setModelVisible, hiddenIds } from '../src/model-visibility.js'
-import { sessionFromZedPaste, parseZedModels, ndjsonToSse, parseZedUsage, buildZedProviderRequest } from '../src/providers/zed.js'
+import { sessionFromZedPaste, parseZedModels, ndjsonToSse, parseZedUsage, buildZedProviderRequest, stripSandboxArguments } from '../src/providers/zed.js'
 import { parseMeterUsage } from '../src/providers/codebuddy-lib/usage.js'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, Message } from '@deepseek-ai/dsh-llm'
@@ -185,6 +185,44 @@ describe('zed paste and catalog', () => {
     assert.equal('sandbox_permissions' in (toolParams?.properties ?? {}), false)
     assert.equal('justification' in (toolParams?.properties ?? {}), false)
     assert.equal(toolParams?.required?.includes('sandbox_permissions'), false)
+  })
+
+  it('stripSandboxArguments removes speculative escalation keys from tool-call JSON', () => {
+    // The exact shape an eager model (gpt-5.6-luna) emits under full access.
+    const args = JSON.stringify({
+      command: 'Get-ChildItem',
+      sandbox_permissions: 'danger-full-access',
+      justification: 'listing files needs full access',
+    })
+    const clean = stripSandboxArguments(args)
+    assert.deepEqual(JSON.parse(clean), { command: 'Get-ChildItem' })
+
+    // Nothing to strip → the very same string is returned (no needless rewrite).
+    const plain = JSON.stringify({ command: 'Get-ChildItem' })
+    assert.equal(stripSandboxArguments(plain), plain)
+    // Unparseable fragments are left alone for the harness to report.
+    assert.equal(stripSandboxArguments('{"command":'), '{"command":')
+  })
+
+  it('sanitizes the accumulated deltas the harness actually assembles', async () => {
+    // Split the wire JSON mid-key so the fragments are individually
+    // unparseable — exactly how a streaming tool call arrives.
+    const full = JSON.stringify({
+      command: 'ls',
+      sandbox_permissions: 'danger-full-access',
+      justification: 'why',
+    })
+    const cut = full.indexOf('sandbox_permissions') + 7
+    const fragments = [full.slice(0, cut), full.slice(cut)]
+    const accumulated = fragments.join('')
+    // Precondition: the concatenated stream really carries the escalation key,
+    // which is what dsh-tool-bash rejects under full access.
+    assert.equal(accumulated.includes('sandbox_permissions'), true)
+    assert.equal(fragments[0]?.length > 0 && fragments[1]?.length > 0, true, 'two non-empty fragments')
+    const sanitized = stripSandboxArguments(accumulated)
+    assert.equal(sanitized.includes('sandbox_permissions'), false)
+    assert.equal(sanitized.includes('justification'), false)
+    assert.deepEqual(JSON.parse(sanitized), { command: 'ls' })
   })
 
   it('maps /client/users/me plan + edit-prediction usage', () => {

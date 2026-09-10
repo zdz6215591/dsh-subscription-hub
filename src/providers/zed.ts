@@ -860,6 +860,35 @@ function sanitizeToolsForModel(tools: readonly ToolSchema[] | undefined, system?
   })
 }
 
+/**
+ * Drop speculative sandbox-escalation keys from one tool call's arguments.
+ *
+ * Used on the DELTA path (see the guard in `stream`): the harness assembles a
+ * tool call's arguments by concatenating deltas, so the escalation keys have to
+ * be gone from that concatenated JSON — sanitizing the closing `block-end`
+ * snapshot has no effect. Returns the original string unchanged when there is
+ * nothing to strip or the JSON does not parse (a malformed fragment is left for
+ * the harness to report, never silently rewritten).
+ * @param args - the concatenated JSON arguments of one tool call.
+ * @returns the sanitized JSON, or `args` itself when nothing was removed.
+ */
+export function stripSandboxArguments(args: string): string {
+  if (!args.includes('sandbox_permissions') && !args.includes('justification')) return args
+  try {
+    const parsed = JSON.parse(args) as Record<string, unknown>
+    if (typeof parsed !== 'object' || parsed === null) return args
+    if (!('sandbox_permissions' in parsed) && !('justification' in parsed)) return args
+    // Escalation is meaningless when the call already runs unconfined, and
+    // `justification` is only valid alongside `sandbox_permissions` — dropping
+    // one without the other would fail validation instead.
+    delete parsed.sandbox_permissions
+    delete parsed.justification
+    return JSON.stringify(parsed)
+  } catch {
+    return args
+  }
+}
+
 /** Build the native provider_request Zed wraps in POST /completions. */
 export function buildZedProviderRequest(
   options: GenerateOptions,
@@ -1149,19 +1178,60 @@ export class ZedAdapter extends LlmAdapter {
       const stream = zedProvider === 'anthropic' ? streamAnthropic(sse, pulse)
         : zedProvider === 'open_ai' ? streamResponses(sse, pulse)
         : streamChatCompletions(sse, pulse)
+      // Speculative-sandbox-argument guard. The harness rebuilds a tool call's
+      // arguments by CONCATENATING `tool-call-delta.argumentsDelta` (see
+      // dsh-llm's assembler: `partial.toolCallArguments += chunk.argumentsDelta`);
+      // the `arguments` string on the closing `block-end` is only a snapshot
+      // that the assembler DISCARDS. Rewriting that snapshot therefore cannot
+      // influence the call, so an eager model that populates
+      // `sandbox_permissions` would still reach dsh-tool-bash and fail with
+      // `sandbox escalation to "danger-full-access" is not strictly wider than
+      // this call's current "danger-full-access" mode`.
+      //
+      // Intercepting has to happen on the DELTA path, and a delta stream is
+      // fragmentary JSON that cannot be parsed incrementally. So when full
+      // access is already granted, buffer each tool call's deltas and emit the
+      // sanitized arguments in one piece at block-end.
+      const pendingToolArgs = new Map<number, string>()
       for await (const chunk of stream) {
-        if (isFullAccess && chunk.type === 'block-end' && chunk.block.type === 'tool-call') {
-          const args = chunk.block.arguments
-          if (typeof args === 'string' && (args.includes('sandbox_permissions') || args.includes('justification'))) {
-            try {
-              const parsed = JSON.parse(args) as Record<string, unknown>
-              if ('sandbox_permissions' in parsed || 'justification' in parsed) {
-                delete parsed.sandbox_permissions
-                delete parsed.justification
-                chunk.block.arguments = JSON.stringify(parsed)
-              }
-            } catch { /* leave as-is */ }
+        if (!isFullAccess) {
+          yield chunk
+          continue
+        }
+        if (chunk.type === 'tool-call-delta') {
+          pendingToolArgs.set(chunk.index, `${pendingToolArgs.get(chunk.index) ?? ''}${chunk.argumentsDelta}`)
+          // Held back until block-end so the fragments can be sanitized whole.
+          continue
+        }
+        if (chunk.type === 'block-end' && chunk.block.type === 'tool-call') {
+          const accumulated = pendingToolArgs.get(chunk.index)
+          pendingToolArgs.delete(chunk.index)
+          const args = accumulated ?? chunk.block.arguments
+          const clean = stripSandboxArguments(args)
+          if (clean !== args) {
+            chunk.block.arguments = clean
+            // Emit one consolidated delta carrying the sanitized JSON: the
+            // harness's accumulated string must equal block.arguments.
+            yield {
+              type: 'tool-call-delta',
+              index: chunk.index,
+              id: chunk.block.id,
+              name: chunk.block.name,
+              argumentsDelta: clean,
+            }
+          } else if (accumulated !== undefined && accumulated.length > 0) {
+            // Nothing to strip: replay the held deltas verbatim so the
+            // accumulated string still matches block.arguments.
+            yield {
+              type: 'tool-call-delta',
+              index: chunk.index,
+              id: chunk.block.id,
+              name: chunk.block.name,
+              argumentsDelta: accumulated,
+            }
           }
+          yield chunk
+          continue
         }
         yield chunk
       }
