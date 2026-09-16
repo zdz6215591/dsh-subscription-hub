@@ -91,7 +91,11 @@ function defaultAccountOf(status: ProviderStatus | undefined): AccountStatus | u
  * provider with a logged-in default account that supports usage. Returns
  * null when no data is available.
  */
-export function SubscriptionUsageBadge({ rpc }: SubscriptionUsageBadgeProps) {
+export function SubscriptionUsageBadge(_props: SubscriptionUsageBadgeProps) {
+  return null
+}
+
+function _unusedSubscriptionUsageBadge({ rpc }: SubscriptionUsageBadgeProps) {
   const [displays, setDisplays] = useState<ProviderUsageDisplay[]>([])
   const inflightRef = useRef(false)
   const mountedRef = useRef(true)

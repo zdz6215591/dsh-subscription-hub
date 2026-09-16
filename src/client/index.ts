@@ -131,16 +131,6 @@ export function apply(ctx: ClientContext): void {
     }),
   }, SpeedSelect))
 
-  // The subscription usage badge renders a compact readout in the composer's
-  // stats strip (conversation.composer.dock) — e.g. "Claude 5h 45% · Wk 23%".
-  // A fresh id means it appears beside the shipped StatsLine, never replacing it.
-  ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
-    name: 'conversation.composer.dock',
-    id: 'subscription-usage',
-    order: 10,
-    inject: (): SubscriptionUsageBadgeInjected => ({ rpc: connection.rpc }),
-  }, SubscriptionUsageBadge))
-
   // The /fast slash command offers the same Standard/Fast choice as a popup.
   // `available` is synchronous and sees only the session id, so the command
   // stays listed everywhere; `options` throws the friendly gate when the

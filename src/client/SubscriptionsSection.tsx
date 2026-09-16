@@ -313,6 +313,11 @@ const styles: Record<string, CSSProperties> = {
     background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)',
   },
   manual: { marginTop: 4, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-secondary)' },
+  manualBox: {
+    marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6,
+    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8,
+    padding: '8px 10px', background: 'var(--dsw-alias-bg-layer-1)',
+  },
   manualRow: { display: 'flex', gap: 8, marginTop: 6 },
   manualInput: {
     flex: 1, height: 32, boxSizing: 'border-box',
@@ -587,6 +592,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [usageDetailsOpen, setUsageDetailsOpen] = useState<Record<string, boolean>>({})
   const [zedUserId, setZedUserId] = useState('')
   const [zedToken, setZedToken] = useState('')
+  const [manualOpen, setManualOpen] = useState<Partial<Record<SubscriptionProvider, boolean>>>({})
   const mountedRef = useRef(true)
   const pollersRef = useRef(new Map<SubscriptionProvider, ReturnType<typeof setInterval>>())
   /** Accounts with a `usage` call in flight; guards the auto-fetch effect against re-entry. */
@@ -992,6 +998,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
           setZedUserId('')
           setZedToken('')
         }
+        setManualOpen(prev => ({ ...prev, [provider]: false }))
       }
     } catch (error) {
       setProviderError(provider, messageOf(error))
@@ -1380,9 +1387,18 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 </button>
               )}
               {!busy && id === 'zed' && (
-                <button type="button" style={styles.button} onClick={() => { void login(id, 'import') }}>
-                  {t('importZed')}
-                </button>
+                <>
+                  <button type="button" style={styles.button} onClick={() => { void login(id, 'import') }}>
+                    {t('importZed')}
+                  </button>
+                  <button
+                    type="button"
+                    style={styles.button}
+                    onClick={() => { setManualOpen(prev => ({ ...prev, [id]: !prev[id] })) }}
+                  >
+                    {manualOpen[id] ? t('cancel') : t('manualInput')}
+                  </button>
+                </>
               )}
               {!busy && id === 'commandcode' && (
                 <>
@@ -1391,6 +1407,13 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                   </button>
                   <button type="button" style={styles.button} onClick={() => { void login(id, 'oauth') }}>
                     {t('addAccountOAuth')}
+                  </button>
+                  <button
+                    type="button"
+                    style={styles.button}
+                    onClick={() => { setManualOpen(prev => ({ ...prev, [id]: !prev[id] })) }}
+                  >
+                    {manualOpen[id] ? t('cancel') : t('manualInput')}
                   </button>
                 </>
               )}
@@ -1404,7 +1427,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                   </button>
                 </>
               )}
-              {!busy && accounts.length > 0 && id !== 'claude' && id !== 'commandcode' && (
+              {!busy && accounts.length > 0 && id !== 'claude' && id !== 'commandcode' && id !== 'zed' && (
                 <button type="button" style={styles.button} onClick={() => { void login(id) }}>
                   {t('addAccount')}
                 </button>
@@ -1637,13 +1660,27 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 </div>
               </div>
             )}
-            {((busy && deviceCode === undefined) || ((id === 'zed' || id === 'commandcode') && !busy)) && (
-              <details style={styles.manual} open={(id === 'zed' || id === 'commandcode') && !busy ? true : undefined}>
-                <summary>
-                  {id === 'zed' ? t('zedPasteHint')
-                    : id === 'commandcode' ? t('commandCodePasteHint')
-                      : t('manualSummary')}
-                </summary>
+            {busy && deviceCode === undefined && (
+              <details style={styles.manual}>
+                <summary>{t('manualSummary')}</summary>
+                <div style={styles.manualRow}>
+                  <input
+                    style={styles.manualInput}
+                    value={manualDrafts[id]}
+                    placeholder={t('manualPlaceholder')}
+                    onChange={event => setManualDrafts(prev => ({ ...prev, [id]: event.target.value }))}
+                  />
+                  <button type="button" style={styles.button} onClick={() => { void submitManual(id) }}>
+                    {t('submit')}
+                  </button>
+                </div>
+              </details>
+            )}
+            {!busy && (id === 'zed' || id === 'commandcode') && manualOpen[id] && (
+              <div style={styles.manualBox}>
+                <p style={styles.statusLine}>
+                  {id === 'zed' ? t('zedPasteHint') : t('commandCodePasteHint')}
+                </p>
                 {id === 'zed' ? (
                   <>
                     <div style={styles.manualRow}>
@@ -1681,7 +1718,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                     </button>
                   </div>
                 )}
-              </details>
+              </div>
             )}
           </div>
         )
