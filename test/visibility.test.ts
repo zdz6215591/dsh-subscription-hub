@@ -10,7 +10,7 @@ import { sessionFromZedPaste, parseZedModels, ndjsonToSse, parseZedUsage, buildZ
 import { parseMeterUsage } from '../src/providers/codebuddy-lib/usage.js'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, Message } from '@deepseek-ai/dsh-llm'
-import { messagesToCommandCode, parseCommandCodeAuthFile, parseCommandCodeCredits, parseCommandCodeStream, sessionFromCommandCodePaste } from '../src/providers/commandcode.js'
+import { messagesToCommandCode, messagesToOpenAI, parseCommandCodeAuthFile, parseCommandCodeCredits, parseCommandCodeOpenAIStream, parseCommandCodeStream, sessionFromCommandCodePaste } from '../src/providers/commandcode.js'
 import { extractAgyProjectId } from '../src/providers/agy.js'
 import { parseAgyQuotaUsage } from '../src/providers/agy/models.js'
 import { isAgyUnusableEndpoint } from '../src/providers/agy/constants.js'
@@ -565,6 +565,74 @@ describe('commandcode messagesToCommandCode', () => {
       ], { kind: 'model', provider: 'commandcode', model: 'x' }),
     ]
     assert.deepEqual(messagesToCommandCode(history), [])
+  })
+})
+
+describe('commandcode OpenAI transport', () => {
+  function msg(role: Message['role'], content: ContentBlock[], source: Message['source']): Message {
+    return { id: MessageId('m-' + Math.random().toString(36).slice(2)), role, content, source }
+  }
+
+  it('replays reasoning_content on assistant turns (DeepSeek thinking contract)', () => {
+    // Without this the turn fails with:
+    //   The `reasoning_content` in the thinking mode must be passed back to the API.
+    const callId = ToolCallId('call_think')
+    const history: Message[] = [
+      msg('user', [{ type: 'text', text: 'list files' }], { kind: 'user' }),
+      msg('assistant', [
+        { type: 'reasoning', text: 'I should call pwsh to list files.' },
+        { type: 'tool-call', id: callId, name: 'pwsh', arguments: '{"command":"ls"}' },
+      ], { kind: 'model', provider: 'commandcode', model: 'deepseek/deepseek-v4-pro' }),
+      msg('user', [{
+        type: 'tool-result',
+        toolCallId: callId,
+        content: [{ type: 'text', text: 'a.txt' }],
+      }], { kind: 'tool', callId }),
+    ]
+
+    const wire = messagesToOpenAI(history) as Array<Record<string, unknown>>
+    assert.equal(wire.length, 3)
+    assert.deepEqual(wire[0], { role: 'user', content: 'list files' })
+    const assistant = wire[1]!
+    assert.equal(assistant.role, 'assistant')
+    assert.equal(assistant.reasoning_content, 'I should call pwsh to list files.')
+    assert.deepEqual(assistant.tool_calls, [{
+      id: callId,
+      type: 'function',
+      function: { name: 'pwsh', arguments: '{"command":"ls"}' },
+    }])
+    assert.deepEqual(wire[2], { role: 'tool', tool_call_id: callId, content: 'a.txt' })
+  })
+
+  it('parses reasoning + content deltas and fragmented tool calls', async () => {
+    const payload = [
+      'data: {"choices":[{"delta":{"reasoning_content":"think "}}]}',
+      'data: {"choices":[{"delta":{"content":"hi"}}]}',
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"pwsh","arguments":"{\\"a\\""}}]}}]}',
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":1}"}}]}}]}',
+      'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}',
+      'data: [DONE]',
+      '',
+    ].join('\n')
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(payload))
+        controller.close()
+      },
+    })
+    const chunks: any[] = []
+    for await (const chunk of parseCommandCodeOpenAIStream(stream)) chunks.push(chunk)
+
+    const reasoning = chunks.find(c => c.type === 'reasoning-delta')
+    assert.equal(reasoning?.text, 'think ')
+    const text = chunks.find(c => c.type === 'text-delta')
+    assert.equal(text?.text, 'hi')
+    const callEnd = chunks.find(c => c.type === 'block-end' && c.block?.type === 'tool-call')
+    assert.equal(callEnd?.block?.name, 'pwsh')
+    assert.equal(callEnd?.block?.arguments, '{"a":1}')
+    assert.equal(chunks.some(c => c.type === 'usage'), true)
+    assert.equal(chunks.at(-1)?.type, 'finish')
+    assert.deepEqual(chunks.at(-1)?.reason, { kind: 'tool-calls' })
   })
 })
 

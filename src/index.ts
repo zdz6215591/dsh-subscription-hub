@@ -71,6 +71,7 @@ import { DEFAULT_RATE_LIMIT_MAX_WAIT_MS, resolveRateLimitWait } from './provider
 import type { RateLimitConfig } from './providers/rate-limit.js'
 import { catalogStore } from './providers/catalog-store.js'
 import { PoolAdapter } from './providers/pool.js'
+import { registerWithAlias } from './tools/registration.js'
 import { buildAccountPools, poolKey } from './providers/pool-family.js'
 import type { PoolDefinition, PoolMemberRef } from './providers/pool-family.js'
 import { PoolHealthRegistry } from './providers/pool-health.js'
@@ -1330,11 +1331,11 @@ export function apply(ctx: Context, config: Config): void {
   // prefers the codex provider and falls back to grok.
   ctx.inject(['tools'], (toolsCtx) => {
     if (grokTokens !== undefined) {
-      toolsCtx.tools.register(createXSearchTool({ tokens: grokTokens }))
-      toolsCtx.tools.register(createVideoGenerateTool({ tokens: grokTokens }))
+      registerWithAlias(toolsCtx.tools, createXSearchTool({ tokens: grokTokens }))
+      registerWithAlias(toolsCtx.tools, createVideoGenerateTool({ tokens: grokTokens }))
     }
     if (codexTokens !== undefined || grokTokens !== undefined) {
-      toolsCtx.tools.register(createImageGenerateTool({
+      registerWithAlias(toolsCtx.tools, createImageGenerateTool({
         ...codexTokens === undefined ? {} : { codexTokens },
         ...grokTokens === undefined ? {} : { grokTokens },
         resolveAttachments,

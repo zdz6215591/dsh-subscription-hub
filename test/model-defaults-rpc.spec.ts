@@ -15,6 +15,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
 import type { RpcResult } from '../src/compat.js'
+import { createFakeConnection } from './fake-connection.js'
 
 const HOME = mkdtempSync(join(tmpdir(), 'model-defaults-rpc-test-'))
 
@@ -70,14 +71,8 @@ async function mount(options: { tier?: string } = {}): Promise<{ handler: Connec
     },
   }
   ctx.provide('llm', fakeLlm)
-  ctx.provide('connection', {
-    rpc: {
-      handle: (_channel: string, h: ConnectionRpcHandler) => {
-        handler = h
-        return () => Promise.resolve()
-      },
-    },
-  })
+  const connection = createFakeConnection()
+  ctx.provide('connection', connection.connection)
   ctx.plugin(plugin, {
     providers: ['codex'],
     ...options.tier === undefined ? {} : {
@@ -85,8 +80,8 @@ async function mount(options: { tier?: string } = {}): Promise<{ handler: Connec
     },
   })
   await new Promise(resolve => setTimeout(resolve, 50))
-  assert.ok(handler !== undefined, 'the /subscriptions-auth channel was registered')
-  return { handler, fake }
+  assert.ok(connection.registered(), 'the subscriptions-auth routes were registered')
+  return { handler: connection.handler, fake }
 }
 
 async function call(

@@ -18,11 +18,9 @@ import type { CSSProperties } from 'react'
 import type { ConnectionHandle, RpcResult } from '@deepseek-ai/dsh-api-remotes/client'
 import type { ToolCallBlock } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { IconSparkle16 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { callSubscriptionsAuth } from './subscriptions-rpc.js'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
-
-/** Logical RPC channel served by the node half of this plugin. */
-const SUBSCRIPTIONS_AUTH_CHANNEL = '/subscriptions-auth'
 
 /** Title prompt truncation budget (characters). */
 const PROMPT_MAX_LENGTH = 60
@@ -64,11 +62,7 @@ export type VideoGenerateToolviewProps =
  * @returns loader resolving a bare file name to the decoded bytes.
  */
 export function createVideoLoader(rpc: ConnectionHandle['rpc']): (name: string) => Promise<VideoBytes> {
-  return async (name) => {
-    const result: RpcResult<unknown> = await rpc.call(SUBSCRIPTIONS_AUTH_CHANNEL, 'video', { name })
-    if (!result.ok) throw new Error(result.error.message)
-    return result.value as VideoBytes
-  }
+  return name => callSubscriptionsAuth<VideoBytes>(rpc, 'video', { name })
 }
 
 /**

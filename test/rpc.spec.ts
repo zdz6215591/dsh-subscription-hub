@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
 import type { RpcResult } from '../src/compat.js'
+import { createFakeConnection } from './fake-connection.js'
 
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'router-rpc-test-'))
 
@@ -25,22 +26,15 @@ interface FakeStore {
 
 /** Mount the plugin with fake llm/connection (and optional attachments); return the RPC handler. */
 async function mount(attachments?: FakeStore): Promise<ConnectionRpcHandler> {
-  let handler: ConnectionRpcHandler | undefined
   const ctx = new Context()
   ctx.provide('llm', { registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) })
-  ctx.provide('connection', {
-    rpc: {
-      handle: (_channel: string, h: ConnectionRpcHandler) => {
-        handler = h
-        return () => Promise.resolve()
-      },
-    },
-  })
+  const fake = createFakeConnection()
+  ctx.provide('connection', fake.connection)
   if (attachments !== undefined) ctx.provide('attachments', attachments)
   ctx.plugin(plugin, { providers: ['codex'] })
   await new Promise(resolve => setTimeout(resolve, 50))
-  assert.ok(handler !== undefined, 'the /subscriptions-auth channel was registered')
-  return handler
+  assert.ok(fake.registered(), 'the subscriptions-auth routes were registered')
+  return fake.handler
 }
 
 const REF = { attachmentId: 'att-1', mediaType: 'image/png', bytes: 2, width: 1, height: 1 }

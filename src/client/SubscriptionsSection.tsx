@@ -17,9 +17,8 @@ import type { CSSProperties } from 'react'
 import type { ConnectionHandle, RpcResult } from '@deepseek-ai/dsh-api-remotes/client'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
-
-/** Logical RPC channel served by the node half of this plugin. */
-const SUBSCRIPTIONS_AUTH_CHANNEL = '/subscriptions-auth'
+import { callSubscriptionsAuth, SubscriptionsAuthError } from './subscriptions-rpc.js'
+export { callSubscriptionsAuth, SubscriptionsAuthError } from './subscriptions-rpc.js'
 
 /** Poll cadence while a provider login attempt is busy. */
 const POLL_INTERVAL_MS = 2000
@@ -164,29 +163,6 @@ const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [
   { id: 'codebuddy', name: 'CodeBuddy' },
   { id: 'zed', name: 'Zed Pro' },
 ]
-
-/** Business error returned by the `/subscriptions-auth` channel (error branch message). */
-class SubscriptionsAuthError extends Error {}
-
-/**
- * Call one `/subscriptions-auth` endpoint and unwrap the business result.
- * Shared by the settings section and the composer Speed toggle.
- * @param rpc - Connection RPC caller.
- * @param endpoint - channel-relative endpoint.
- * @param payload - channel-owned request payload.
- * @returns the success value, cast by the caller to the endpoint's shape.
- */
-export async function callSubscriptionsAuth<T>(rpc: ConnectionHandle['rpc'], endpoint: string, payload: unknown): Promise<T> {
-  let result: RpcResult<unknown>
-  try {
-    result = await rpc.call(SUBSCRIPTIONS_AUTH_CHANNEL, endpoint, payload)
-  } catch (error) {
-    // The transport rejected rather than answering; surface the same way.
-    throw new SubscriptionsAuthError(error instanceof Error ? error.message : String(error))
-  }
-  if (!result.ok) throw new SubscriptionsAuthError(result.error.message)
-  return result.value as T
-}
 
 /** Human text of an action failure, SubscriptionsAuthError or not. */
 function messageOf(error: unknown): string {

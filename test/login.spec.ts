@@ -20,6 +20,7 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
 import type { RpcResult } from '../src/compat.js'
+import { createFakeConnection } from './fake-connection.js'
 
 import * as plugin from '../src/index.js'
 import { SubscriptionsAuthController } from '../src/index.js'
@@ -480,21 +481,14 @@ test('claude: an import and a logout fired together settle in call order', async
 
 /** Mount the plugin with a fake llm/connection host; return the RPC handler. */
 async function mountPlugin(): Promise<ConnectionRpcHandler> {
-  let handler: ConnectionRpcHandler | undefined
   const ctx = new Context()
   ctx.provide('llm', { registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) })
-  ctx.provide('connection', {
-    rpc: {
-      handle: (_channel: string, h: ConnectionRpcHandler) => {
-        handler = h
-        return () => Promise.resolve()
-      },
-    },
-  })
+  const fake = createFakeConnection()
+  ctx.provide('connection', fake.connection)
   ctx.plugin(plugin, { providers: ['codex'] })
   await new Promise(resolve => setTimeout(resolve, 50))
-  assert.ok(handler !== undefined, 'the /subscriptions-auth channel was registered')
-  return handler
+  assert.ok(fake.registered(), 'the subscriptions-auth routes were registered')
+  return fake.handler
 }
 
 function signal(): AbortSignal {

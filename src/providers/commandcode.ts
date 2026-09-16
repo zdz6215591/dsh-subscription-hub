@@ -173,6 +173,29 @@ function hasTerminalStreamMarker(message: string): boolean {
   return TERMINAL_STREAM_ERROR_MARKERS.some((marker) => lower.includes(marker))
 }
 
+/**
+ * True when a Provider API rejection is Command Code's Go-plan gate
+ * (`upgrade_required`) — the one rejection that should retry the same request
+ * through the CLI /alpha/generate transport. Other 4xx/5xx must surface as
+ * ordinary errors so real account/model problems are not masked.
+ * @param response - the failed response (its body is consumed).
+ * @returns whether to fall back to the CLI transport.
+ */
+async function isProviderUpgradeRequired(response: Response): Promise<boolean> {
+  if (response.status !== 403) return false
+  let text = ''
+  try {
+    text = (await response.clone().text()).toLowerCase()
+  } catch {
+    return false
+  }
+  if (text.includes('upgrade_required')) return true
+  if (text.includes('go plan') && text.includes('api access')) return true
+  if (text.includes('only plan without api access')) return true
+  if (text.includes('upgrade to goat or higher')) return true
+  return false
+}
+
 function recordOrEmpty(value: unknown): Record<string, unknown> {
   if (isRecord(value)) return value
   if (typeof value === 'string') {
@@ -210,6 +233,25 @@ function pairedToolCalls(messages: readonly Message[]): {
   return { ids: new Set([...callIds].filter((id) => resultIds.has(id))), names }
 }
 
+function isToolResultMessage(message: Message): boolean {
+  if (message.role !== 'user') return false
+  const kind: string | undefined = message.source?.kind
+  if (kind !== undefined) return kind === 'tool'
+  return message.content?.[0]?.type === 'tool-result'
+}
+
+function toolParametersSchema(parameters: unknown): Record<string, unknown> {
+  if (!isRecord(parameters)) return { type: 'object', properties: {}, additionalProperties: true }
+  if (parameters.type === 'object') return parameters
+  if (Array.isArray(parameters.type) && parameters.type.includes('object')) {
+    return { ...parameters, type: 'object' }
+  }
+  if (parameters.type === undefined || parameters.type === null) {
+    if (isRecord(parameters.properties)) return { ...parameters, type: 'object' }
+  }
+  return { type: 'object', properties: {}, additionalProperties: true }
+}
+
 function blockText(block: ContentBlock): string {
   return block.type === 'text' || block.type === 'reasoning' ? block.text : ''
 }
@@ -227,8 +269,8 @@ function toolResultText(block: Extract<ContentBlock, { type: 'tool-result' }>): 
  * system prompt every turn, never sees prior tool output, and keeps
  * "injecting context" with almost no real progress — matching the user report.
  *
- * Reasoning blocks are intentionally NOT replayed (matches the official CLI
- * and the reference provider on the CLI transport).
+ * Reasoning blocks are intentionally NOT replayed on the CLI transport
+ * (they are replayed via messagesToOpenAI on the Provider API transport).
  */
 export function messagesToCommandCode(messages: readonly Message[]): unknown[] {
   const out: unknown[] = []
@@ -237,7 +279,7 @@ export function messagesToCommandCode(messages: readonly Message[]): unknown[] {
   for (const message of messages) {
     if (message.role === 'system') continue
 
-    if (message.role === 'user' && message.source.kind !== 'tool') {
+    if (message.role === 'user' && !isToolResultMessage(message)) {
       const parts: unknown[] = []
       for (const block of message.content) {
         if (block.type === 'text') parts.push({ type: 'text', text: block.text })
@@ -266,7 +308,7 @@ export function messagesToCommandCode(messages: readonly Message[]): unknown[] {
       continue
     }
 
-    if (message.role === 'user' && message.source.kind === 'tool') {
+    if (isToolResultMessage(message)) {
       const block = message.content[0]
       if (!block || block.type !== 'tool-result' || !paired.has(block.toolCallId)) continue
       out.push({
@@ -295,6 +337,249 @@ function projectSlugFromPath(pathName: string): string {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|(?<!-)-+$/g, '')
   return slug || 'project'
+}
+
+/**
+ * Convert harness messages to the Provider API (`/provider/v1/chat/completions`)
+ * OpenAI Chat Completions shape.
+ *
+ * DeepSeek's thinking-mode contract requires historical `reasoning_content` to
+ * be passed back whenever tools are in play — omitting it fails the turn with
+ * "The `reasoning_content` in the thinking mode must be passed back to the
+ * API." The CLI transport carries no such field, so thinking models must ride
+ * this transport instead.
+ */
+export function messagesToOpenAI(messages: readonly Message[]): unknown[] {
+  const out: unknown[] = []
+  const { ids: paired } = pairedToolCalls(messages)
+
+  for (const message of messages) {
+    if (message.role === 'system') continue
+
+    if (message.role === 'user' && !isToolResultMessage(message)) {
+      const text = message.content.map(blockText).filter(Boolean).join('\n')
+      if (text.length > 0) out.push({ role: 'user', content: text })
+      continue
+    }
+
+    if (message.role === 'assistant') {
+      const text = message.content
+        .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
+        .map(block => block.text)
+        .join('')
+      const reasoning = message.content
+        .filter((block): block is Extract<ContentBlock, { type: 'reasoning' }> => block.type === 'reasoning')
+        .map(block => block.text)
+        .join('')
+      const toolCalls = message.content
+        .filter((block): block is Extract<ContentBlock, { type: 'tool-call' }> =>
+          block.type === 'tool-call' && paired.has(block.id))
+        .map(block => ({
+          id: block.id,
+          type: 'function' as const,
+          function: { name: block.name, arguments: block.arguments },
+        }))
+
+      if (text === '' && reasoning === '' && toolCalls.length === 0) continue
+      const assistant: Record<string, unknown> = {
+        role: 'assistant',
+        content: text === '' ? null : text,
+      }
+      // The reason this transport exists for DeepSeek: replay private reasoning
+      // so the model can continue its chain of thought across tool calls.
+      if (reasoning !== '') assistant.reasoning_content = reasoning
+      if (toolCalls.length > 0) assistant.tool_calls = toolCalls
+      out.push(assistant)
+      continue
+    }
+
+    if (isToolResultMessage(message)) {
+      const block = message.content[0]
+      if (!block || block.type !== 'tool-result' || !paired.has(block.toolCallId)) continue
+      out.push({
+        role: 'tool',
+        tool_call_id: block.toolCallId,
+        content: toolResultText(block),
+      })
+    }
+  }
+  return out
+}
+
+/** Map an OpenAI `finish_reason` onto the harness's finish kinds. */
+export function mapOpenAIFinishReason(reason: unknown): FinishReason {
+  if (reason === 'tool_calls' || reason === 'tool-calls') return { kind: 'tool-calls' }
+  if (reason === 'length' || reason === 'max_tokens' || reason === 'max-tokens'
+    || reason === 'max_output_tokens') {
+    return { kind: 'max-tokens' }
+  }
+  return { kind: 'stop' }
+}
+
+/** Map an OpenAI usage payload onto the harness's disjoint token counts. */
+function mapOpenAIUsage(usage: unknown): TokenUsage {
+  const source = isRecord(usage) ? usage : {}
+  const promptTokens = numberValue(source.prompt_tokens) ?? 0
+  const outputTokens = numberValue(source.completion_tokens) ?? 0
+  const details = isRecord(source.prompt_tokens_details) ? source.prompt_tokens_details : undefined
+  const completionDetails = isRecord(source.completion_tokens_details)
+    ? source.completion_tokens_details
+    : undefined
+  const cached = numberValue(details?.cached_tokens) ?? 0
+  const out: TokenUsage = {
+    inputTokens: Math.max(0, promptTokens - cached),
+    outputTokens,
+  }
+  if (cached > 0) out.cacheReadTokens = cached
+  const reasoningTokens = numberValue(completionDetails?.reasoning_tokens)
+  if (reasoningTokens !== undefined) out.reasoningTokens = reasoningTokens
+  return out
+}
+
+/**
+ * Parse a Provider API SSE stream (`data: {...}` chunks) into harness chunks.
+ *
+ * Mirrors the reference adapter: reasoning arrives as `delta.reasoning` or
+ * `delta.reasoning_content`, text as `delta.content`, and tool calls as
+ * fragmented `delta.tool_calls` entries keyed by `index`.
+ */
+export async function* parseCommandCodeOpenAIStream(
+  body: ReadableStream<Uint8Array>,
+  onActivity?: () => void,
+): AsyncGenerator<StreamChunk> {
+  const reader = body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let nextIndex = 0
+  let textIndex = -1
+  let textContent = ''
+  let reasoningIndex = -1
+  let reasoningContent = ''
+  let finished = false
+
+  const closeText = function* (): Generator<StreamChunk> {
+    if (textIndex < 0) return
+    yield { type: 'block-end', index: textIndex, block: { type: 'text', text: textContent } }
+    textIndex = -1
+    textContent = ''
+  }
+  const closeReasoning = function* (): Generator<StreamChunk> {
+    if (reasoningIndex < 0) return
+    yield { type: 'block-end', index: reasoningIndex, block: { type: 'reasoning', text: reasoningContent } }
+    reasoningIndex = -1
+    reasoningContent = ''
+  }
+
+  // Fragmented tool calls accumulate here until the finish chunk.
+  const pendingCalls: Array<{ index: number; id?: string; name: string; args: string }> = []
+  const emitToolCalls = function* (): Generator<StreamChunk> {
+    for (const call of pendingCalls) {
+      const id = call.id ?? randomUUID()
+      const args = call.args === '' ? '{}' : call.args
+      const index = nextIndex++
+      yield { type: 'block-start', index, blockType: 'tool-call' }
+      yield { type: 'tool-call-delta', index, id: ToolCallId(id), name: call.name, argumentsDelta: args }
+      yield {
+        type: 'block-end',
+        index,
+        block: { type: 'tool-call', id: ToolCallId(id), name: call.name, arguments: args },
+      }
+    }
+    pendingCalls.length = 0
+  }
+
+  const handle = function* (event: Record<string, unknown>): Generator<StreamChunk> {
+    const choices = event.choices
+    if (!Array.isArray(choices) || choices.length === 0) {
+      // Some servers send a standalone usage chunk before [DONE].
+      if (event.usage !== undefined) yield { type: 'usage', usage: mapOpenAIUsage(event.usage) }
+      return
+    }
+    const choice = isRecord(choices[0]) ? choices[0] : {}
+    const delta = isRecord(choice.delta) ? choice.delta : {}
+
+    const reasoningDelta = stringValue(delta.reasoning) ?? stringValue(delta.reasoning_content) ?? ''
+    if (reasoningDelta !== '') {
+      yield* closeText()
+      if (reasoningIndex < 0) {
+        reasoningIndex = nextIndex++
+        yield { type: 'block-start', index: reasoningIndex, blockType: 'reasoning' }
+      }
+      reasoningContent += reasoningDelta
+      yield { type: 'reasoning-delta', index: reasoningIndex, text: reasoningDelta }
+    }
+
+    const contentDelta = stringValue(delta.content) ?? ''
+    if (contentDelta !== '') {
+      yield* closeReasoning()
+      if (textIndex < 0) {
+        textIndex = nextIndex++
+        yield { type: 'block-start', index: textIndex, blockType: 'text' }
+      }
+      textContent += contentDelta
+      yield { type: 'text-delta', index: textIndex, text: contentDelta }
+    }
+
+    if (Array.isArray(delta.tool_calls)) {
+      for (const rawCall of delta.tool_calls) {
+        if (!isRecord(rawCall)) continue
+        const callIndex = numberValue(rawCall.index) ?? 0
+        const fn = isRecord(rawCall.function) ? rawCall.function : undefined
+        const id = stringValue(rawCall.id)
+        const name = fn === undefined ? undefined : stringValue(fn.name)
+        const argDelta = fn === undefined
+          ? undefined
+          : (stringValue(fn.arguments) ?? (fn.arguments === undefined ? '' : JSON.stringify(fn.arguments)))
+        let existing = pendingCalls.find(call => call.index === callIndex)
+        if (existing === undefined) {
+          existing = { index: callIndex, name: name ?? '', args: argDelta ?? '' }
+          if (id !== undefined) existing.id = id
+          pendingCalls.push(existing)
+        } else {
+          if (id !== undefined && existing.id === undefined) existing.id = id
+          if (name !== undefined && existing.name === '') existing.name = name
+          if (argDelta !== undefined) existing.args += argDelta
+        }
+      }
+    }
+
+    if (choice.finish_reason !== undefined && choice.finish_reason !== null) {
+      yield* closeText()
+      yield* closeReasoning()
+      yield* emitToolCalls()
+      if (event.usage !== undefined) yield { type: 'usage', usage: mapOpenAIUsage(event.usage) }
+      yield { type: 'finish', reason: mapOpenAIFinishReason(choice.finish_reason) }
+      finished = true
+    }
+  }
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      onActivity?.()
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        const payload = line.startsWith('data:') ? line.slice(5).trim() : line.trim()
+        if (payload.length === 0 || payload === '[DONE]') continue
+        let event: unknown
+        try { event = JSON.parse(payload) } catch { continue }
+        if (!isRecord(event)) continue
+        yield* handle(event)
+        if (finished) return
+      }
+    }
+    if (!finished) {
+      yield* closeText()
+      yield* closeReasoning()
+      yield* emitToolCalls()
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+  } finally {
+    reader.releaseLock()
+  }
 }
 
 export const COMMANDCODE_PLANS: Readonly<Record<string, { name: string; monthlyCredits: number }>> = {
@@ -879,8 +1164,6 @@ export class CommandCodeAdapter extends LlmAdapter {
       const systemText = [options.system ?? '', ...options.messages.filter(m => m.role === 'system')
         .map(m => m.content.map(blockText).filter(Boolean).join('\n'))]
         .filter(Boolean).join('\n\n')
-      // Structured wire messages (tool-call / tool-result parts), NOT a text fold.
-      const messages = messagesToCommandCode(options.messages)
       const live = this.catalogModel(options.model)
       const configured = this.options.models.find(entry => entry.id === options.model)
       const modelMax = live?.maxTokens ?? configured?.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
@@ -889,7 +1172,12 @@ export class CommandCodeAdapter extends LlmAdapter {
         modelMax,
         DEFAULT_GENERATE_MAX_TOKENS,
       )
-      const body = {
+      const effort = options.reasoningEffort !== undefined && options.reasoningEffort !== 'off'
+        ? options.reasoningEffort
+        : undefined
+
+      // CLI transport (`/alpha/generate`) — the Go plan's only surface.
+      const cliBody = {
         config: {
           workingDir,
           date: new Date().toISOString().slice(0, 10),
@@ -906,46 +1194,86 @@ export class CommandCodeAdapter extends LlmAdapter {
         skills: null,
         params: {
           model: options.model,
-          messages,
+          messages: messagesToCommandCode(options.messages),
           tools: (options.tools ?? []).map(tool => ({
             type: 'function',
             name: tool.name,
             description: tool.description,
-            input_schema: tool.parameters,
+            input_schema: toolParametersSchema(tool.parameters),
           })),
           system: systemText,
           max_tokens: maxTokens,
           temperature: options.temperature ?? 0.3,
           stream: true,
-          ...options.reasoningEffort !== undefined && options.reasoningEffort !== 'off'
-            ? { reasoning_effort: options.reasoningEffort }
-            : {},
+          ...effort === undefined ? {} : { reasoning_effort: effort },
         },
         threadId: randomUUID(),
       }
+      // Provider API transport — the one that can replay `reasoning_content`.
+      const openAiTools = (options.tools ?? []).map(tool => ({
+        type: 'function',
+        function: {
+          name: tool.name,
+          description: tool.description,
+          parameters: toolParametersSchema(tool.parameters),
+        },
+      }))
+      const openAiBody = {
+        model: options.model,
+        messages: [
+          ...systemText.length > 0 ? [{ role: 'system', content: systemText }] : [],
+          ...messagesToOpenAI(options.messages),
+        ],
+        ...openAiTools.length > 0 ? { tools: openAiTools } : {},
+        max_tokens: maxTokens,
+        temperature: options.temperature ?? 0.3,
+        stream: true,
+        ...effort === undefined ? {} : { reasoning_effort: effort },
+      }
+
+      const headers = {
+        'content-type': 'application/json',
+        authorization: `Bearer ${session.accessToken}`,
+        'x-command-code-version': COMMAND_CODE_CLI_VERSION,
+        'x-cli-environment': 'production',
+        'x-project-slug': projectSlugFromPath(workingDir),
+        'x-taste-learning': 'true',
+        'x-co-flag': 'false',
+        ...attributionHeaders(),
+      }
+
       let response: Response
+      let usedProviderApi = true
       try {
-        response = await proxiedFetch(`${COMMANDCODE_API_BASE}/alpha/generate`, {
+        // DeepSeek thinking models REQUIRE reasoning replay, which only the
+        // Provider API performs, so it leads. A Go-plan account without API
+        // access answers 403 `upgrade_required`, and only then do we fall back
+        // to the CLI transport (whose message shape is what that plan serves).
+        response = await proxiedFetch(`${COMMANDCODE_API_BASE}/provider/v1/chat/completions`, {
           method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            authorization: `Bearer ${session.accessToken}`,
-            'x-command-code-version': COMMAND_CODE_CLI_VERSION,
-            'x-cli-environment': 'production',
-            'x-project-slug': projectSlugFromPath(workingDir),
-            'x-taste-learning': 'true',
-            'x-co-flag': 'false',
-            ...attributionHeaders(),
-          },
-          body: JSON.stringify(body),
+          headers: { ...headers, accept: 'text/event-stream' },
+          body: JSON.stringify(openAiBody),
           signal: watchdog.signal,
         })
+        if (!response.ok && await isProviderUpgradeRequired(response)) {
+          usedProviderApi = false
+          response = await proxiedFetch(`${COMMANDCODE_API_BASE}/alpha/generate`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(cliBody),
+            signal: watchdog.signal,
+          })
+        }
       } catch (error) {
         throw mapFetchFailure('commandcode', error, watchdog, options.signal)
       }
       if (!response.ok) throw await httpLlmError(response, 'commandcode')
       if (response.body === null) throw new LlmError('commandcode returned an empty stream', 'EMPTY_RESPONSE')
-      yield* parseCommandCodeStream(response.body, () => watchdog.pulse())
+      if (usedProviderApi) {
+        yield* parseCommandCodeOpenAIStream(response.body, () => watchdog.pulse())
+      } else {
+        yield* parseCommandCodeStream(response.body, () => watchdog.pulse())
+      }
     } finally {
       watchdog.stop()
     }

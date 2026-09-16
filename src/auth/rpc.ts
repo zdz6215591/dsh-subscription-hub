@@ -15,7 +15,28 @@ import type { ProviderUsage } from '../providers/common.js'
 import type { ProxyConfigView, ProxyDraft, ProxyInput, ProxyTestResult } from '../http.js'
 import type { PoolModeController, PoolModeInput } from '../providers/pool-mode.js'
 
-/** The RPC channel this plugin registers on the host connection. */
+/**
+ * Endpoint-name prefix under the shared `/api` channel: endpoint `status`
+ * is served at `/api/subscriptions-auth.status`. The browser half calls
+ * `rpc.call('/api', 'subscriptions-auth.status', payload)`.
+ */
+export const SUBSCRIPTIONS_AUTH_PREFIX = 'subscriptions-auth.'
+
+/**
+ * Every endpoint {@link dispatch} answers; each gets one exact Fetch route.
+ * Kept in one place so the route table and the switch cannot drift apart.
+ */
+export const SUBSCRIPTIONS_AUTH_ENDPOINTS = [
+  'status', 'login', 'manual', 'cancel', 'logout', 'setDefault', 'usage',
+  'image', 'video',
+  'speed', 'setSpeed',
+  'proxyGet', 'proxySet', 'proxyTest',
+  'modelDefaults', 'setModelDefault',
+  'checkin', 'visibility', 'setVisible',
+  'poolGet', 'poolSet',
+] as const
+
+/** The legacy RPC channel, kept for backward compatibility. */
 export const SUBSCRIPTIONS_AUTH_CHANNEL = '/subscriptions-auth'
 
 /** Media types the attachment store accepts (ImageMediaType). */
@@ -192,6 +213,89 @@ export class BadRequest extends Error {}
  * Passing the option unconditionally serves both — rc.2 reads it, the alpha
  * ignores the extra argument.
  */
+/**
+ * Structural face of `connection.fetch.register` shared by both dsh lines.
+ * The 0.1.2-alpha typings list only `GET`/`HEAD` methods and no
+ * `requestBody`, while the 0.1.5 line adds `POST` plus the body mode; the
+ * runtime on both lines dispatches any declared method to the exact route,
+ * so the route is typed here rather than against either line's declaration.
+ */
+interface FetchRouteCompat {
+  readonly path: string
+  readonly methods: readonly ('GET' | 'HEAD' | 'POST')[]
+  /** Buffered: the bridge aggregates the JSON body before `fetch` runs (0.1.5+; ignored earlier). */
+  readonly requestBody: 'buffered'
+  readonly fetch: (request: Request) => Promise<Response>
+}
+
+type FetchRegisterCompat = (route: FetchRouteCompat) => () => Promise<void>
+
+/** Connection `client-request` envelope, as the browser rpc caller sends it. */
+interface ClientRequestEnvelope {
+  type: 'client-request'
+  rpcId: string
+  method: string
+  payload: unknown
+}
+
+function readEnvelope(body: unknown): ClientRequestEnvelope | undefined {
+  if (typeof body !== 'object' || body === null) return undefined
+  const record = body as Record<string, unknown>
+  if (record.type !== 'client-request' || typeof record.rpcId !== 'string' || typeof record.method !== 'string') return undefined
+  return { type: 'client-request', rpcId: record.rpcId, method: record.method, payload: record.payload }
+}
+
+function serverResponse(rpcId: string, result: RpcResult<unknown>): Response {
+  return Response.json({ type: 'server-response', rpcId, result })
+}
+
+/**
+ * Wrap one endpoint's RPC handler as an exact Fetch route: decode the
+ * `client-request` envelope the browser rpc caller posts, run the handler,
+ * and answer with the matching `server-response` envelope — the same wire
+ * contract the dedicated-channel bridge used to apply, reproduced here so
+ * `rpc.call('/api', 'subscriptions-auth.<endpoint>', payload)` keeps working
+ * unchanged on the browser side.
+ */
+function fetchRouteFor(endpoint: string, handler: ConnectionRpcHandler): FetchRouteCompat {
+  const method = `${SUBSCRIPTIONS_AUTH_PREFIX}${endpoint}`
+  return {
+    path: `/api/${method}`,
+    methods: ['POST'],
+    requestBody: 'buffered',
+    fetch: async (request) => {
+      if (request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') {
+        return new Response('content type must be application/json', { status: 415 })
+      }
+      let body: unknown
+      try {
+        body = await request.json()
+      } catch {
+        return new Response('body is not JSON', { status: 400 })
+      }
+      const envelope = readEnvelope(body)
+      if (envelope === undefined) {
+        const rawId = (body as Record<string, unknown> | null)?.rpcId
+        return serverResponse(typeof rawId === 'string' ? rawId : 'invalid-request', {
+          ok: false,
+          error: { code: 'gateway/bad-request', message: 'invalid client-request message', details: { issues: [] } },
+        })
+      }
+      if (envelope.method !== method) {
+        return serverResponse(envelope.rpcId, {
+          ok: false,
+          error: {
+            code: 'gateway/bad-request',
+            message: `method ${JSON.stringify(envelope.method)} does not match endpoint ${JSON.stringify(method)}`,
+            details: { issues: [] },
+          },
+        })
+      }
+      return serverResponse(envelope.rpcId, await handler(endpoint, envelope.payload, request.signal))
+    },
+  }
+}
+
 type RpcHandleCompat = (
   channel: string,
   handler: ConnectionRpcHandler,
@@ -555,21 +659,41 @@ export function registerAuthRpc(
   // `connection` is not in this plugin's inject list (headless compositions
   // lack it), so its startup order is unconstrained: defer registration until
   // the service exists instead of probing once at apply time.
+  //
+  // Exact Fetch routes under `/api` rather than a dedicated `rpc.handle`
+  // channel: since dsh 0.1.5 the connection plugin no longer injects
+  // `webServer` itself, and `rpc.handle` resolves `webServer` through the
+  // connection plugin's own fiber, so every dedicated channel registration
+  // throws `cannot get property "webServer" without inject`. The `/api`
+  // route is mounted by the connection plugin (with its own webServer scope)
+  // and applies the same trust fence and browser authentication, so exact
+  // routes below it work on both dsh lines.
   ctx.inject(['connection'], (ctx) => {
     const connection = ctx.get('connection') as HostConnectionHandle
-    ctx.effect(
-      () => (connection.rpc.handle as RpcHandleCompat)(
-        SUBSCRIPTIONS_AUTH_CHANNEL,
-        async (endpoint, payload, signal) => {
-          try {
-            return await dispatch(controller, speed, proxy, modelDefaults, extras, poolMode, endpoint, payload, signal)
-          } catch (error) {
-            return failure(error)
-          }
-        },
-        { authority: 'loopback' },
-      ),
-      'dsh-plugin-subscriptions: /subscriptions-auth rpc channel',
-    )
+    const handler: ConnectionRpcHandler = async (endpoint, payload, signal) => {
+      try {
+        return await dispatch(controller, speed, proxy, modelDefaults, extras, poolMode, endpoint, payload, signal)
+      } catch (error) {
+        return failure(error)
+      }
+    }
+    const register = connection.fetch?.register as unknown as FetchRegisterCompat | undefined
+    if (typeof register === 'function') {
+      for (const endpoint of SUBSCRIPTIONS_AUTH_ENDPOINTS) {
+        ctx.effect(
+          () => register(fetchRouteFor(endpoint, handler)),
+          `dsh-subscription-hub: /api/${SUBSCRIPTIONS_AUTH_PREFIX}${endpoint} route`,
+        )
+      }
+    } else if (typeof connection.rpc?.handle === 'function') {
+      ctx.effect(
+        () => (connection.rpc.handle as RpcHandleCompat)(
+          SUBSCRIPTIONS_AUTH_CHANNEL,
+          handler,
+          { authority: 'loopback' },
+        ),
+        'dsh-subscription-hub: /subscriptions-auth rpc channel',
+      )
+    }
   })
 }
