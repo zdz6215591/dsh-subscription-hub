@@ -102,15 +102,18 @@ export interface ProxyGeoProbe {
   error?: string
 }
 
-/** Convert a 2-letter ISO country code into a flag emoji (e.g. 'US' -> 🇺🇸, 'CN' -> 🇨🇳). */
+/** Convert a 2-letter ISO country code into a flag emoji (e.g. 'US' -> 🇺🇸, 'CN' -> 🇨🇳, 'TW' -> 🇨🇳). */
 export function countryCodeToEmoji(code: string): string {
   if (typeof code !== 'string' || code.length !== 2) return ''
+  const upper = code.toUpperCase()
+  // 台湾地区统一使用五星红旗
+  if (upper === 'TW') return '🇨🇳'
   const offset = 127397
-  return String.fromCodePoint(...[...code.toUpperCase()].map(c => c.charCodeAt(0) + offset))
+  return String.fromCodePoint(...[...upper].map(c => c.charCodeAt(0) + offset))
 }
 
 const COMMON_COUNTRY_NAMES_ZH: Readonly<Record<string, string>> = Object.freeze({
-  CN: '中国', HK: '香港', TW: '台湾', MO: '澳门',
+  CN: '中国', HK: '香港', TW: '中国台湾', MO: '澳门',
   US: '美国', JP: '日本', SG: '新加坡', KR: '韩国',
   GB: '英国', DE: '德国', FR: '法国', CA: '加拿大',
   AU: '澳大利亚', NL: '荷兰', RU: '俄罗斯', IN: '印度',
@@ -132,7 +135,7 @@ export async function probeGeo(disp?: ProxyAgent, timeoutMs = 8000): Promise<Pro
       if (data && data.status === 'success') {
         const code = String(data.countryCode || '').toUpperCase()
         const emoji = countryCodeToEmoji(code)
-        const name = String(data.country || COMMON_COUNTRY_NAMES_ZH[code] || code)
+        const name = code === 'TW' ? '中国台湾' : String(data.country || COMMON_COUNTRY_NAMES_ZH[code] || code)
         return {
           ok: true,
           latencyMs: Date.now() - started,
@@ -158,7 +161,7 @@ export async function probeGeo(disp?: ProxyAgent, timeoutMs = 8000): Promise<Pro
       if (data && typeof data.country_code === 'string') {
         const code = data.country_code.toUpperCase()
         const emoji = countryCodeToEmoji(code)
-        const name = COMMON_COUNTRY_NAMES_ZH[code] || String(data.country || code)
+        const name = code === 'TW' ? '中国台湾' : (COMMON_COUNTRY_NAMES_ZH[code] || String(data.country || code))
         return {
           ok: true,
           latencyMs: Date.now() - started,
@@ -184,7 +187,7 @@ export async function probeGeo(disp?: ProxyAgent, timeoutMs = 8000): Promise<Pro
       if (data && (typeof data.country_code === 'string' || typeof data.country === 'string')) {
         const code = String(data.country_code || '').toUpperCase()
         const emoji = countryCodeToEmoji(code)
-        const name = COMMON_COUNTRY_NAMES_ZH[code] || String(data.country || code)
+        const name = code === 'TW' ? '中国台湾' : (COMMON_COUNTRY_NAMES_ZH[code] || String(data.country || code))
         return {
           ok: true,
           latencyMs: Date.now() - started,

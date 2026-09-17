@@ -685,6 +685,7 @@ describe('agy request body EOTP', () => {
   it('converts ISO 2-letter country codes to flag emoji', () => {
     assert.equal(countryCodeToEmoji('US'), '🇺🇸')
     assert.equal(countryCodeToEmoji('CN'), '🇨🇳')
+    assert.equal(countryCodeToEmoji('TW'), '🇨🇳', 'Taiwan must use the Five-star Red Flag')
     assert.equal(countryCodeToEmoji('HK'), '🇭🇰')
     assert.equal(countryCodeToEmoji('JP'), '🇯🇵')
     assert.equal(countryCodeToEmoji(''), '')

@@ -429,7 +429,7 @@ const styles: Record<string, CSSProperties> = {
     padding: '1px 8px', borderRadius: 6,
     background: 'var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1))',
     border: '1px solid var(--dsw-alias-border-l2)',
-    color: 'var(--dsw-alias-label-tertiary)',
+    color: 'var(--dsw-alias-label-secondary)',
     whiteSpace: 'nowrap', flexShrink: 0,
   },
   probeBadgeError: {
