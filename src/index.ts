@@ -1267,7 +1267,7 @@ export function apply(ctx: Context, config: Config): void {
   ), speed, {
     get: () => proxyGetConfig(),
     set: input => proxySetConfig(input),
-    test: payload => proxyTestConnection(payload.url, payload.proxy),
+    test: payload => proxyTestConnection(payload.url, payload.proxy, payload.providers),
   }, modelDefaults, {
     async checkin(provider, account) {
       if (provider !== 'codebuddy') return { ok: false, message: 'Check-in is only available for CodeBuddy' }

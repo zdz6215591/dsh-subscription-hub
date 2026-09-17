@@ -126,6 +126,19 @@ export interface ProxyGeoProbe {
   error?: string
 }
 
+/** Result of probing an individual subscription provider's real endpoint. */
+export interface ProviderProbeDetail {
+  ok: boolean
+  latencyMs: number
+  region?: string
+  city?: string
+  countryCode?: string
+  emoji?: string
+  viaProxy: boolean
+  status?: number
+  error?: string
+}
+
 /** `proxyTest` endpoint value. */
 export interface ProxyTestResult {
   ok: boolean
@@ -137,6 +150,8 @@ export interface ProxyTestResult {
   proxyProbe?: ProxyGeoProbe
   /** Probe directly without proxy. */
   directProbe?: ProxyGeoProbe
+  /** Per-provider real endpoint probe results. */
+  providers?: Partial<Record<SubscriptionProvider, ProviderProbeDetail>>
 }
 
 /** Global multi-account call mode as answered by the `poolGet`/`poolSet` endpoints. */
@@ -1256,13 +1271,14 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
             ...proxyPassword !== '' ? { password: proxyPassword } : {},
           },
         } : {},
+        providers: proxyProviders,
       }))
     } catch (error) {
       setProxyTestResult({ ok: false, viaProxy: false, error: messageOf(error) })
     } finally {
       setProxyTesting(false)
     }
-  }, [rpc, proxyTesting, proxyUrl, proxyUsername, proxyPassword])
+  }, [rpc, proxyTesting, proxyUrl, proxyUsername, proxyPassword, proxyProviders])
 
   const renderProviderProbeBadge = (id: SubscriptionProvider) => {
     if (proxyTesting) {
@@ -1274,6 +1290,29 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     }
     if (proxyTestResult === undefined) return null
 
+    // 1. Precise per-provider probe result (real destination domain respecting Clash rules):
+    const detail = proxyTestResult.providers?.[id]
+    if (detail !== undefined) {
+      if (detail.ok) {
+        const flag = detail.emoji ? `${detail.emoji} ` : ''
+        const city = detail.city && detail.city !== detail.region ? ` (${detail.city})` : ''
+        const region = `${flag}${detail.region || detail.countryCode || 'OK'}${city}`
+        const latency = ` · ${detail.latencyMs}ms`
+        const direct = !detail.viaProxy ? ` · ${t('proxyDirectTag')}` : ''
+        return (
+          <span style={detail.viaProxy ? styles.probeBadgeProxy : styles.probeBadgeDirect}>
+            {`${region}${latency}${direct}`}
+          </span>
+        )
+      }
+      return (
+        <span style={styles.probeBadgeError} title={detail.error}>
+          {detail.viaProxy ? t('proxyFailedTag') : t('proxyDirectFailedTag')}
+        </span>
+      )
+    }
+
+    // 2. Fallback for legacy backend before DSH restart:
     const isChecked = proxyProviders[id] !== false
     const willUseProxy = proxyEnabled && isChecked
     const probe = willUseProxy ? proxyTestResult.proxyProbe : proxyTestResult.directProbe

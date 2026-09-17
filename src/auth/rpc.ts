@@ -110,7 +110,7 @@ export interface ProxyConfigController {
   /** Validate, persist, and apply one config. */
   set(input: ProxyInput): Promise<ProxyConfigView>
   /** Probe one destination through the draft (unsaved) or stored proxy. */
-  test(payload: { url?: string; proxy?: ProxyDraft }): Promise<ProxyTestResult>
+  test(payload: { url?: string; proxy?: ProxyDraft; providers?: Partial<Record<ProviderId, boolean>> }): Promise<ProxyTestResult>
 }
 
 /** One model's default-effort picker state, as rendered by the Settings page. */
@@ -484,13 +484,25 @@ function readProxyInput(payload: unknown): ProxyInput {
 }
 
 /** Validate a `proxyTest` payload (the destination URL and an optional draft). */
-function readProxyTestPayload(payload: unknown): { url?: string; proxy?: ProxyDraft } {
+function readProxyTestPayload(payload: unknown): { url?: string; proxy?: ProxyDraft; providers?: Partial<Record<ProviderId, boolean>> } {
   if (typeof payload !== 'object' || payload === null) return {}
   const record = payload as Record<string, unknown>
   const url = record.url
-  if (url === undefined && record.proxy === undefined) return {}
+  if (url === undefined && record.proxy === undefined && record.providers === undefined) return {}
   if (url !== undefined && (typeof url !== 'string' || url.length === 0)) {
     throw new BadRequest('payload.url must be a non-empty string when present')
+  }
+  let providers: Partial<Record<ProviderId, boolean>> | undefined
+  if (record.providers !== undefined) {
+    if (typeof record.providers !== 'object' || record.providers === null) {
+      throw new BadRequest('payload.providers must be an object when present')
+    }
+    providers = {}
+    for (const [key, value] of Object.entries(record.providers)) {
+      if (typeof value === 'boolean') {
+        providers[key as ProviderId] = value
+      }
+    }
   }
   let proxy: ProxyDraft | undefined
   if (record.proxy !== undefined) {
@@ -524,6 +536,7 @@ function readProxyTestPayload(payload: unknown): { url?: string; proxy?: ProxyDr
   return {
     ...url === undefined ? {} : { url },
     ...proxy === undefined ? {} : { proxy },
+    ...providers === undefined ? {} : { providers },
   }
 }
 

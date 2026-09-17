@@ -89,7 +89,78 @@ export interface ProxyTestResult {
   proxyProbe?: ProxyGeoProbe
   /** GeoIP probe result through direct connection. */
   directProbe?: ProxyGeoProbe
+  /** Detailed probe results per subscription provider, respecting real routing rules. */
+  providers?: Partial<Record<ProviderId, ProviderProbeDetail>>
 }
+
+/** Result of probing an individual subscription provider's real endpoint. */
+export interface ProviderProbeDetail {
+  ok: boolean
+  latencyMs: number
+  region?: string
+  city?: string
+  countryCode?: string
+  emoji?: string
+  viaProxy: boolean
+  status?: number
+  error?: string
+}
+
+/** Known Cloudflare IATA airport code -> city and region mapping. */
+export const IATA_CODE_MAP: Readonly<Record<string, { country: string; code: string; city: string }>> = Object.freeze({
+  LAX: { country: '美国', code: 'US', city: '洛杉矶' },
+  SJC: { country: '美国', code: 'US', city: '圣何塞' },
+  SFO: { country: '美国', code: 'US', city: '旧金山' },
+  SEA: { country: '美国', code: 'US', city: '西雅图' },
+  ORD: { country: '美国', code: 'US', city: '芝加哥' },
+  EWR: { country: '美国', code: 'US', city: '纽瓦克' },
+  JFK: { country: '美国', code: 'US', city: '纽约' },
+  IAD: { country: '美国', code: 'US', city: '华盛顿' },
+  DFW: { country: '美国', code: 'US', city: '达拉斯' },
+  ATL: { country: '美国', code: 'US', city: '亚特兰大' },
+  MIA: { country: '美国', code: 'US', city: '迈阿密' },
+  PHX: { country: '美国', code: 'US', city: '菲尼克斯' },
+  HKG: { country: '香港', code: 'HK', city: '香港' },
+  TPE: { country: '中国台湾', code: 'TW', city: '台北' },
+  NRT: { country: '日本', code: 'JP', city: '东京' },
+  HND: { country: '日本', code: 'JP', city: '东京' },
+  KIX: { country: '日本', code: 'JP', city: '大阪' },
+  SIN: { country: '新加坡', code: 'SG', city: '新加坡' },
+  ICN: { country: '韩国', code: 'KR', city: '首尔' },
+  LHR: { country: '英国', code: 'GB', city: '伦敦' },
+  FRA: { country: '德国', code: 'DE', city: '法兰克福' },
+  CDG: { country: '法国', code: 'FR', city: '巴黎' },
+  AMS: { country: '荷兰', code: 'NL', city: '阿姆斯特丹' },
+  SYD: { country: '澳大利亚', code: 'AU', city: '悉尼' },
+})
+
+/** Parse a Cloudflare `cf-ray` header's 3-letter IATA datacenter code. */
+export function parseCfRay(ray: string | null | undefined): { country: string; code: string; city: string; emoji: string } | undefined {
+  if (typeof ray !== 'string' || ray.length === 0) return undefined
+  const match = /-([A-Z]{3})$/.exec(ray)
+  if (!match) return undefined
+  const iata = match[1]
+  const info = IATA_CODE_MAP[iata]
+  if (info !== undefined) {
+    return {
+      ...info,
+      emoji: countryCodeToEmoji(info.code),
+    }
+  }
+  return { country: iata, code: '', city: iata, emoji: '🌐' }
+}
+
+/** Primary probe target per subscription provider to test real routing rules. */
+export const PROVIDER_PROBE_TARGETS: Readonly<Record<ProviderId, { url: string; method: 'GET' | 'HEAD' }>> = Object.freeze({
+  codex: { url: 'https://api.openai.com/v1/models', method: 'GET' },
+  claude: { url: 'https://api.anthropic.com/v1/models', method: 'GET' },
+  grok: { url: 'https://api.x.ai/v1/models', method: 'GET' },
+  copilot: { url: 'https://api.github.com', method: 'GET' },
+  agy: { url: 'https://daily-cloudcode-pa.googleapis.com', method: 'GET' },
+  commandcode: { url: 'https://api.commandcode.ai', method: 'GET' },
+  codebuddy: { url: 'https://copilot.tencent.com', method: 'GET' },
+  zed: { url: 'https://cloud.zed.dev', method: 'GET' },
+})
 
 /** Result of an egress GeoIP probe. */
 export interface ProxyGeoProbe {
@@ -98,6 +169,7 @@ export interface ProxyGeoProbe {
   ip?: string
   country?: string
   countryCode?: string
+  city?: string
   emoji?: string
   error?: string
 }
@@ -579,16 +651,91 @@ export async function proxiedFetch(input: RequestInfo | URL, init: RequestInit =
   return dispatchFetch(input, proxied)
 }
 
+async function probeSingleProvider(
+  id: ProviderId,
+  target: { url: string; method: 'GET' | 'HEAD' },
+  useProxy: boolean,
+  probeAgent: ProxyAgent | undefined,
+  fallbackProxyProbe?: ProxyGeoProbe,
+  fallbackDirectProbe?: ProxyGeoProbe,
+): Promise<ProviderProbeDetail> {
+  const started = Date.now()
+  try {
+    const init: RequestInit = {
+      method: target.method,
+      signal: AbortSignal.timeout(DEFAULT_PROXY_TEST_TIMEOUT_MS),
+      ...(useProxy && probeAgent !== undefined ? { dispatcher: probeAgent } as RequestInit : {}),
+    }
+    const response = (useProxy && probeAgent !== undefined)
+      ? await dispatchFetch(target.url, init)
+      : await fetch(target.url, init)
+    void response.arrayBuffer().catch(() => undefined)
+    const latencyMs = Date.now() - started
+    const ray = response.headers.get('cf-ray')
+    const cfGeo = parseCfRay(ray)
+    if (cfGeo !== undefined) {
+      return {
+        ok: true,
+        latencyMs,
+        region: cfGeo.country,
+        city: cfGeo.city,
+        countryCode: cfGeo.code,
+        emoji: cfGeo.emoji,
+        viaProxy: useProxy,
+        status: response.status,
+      }
+    }
+    // Non-Cloudflare providers
+    if (id === 'codebuddy') {
+      return {
+        ok: true,
+        latencyMs,
+        region: '中国',
+        city: '腾讯云',
+        countryCode: 'CN',
+        emoji: '🇨🇳',
+        viaProxy: useProxy,
+        status: response.status,
+      }
+    }
+    const fallback = useProxy ? fallbackProxyProbe : fallbackDirectProbe
+    const region = id === 'agy' ? 'Google' : id === 'copilot' ? 'GitHub' : (fallback?.country ?? 'OK')
+    const emoji = fallback?.emoji ?? (id === 'agy' || id === 'copilot' ? '🌐' : '')
+    return {
+      ok: true,
+      latencyMs,
+      region,
+      ...fallback?.city ? { city: fallback.city } : {},
+      ...fallback?.countryCode ? { countryCode: fallback.countryCode } : {},
+      ...emoji !== '' ? { emoji } : {},
+      viaProxy: useProxy,
+      status: response.status,
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      latencyMs: Date.now() - started,
+      viaProxy: useProxy,
+      error: describeFetchError(error),
+    }
+  }
+}
+
 /**
  * Probe a destination through a proxy, answering with the HTTP status or a
  * flattened transport error. The probe uses `draft` when given (the dialog's
  * current inputs, without saving) and the stored config otherwise.
  * @param target - `http(s)` URL to fetch; defaults to {@link DEFAULT_PROXY_TEST_URL}.
  * @param draft - unsaved proxy inputs to test; absent means the stored config.
+ * @param providerFlags - per-provider draft toggles from the dialog.
  * @returns the result; any HTTP status counts as a successful connection,
  *   only a transport failure is an error.
  */
-export async function proxyTestConnection(target = DEFAULT_PROXY_TEST_URL, draft?: ProxyDraft): Promise<ProxyTestResult> {
+export async function proxyTestConnection(
+  target = DEFAULT_PROXY_TEST_URL,
+  draft?: ProxyDraft,
+  providerFlags?: Partial<Record<ProviderId, boolean>>,
+): Promise<ProxyTestResult> {
   let parsed: URL
   try {
     parsed = new URL(target)
@@ -645,6 +792,18 @@ export async function proxyTestConnection(target = DEFAULT_PROXY_TEST_URL, draft
       probeGeo(undefined),
     ])
 
+    // Probe all 8 actual provider endpoints in parallel according to their
+    // routing setting (proxy vs direct), triggering the user's real proxy rules.
+    const effectiveFlags = providerFlags ?? current.providers
+    const providerEntries = await Promise.all(
+      PROVIDER_IDS.map(async id => {
+        const wantsProxy = (effectiveFlags?.[id] !== false) && viaProxy
+        const targetConfig = PROVIDER_PROBE_TARGETS[id]
+        const detail = await probeSingleProvider(id, targetConfig, wantsProxy, probeAgent, proxyProbe, directProbe)
+        return [id, detail] as const
+      }),
+    )
+
     return {
       ok: targetRes.ok,
       viaProxy,
@@ -653,6 +812,7 @@ export async function proxyTestConnection(target = DEFAULT_PROXY_TEST_URL, draft
       ...targetRes.error !== undefined ? { error: targetRes.error } : {},
       ...proxyProbe !== undefined ? { proxyProbe } : {},
       ...directProbe !== undefined ? { directProbe } : {},
+      providers: Object.fromEntries(providerEntries),
     }
   } finally {
     if (closeProbe && probeAgent !== undefined) {
