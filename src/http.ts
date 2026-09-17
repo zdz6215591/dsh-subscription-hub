@@ -85,6 +85,95 @@ export interface ProxyTestResult {
   latencyMs?: number
   /** Failure message, when no response was received. */
   error?: string
+  /** GeoIP probe result through the proxy, when tested. */
+  proxyProbe?: ProxyGeoProbe
+  /** GeoIP probe result through direct connection. */
+  directProbe?: ProxyGeoProbe
+}
+
+/** Result of an egress GeoIP probe. */
+export interface ProxyGeoProbe {
+  ok: boolean
+  latencyMs?: number
+  ip?: string
+  country?: string
+  countryCode?: string
+  emoji?: string
+  error?: string
+}
+
+/** Convert a 2-letter ISO country code into a flag emoji (e.g. 'US' -> 🇺🇸, 'CN' -> 🇨🇳). */
+export function countryCodeToEmoji(code: string): string {
+  if (typeof code !== 'string' || code.length !== 2) return ''
+  const offset = 127397
+  return String.fromCodePoint(...[...code.toUpperCase()].map(c => c.charCodeAt(0) + offset))
+}
+
+const COMMON_COUNTRY_NAMES_ZH: Readonly<Record<string, string>> = Object.freeze({
+  CN: '中国', HK: '香港', TW: '台湾', MO: '澳门',
+  US: '美国', JP: '日本', SG: '新加坡', KR: '韩国',
+  GB: '英国', DE: '德国', FR: '法国', CA: '加拿大',
+  AU: '澳大利亚', NL: '荷兰', RU: '俄罗斯', IN: '印度',
+})
+
+/** Probe egress network environment: GeoIP country, flag emoji, and round-trip latency. */
+export async function probeGeo(disp?: ProxyAgent, timeoutMs = 8000): Promise<ProxyGeoProbe> {
+  const started = Date.now()
+  // 1. Primary: ip-api.com (fast, localized Chinese country names)
+  try {
+    const init: RequestInit = {
+      method: 'GET',
+      signal: AbortSignal.timeout(timeoutMs),
+      ...disp !== undefined ? { dispatcher: disp } as RequestInit : {},
+    }
+    const res = await dispatchFetch('http://ip-api.com/json?lang=zh-CN', init)
+    if (res.ok) {
+      const data = await res.json() as Record<string, unknown>
+      if (data && data.status === 'success') {
+        const code = String(data.countryCode || '').toUpperCase()
+        const emoji = countryCodeToEmoji(code)
+        const name = String(data.country || COMMON_COUNTRY_NAMES_ZH[code] || code)
+        return {
+          ok: true,
+          latencyMs: Date.now() - started,
+          country: name,
+          countryCode: code,
+          ...typeof data.query === 'string' && data.query !== '' ? { ip: data.query } : {},
+          ...emoji !== '' ? { emoji } : {},
+        }
+      }
+    }
+  } catch {}
+
+  // 2. Secondary fallback: api.ip.sb
+  try {
+    const init: RequestInit = {
+      method: 'GET',
+      signal: AbortSignal.timeout(timeoutMs),
+      ...disp !== undefined ? { dispatcher: disp } as RequestInit : {},
+    }
+    const res = await dispatchFetch('https://api.ip.sb/geoip', init)
+    if (res.ok) {
+      const data = await res.json() as Record<string, unknown>
+      if (data && typeof data.country_code === 'string') {
+        const code = data.country_code.toUpperCase()
+        const emoji = countryCodeToEmoji(code)
+        const name = COMMON_COUNTRY_NAMES_ZH[code] || String(data.country || code)
+        return {
+          ok: true,
+          latencyMs: Date.now() - started,
+          country: name,
+          countryCode: code,
+          ...typeof data.ip === 'string' && data.ip !== '' ? { ip: data.ip } : {},
+          ...emoji !== '' ? { emoji } : {},
+        }
+      }
+    }
+  } catch (error) {
+    return { ok: false, latencyMs: Date.now() - started, error: errorMessage(error) }
+  }
+
+  return { ok: false, latencyMs: Date.now() - started, error: 'GeoIP query failed' }
 }
 
 /** A draft proxy for one test probe (never persisted). */
@@ -503,19 +592,39 @@ export async function proxyTestConnection(target = DEFAULT_PROXY_TEST_URL, draft
     viaProxy = current.enabled && agent !== undefined && !matchesBypass(parsed.hostname, current.bypass)
     probeAgent = viaProxy ? agent : undefined
   }
-  const started = Date.now()
+  const probeTarget = async (): Promise<{ ok: boolean; status?: number; latencyMs?: number; error?: string }> => {
+    const started = Date.now()
+    try {
+      const init = probeAgent !== undefined
+        ? { method: 'GET', dispatcher: probeAgent, signal: AbortSignal.timeout(DEFAULT_PROXY_TEST_TIMEOUT_MS) }
+        : { method: 'GET', signal: AbortSignal.timeout(DEFAULT_PROXY_TEST_TIMEOUT_MS) }
+      const response = probeAgent !== undefined
+        ? await dispatchFetch(parsed.toString(), init as RequestInit)
+        : await fetch(parsed.toString(), init)
+      // Drain so the connection can be released; the body is irrelevant.
+      void response.arrayBuffer().catch(() => undefined)
+      return { ok: true, status: response.status, latencyMs: Date.now() - started }
+    } catch (error) {
+      return { ok: false, latencyMs: Date.now() - started, error: describeFetchError(error) }
+    }
+  }
+
   try {
-    const init = probeAgent !== undefined
-      ? { method: 'GET', dispatcher: probeAgent, signal: AbortSignal.timeout(DEFAULT_PROXY_TEST_TIMEOUT_MS) }
-      : { method: 'GET', signal: AbortSignal.timeout(DEFAULT_PROXY_TEST_TIMEOUT_MS) }
-    const response = probeAgent !== undefined
-      ? await dispatchFetch(parsed.toString(), init as RequestInit)
-      : await fetch(parsed.toString(), init)
-    // Drain so the connection can be released; the body is irrelevant.
-    void response.arrayBuffer().catch(() => undefined)
-    return { ok: true, viaProxy, status: response.status, latencyMs: Date.now() - started }
-  } catch (error) {
-    return { ok: false, viaProxy, latencyMs: Date.now() - started, error: describeFetchError(error) }
+    const [targetRes, proxyProbe, directProbe] = await Promise.all([
+      probeTarget(),
+      probeAgent !== undefined ? probeGeo(probeAgent) : Promise.resolve(undefined),
+      probeGeo(undefined),
+    ])
+
+    return {
+      ok: targetRes.ok,
+      viaProxy,
+      ...targetRes.status !== undefined ? { status: targetRes.status } : {},
+      ...targetRes.latencyMs !== undefined ? { latencyMs: targetRes.latencyMs } : {},
+      ...targetRes.error !== undefined ? { error: targetRes.error } : {},
+      ...proxyProbe !== undefined ? { proxyProbe } : {},
+      ...directProbe !== undefined ? { directProbe } : {},
+    }
   } finally {
     if (closeProbe && probeAgent !== undefined) {
       await probeAgent.close().catch(() => undefined)

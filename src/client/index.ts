@@ -78,6 +78,39 @@ export function apply(ctx: ClientContext): void {
     document.head.appendChild(style)
     return () => style.remove()
   }, 'dsh-plugin-subscriptions: settings panel breathing room')
+
+  ctx.effect(() => {
+    const update = () => {
+      const dialog = document.querySelector('div[role="dialog"][aria-modal="true"]')
+      if (!dialog) return
+      const nav = dialog.querySelector('nav')
+      if (!nav) return
+      const buttons = Array.from(nav.querySelectorAll('button'))
+      for (const btn of buttons) {
+        const text = btn.textContent?.trim()
+        if (!text) continue
+        const svg = btn.querySelector('svg')
+        if (!svg || svg.getAttribute('data-icon-fixed')) continue
+
+        if (text === '订阅' || text === 'Subscriptions') {
+          svg.setAttribute('data-icon-fixed', 'true')
+          svg.setAttribute('viewBox', '0 0 16 16')
+          svg.setAttribute('fill', 'none')
+          svg.innerHTML = '<path d="M6.1 3.1Q6.6 7.8 11.3 8.3Q6.6 8.8 6.1 13.5Q5.6 8.8 0.9 8.3Q5.6 7.8 6.1 3.1Z" stroke="currentColor" stroke-width="1.3"/><path d="M12.2 1.5Q12.5 3.7 14.7 4Q12.5 4.3 12.2 6.5Q11.9 4.3 9.7 4Q11.9 3.7 12.2 1.5Z" stroke="currentColor" stroke-width="1.1"/>'
+        } else if (text === '插件市场' || text === 'Market' || text === 'Marketplace') {
+          svg.setAttribute('data-icon-fixed', 'true')
+          svg.setAttribute('viewBox', '0 0 24 24')
+          svg.setAttribute('fill', 'none')
+          svg.innerHTML = '<path d="m2 7 4.41-4.41A2 2 0 0 1 7.83 2h8.34a2 2 0 0 1 1.42.59L22 7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M15 22v-4a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M2 7h20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M22 7v3a2 2 0 0 1-2 2 2.7 2.7 0 0 1-1.59-.63.7.7 0 0 0-.82 0A2.7 2.7 0 0 1 16 12a2.7 2.7 0 0 1-1.59-.63.7.7 0 0 0-.82 0A2.7 2.7 0 0 1 12 12a2.7 2.7 0 0 1-1.59-.63.7.7 0 0 0-.82 0A2.7 2.7 0 0 1 8 12a2.7 2.7 0 0 1-1.59-.63.7.7 0 0 0-.82 0A2.7 2.7 0 0 1 4 12v0a2 2 0 0 1-2-2V7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>'
+        }
+      }
+    }
+    const observer = new MutationObserver(update)
+    observer.observe(document.body, { childList: true, subtree: true })
+    update()
+    return () => observer.disconnect()
+  }, 'dsh-plugin-subscriptions: nav icons')
+
   // The shell's Context merge types `connection` as the host handle; in the
   // browser shell the same key holds the full client ConnectionHandle.
   const connection = ctx.get('connection') as unknown as ConnectionHandle
@@ -86,7 +119,7 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: 'subscriptions',
-    order: 90,
+    order: 11,
     // A thunk re-evaluated per read, so the nav label follows the active locale.
     label: () => t('nav'),
     inject: injected,

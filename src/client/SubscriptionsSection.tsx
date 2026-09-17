@@ -115,6 +115,17 @@ export interface ProxyConfigView {
   error?: string
 }
 
+/** GeoIP probe result for one network route. */
+export interface ProxyGeoProbe {
+  ok: boolean
+  latencyMs?: number
+  ip?: string
+  country?: string
+  countryCode?: string
+  emoji?: string
+  error?: string
+}
+
 /** `proxyTest` endpoint value. */
 export interface ProxyTestResult {
   ok: boolean
@@ -122,6 +133,10 @@ export interface ProxyTestResult {
   status?: number
   latencyMs?: number
   error?: string
+  /** Probe through the configured/draft proxy. */
+  proxyProbe?: ProxyGeoProbe
+  /** Probe directly without proxy. */
+  directProbe?: ProxyGeoProbe
 }
 
 /** Global multi-account call mode as answered by the `poolGet`/`poolSet` endpoints. */
@@ -394,6 +409,44 @@ const styles: Record<string, CSSProperties> = {
   proxyCheck: {
     display: 'flex', alignItems: 'center', gap: 8,
     fontSize: 13, lineHeight: '20px', color: 'var(--dsw-alias-label-primary)', cursor: 'pointer',
+  },
+  proxyProviderItem: {
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+    padding: '2px 0', minHeight: 26, gap: 12,
+  },
+  probeBadgeProxy: {
+    display: 'inline-flex', alignItems: 'center',
+    fontSize: 11, lineHeight: '16px', fontWeight: 500,
+    padding: '1px 8px', borderRadius: 6,
+    background: 'var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1))',
+    border: '1px solid var(--dsw-alias-border-l2)',
+    color: 'var(--dsw-alias-state-success-primary)',
+    whiteSpace: 'nowrap', flexShrink: 0,
+  },
+  probeBadgeDirect: {
+    display: 'inline-flex', alignItems: 'center',
+    fontSize: 11, lineHeight: '16px', fontWeight: 500,
+    padding: '1px 8px', borderRadius: 6,
+    background: 'var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1))',
+    border: '1px solid var(--dsw-alias-border-l2)',
+    color: 'var(--dsw-alias-label-tertiary)',
+    whiteSpace: 'nowrap', flexShrink: 0,
+  },
+  probeBadgeError: {
+    display: 'inline-flex', alignItems: 'center',
+    fontSize: 11, lineHeight: '16px', fontWeight: 500,
+    padding: '1px 8px', borderRadius: 6,
+    background: 'var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1))',
+    border: '1px solid var(--dsw-alias-state-error-primary)',
+    color: 'var(--dsw-alias-state-error-primary)',
+    whiteSpace: 'nowrap', flexShrink: 0,
+  },
+  probeBadgeLoading: {
+    display: 'inline-flex', alignItems: 'center',
+    fontSize: 11, lineHeight: '16px',
+    padding: '1px 8px', borderRadius: 6,
+    color: 'var(--dsw-alias-label-tertiary)',
+    whiteSpace: 'nowrap', flexShrink: 0,
   },
   proxyMessage: { margin: 0, fontSize: 12, lineHeight: '18px' },
   proxyActions: { display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', marginTop: 2 },
@@ -1185,12 +1238,15 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     try {
       // Test the dialog's current inputs (they do not need to be saved first);
       // the host builds a throwaway agent for the probe.
+      const draftUrl = proxyUrl.trim()
       setProxyTestResult(await callSubscriptionsAuth<ProxyTestResult>(rpc, 'proxyTest', {
-        proxy: {
-          url: proxyUrl.trim(),
-          ...proxyUsername.trim() !== '' ? { username: proxyUsername.trim() } : {},
-          ...proxyPassword !== '' ? { password: proxyPassword } : {},
-        },
+        ...draftUrl !== '' ? {
+          proxy: {
+            url: draftUrl,
+            ...proxyUsername.trim() !== '' ? { username: proxyUsername.trim() } : {},
+            ...proxyPassword !== '' ? { password: proxyPassword } : {},
+          },
+        } : {},
       }))
     } catch (error) {
       setProxyTestResult({ ok: false, viaProxy: false, error: messageOf(error) })
@@ -1198,6 +1254,53 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       setProxyTesting(false)
     }
   }, [rpc, proxyTesting, proxyUrl, proxyUsername, proxyPassword])
+
+  const renderProviderProbeBadge = (id: SubscriptionProvider) => {
+    if (proxyTesting) {
+      return (
+        <span style={styles.probeBadgeLoading}>
+          {t('proxyTestingItems')}
+        </span>
+      )
+    }
+    if (proxyTestResult === undefined) return null
+
+    const isChecked = proxyProviders[id] !== false
+    const willUseProxy = proxyEnabled && isChecked
+    const probe = willUseProxy ? proxyTestResult.proxyProbe : proxyTestResult.directProbe
+
+    if (probe === undefined) {
+      if (willUseProxy) {
+        return (
+          <span style={styles.probeBadgeError} title={proxyTestResult.error}>
+            {proxyUrl.trim() === '' ? t('proxyNotConfiguredTag') : t('proxyFailedTag')}
+          </span>
+        )
+      }
+      return null
+    }
+
+    if (probe.ok) {
+      const regionText = `${probe.emoji ? `${probe.emoji} ` : ''}${probe.country || probe.countryCode || 'OK'}`
+      const latencyText = typeof probe.latencyMs === 'number' ? ` · ${probe.latencyMs}ms` : ''
+      const directText = !willUseProxy ? ` · ${t('proxyDirectTag')}` : ''
+      const fullText = `${regionText}${latencyText}${directText}`
+      return (
+        <span
+          style={willUseProxy ? styles.probeBadgeProxy : styles.probeBadgeDirect}
+          title={probe.ip ? `IP: ${probe.ip}` : undefined}
+        >
+          {fullText}
+        </span>
+      )
+    }
+
+    return (
+      <span style={styles.probeBadgeError} title={probe.error}>
+        {willUseProxy ? t('proxyFailedTag') : t('proxyDirectFailedTag')}
+      </span>
+    )
+  }
 
   if (rpc === undefined) {
     return <p style={styles.intro}>{t('unavailable')}</p>
@@ -1837,17 +1940,20 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
               <span style={styles.proxyLabel}>{t('proxyProviders')}</span>
               <p style={styles.proxyHint}>{t('proxyProvidersHint')}</p>
               {PROVIDERS.map(provider => (
-                <label key={provider.id} style={styles.proxyCheck}>
-                  <input
-                    type="checkbox"
-                    checked={proxyProviders[provider.id] !== false}
-                    disabled={!proxyEnabled}
-                    onChange={event => {
-                      setProxyProviders(prev => ({ ...prev, [provider.id]: event.target.checked }))
-                    }}
-                  />
-                  <span>{provider.name}</span>
-                </label>
+                <div key={provider.id} style={styles.proxyProviderItem}>
+                  <label style={styles.proxyCheck}>
+                    <input
+                      type="checkbox"
+                      checked={proxyProviders[provider.id] !== false}
+                      disabled={!proxyEnabled}
+                      onChange={event => {
+                        setProxyProviders(prev => ({ ...prev, [provider.id]: event.target.checked }))
+                      }}
+                    />
+                    <span>{provider.name}</span>
+                  </label>
+                  {renderProviderProbeBadge(provider.id)}
+                </div>
               ))}
             </div>
             <label style={styles.proxyField}>

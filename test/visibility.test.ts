@@ -14,7 +14,7 @@ import { messagesToCommandCode, messagesToOpenAI, parseCommandCodeAuthFile, pars
 import { extractAgyProjectId } from '../src/providers/agy.js'
 import { parseAgyQuotaUsage } from '../src/providers/agy/models.js'
 import { isAgyUnusableEndpoint } from '../src/providers/agy/constants.js'
-import { providerForHostname } from '../src/http.js'
+import { countryCodeToEmoji, providerForHostname } from '../src/http.js'
 import { toAgyRequestBody } from '../src/providers/agy/translate.js'
 import { parseSseDataLine } from '../src/providers/agy/parse.js'
 import { checkinCodeBuddy } from '../src/providers/codebuddy.js'
@@ -680,5 +680,14 @@ describe('agy request body EOTP', () => {
   it('parses an SSE data line with the response envelope', () => {
     const payload = parseSseDataLine('data: {"response":{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}}')
     assert.equal(payload?.candidates?.[0]?.content?.parts?.[0]?.text, 'ok')
+  })
+
+  it('converts ISO 2-letter country codes to flag emoji', () => {
+    assert.equal(countryCodeToEmoji('US'), '🇺🇸')
+    assert.equal(countryCodeToEmoji('CN'), '🇨🇳')
+    assert.equal(countryCodeToEmoji('HK'), '🇭🇰')
+    assert.equal(countryCodeToEmoji('JP'), '🇯🇵')
+    assert.equal(countryCodeToEmoji(''), '')
+    assert.equal(countryCodeToEmoji('USA'), '')
   })
 })
