@@ -169,6 +169,32 @@ export async function probeGeo(disp?: ProxyAgent, timeoutMs = 8000): Promise<Pro
         }
       }
     }
+  } catch {}
+
+  // 3. Third fallback: ipwhois.app
+  try {
+    const init: RequestInit = {
+      method: 'GET',
+      signal: AbortSignal.timeout(timeoutMs),
+      ...disp !== undefined ? { dispatcher: disp } as RequestInit : {},
+    }
+    const res = await dispatchFetch('https://ipwhois.app/json/', init)
+    if (res.ok) {
+      const data = await res.json() as Record<string, unknown>
+      if (data && (typeof data.country_code === 'string' || typeof data.country === 'string')) {
+        const code = String(data.country_code || '').toUpperCase()
+        const emoji = countryCodeToEmoji(code)
+        const name = COMMON_COUNTRY_NAMES_ZH[code] || String(data.country || code)
+        return {
+          ok: true,
+          latencyMs: Date.now() - started,
+          country: name,
+          countryCode: code,
+          ...typeof data.ip === 'string' && data.ip !== '' ? { ip: data.ip } : {},
+          ...emoji !== '' ? { emoji } : {},
+        }
+      }
+    }
   } catch (error) {
     return { ok: false, latencyMs: Date.now() - started, error: errorMessage(error) }
   }

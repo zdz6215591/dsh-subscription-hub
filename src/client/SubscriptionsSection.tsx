@@ -441,6 +441,15 @@ const styles: Record<string, CSSProperties> = {
     color: 'var(--dsw-alias-state-error-primary)',
     whiteSpace: 'nowrap', flexShrink: 0,
   },
+  probeBadgeWarn: {
+    display: 'inline-flex', alignItems: 'center',
+    fontSize: 11, lineHeight: '16px', fontWeight: 500,
+    padding: '1px 8px', borderRadius: 6,
+    background: 'var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1))',
+    border: '1px solid var(--dsw-alias-state-warn-label)',
+    color: 'var(--dsw-alias-state-warn-label)',
+    whiteSpace: 'nowrap', flexShrink: 0,
+  },
   probeBadgeLoading: {
     display: 'inline-flex', alignItems: 'center',
     fontSize: 11, lineHeight: '16px',
@@ -1270,14 +1279,25 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     const probe = willUseProxy ? proxyTestResult.proxyProbe : proxyTestResult.directProbe
 
     if (probe === undefined) {
-      if (willUseProxy) {
+      if (!willUseProxy) {
         return (
-          <span style={styles.probeBadgeError} title={proxyTestResult.error}>
-            {proxyUrl.trim() === '' ? t('proxyNotConfiguredTag') : t('proxyFailedTag')}
+          <span style={styles.probeBadgeDirect}>
+            {t('proxyDirectTag')}
           </span>
         )
       }
-      return null
+      if (proxyTestResult.ok) {
+        return (
+          <span style={styles.probeBadgeWarn} title={t('proxyNeedRestartHint')}>
+            {t('proxyNeedRestartTag')}
+          </span>
+        )
+      }
+      return (
+        <span style={styles.probeBadgeError} title={proxyTestResult.error}>
+          {proxyUrl.trim() === '' ? t('proxyNotConfiguredTag') : t('proxyFailedTag')}
+        </span>
+      )
     }
 
     if (probe.ok) {
