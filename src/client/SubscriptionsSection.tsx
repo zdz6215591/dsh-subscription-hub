@@ -198,15 +198,61 @@ const styles: Record<string, CSSProperties> = {
     display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 560,
     color: 'var(--dsw-alias-label-primary)',
   },
-  intro: { margin: 0, color: 'var(--dsw-alias-label-tertiary)', fontSize: 14, lineHeight: '22px' },
+  intro: { margin: '0 0 2px 0', color: 'var(--dsw-alias-label-tertiary)', fontSize: 13, lineHeight: '20px' },
   card: {
     border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 12,
     padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6,
   },
-  proxyCard: {
-    padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6,
+  globalCard: {
+    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 12,
+    padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 10,
+    background: 'var(--dsw-alias-bg-layer-1)',
   },
-  separator: { borderTop: '1px solid var(--dsw-alias-border-l2)' },
+  globalRow: {
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+  },
+  globalRowLeft: {
+    display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1,
+  },
+  globalRowHeader: {
+    display: 'flex', alignItems: 'center', gap: 8,
+  },
+  globalRowTitle: {
+    fontWeight: 500, fontSize: 14, lineHeight: '22px', color: 'var(--dsw-alias-label-primary)',
+  },
+  globalRowDesc: {
+    margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)',
+  },
+  globalRowRight: {
+    flexShrink: 0, display: 'flex', alignItems: 'center',
+  },
+  globalSelect: {
+    height: 30, boxSizing: 'border-box',
+    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8, padding: '0 8px',
+    font: 'inherit', fontSize: 12, lineHeight: '18px', cursor: 'pointer',
+    background: 'var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1))',
+    color: 'var(--dsw-alias-label-primary)',
+  },
+  globalDivider: {
+    borderTop: '1px solid var(--dsw-alias-border-l2)',
+    opacity: 0.6,
+    margin: '2px 0',
+  },
+  overrideTag: {
+    fontSize: 11, lineHeight: '16px', fontWeight: 500,
+    color: 'var(--dsw-alias-state-warn-label)',
+    background: 'var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1))',
+    border: '1px solid var(--dsw-alias-border-l2)',
+    borderRadius: 6, padding: '0 6px',
+  },
+  providersHeader: {
+    display: 'flex', alignItems: 'center', gap: 8,
+    marginTop: 6, marginBottom: -2, paddingLeft: 2,
+  },
+  providersTitle: {
+    fontSize: 13, fontWeight: 600, lineHeight: '20px',
+    color: 'var(--dsw-alias-label-secondary)', letterSpacing: 0.2,
+  },
   cardHeader: { display: 'flex', alignItems: 'center', gap: 8 },
   dot: { width: 8, height: 8, borderRadius: '50%', flexShrink: 0 },
   name: { fontWeight: 500, fontSize: 14, lineHeight: '22px', color: 'var(--dsw-alias-label-primary)' },
@@ -351,17 +397,6 @@ const styles: Record<string, CSSProperties> = {
   },
   proxyMessage: { margin: 0, fontSize: 12, lineHeight: '18px' },
   proxyActions: { display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', marginTop: 2 },
-  poolModeBadge: {
-    fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)',
-    background: 'var(--dsw-alias-bg-layer-1)', border: '1px solid var(--dsw-alias-border-l2)',
-    borderRadius: 8, padding: '1px 8px',
-  },
-  proxySelect: {
-    height: 28, boxSizing: 'border-box',
-    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8, padding: '0 6px',
-    font: 'inherit', fontSize: 13, lineHeight: '20px', cursor: 'pointer',
-    background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)',
-  },
   modalOverlay: {
     position: 'fixed', inset: 0, zIndex: 1000,
     display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
@@ -1171,53 +1206,78 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   return (
     <div style={styles.section}>
       <p style={styles.intro}>{t('intro')}</p>
-      <div style={styles.proxyCard}>
-        <div style={styles.cardHeader}>
-          <span style={styles.dot} />
-          <span style={styles.name}>{t('poolModeTitle')}</span>
-          <span style={styles.poolModeBadge}>{
-            poolMode?.mode === 'priority'
-              ? t('poolModeSequential')
-              : t('poolModeBalanced')
-          }</span>
-          <select
-            style={{ ...styles.proxySelect, marginLeft: 'auto', flexShrink: 0 }}
-            value={poolMode?.mode ?? 'quota_aware'}
-            disabled={poolModeSaving}
-            onChange={(event) => { void setPoolModeOption(event.target.value as 'priority' | 'quota_aware') }}
-          >
-            <option value="priority">{t('poolModeSequential')}</option>
-            <option value="quota_aware">{t('poolModeBalanced')}</option>
-          </select>
+      <div style={styles.globalCard}>
+        {/* Row 1: 多账号调用模式 */}
+        <div style={styles.globalRow}>
+          <div style={styles.globalRowLeft}>
+            <div style={styles.globalRowHeader}>
+              <span style={styles.globalRowTitle}>{t('poolModeTitle')}</span>
+              {poolMode?.configured !== undefined && poolMode.mode !== poolMode.configured ? (
+                <span
+                  style={styles.overrideTag}
+                  title={t('poolModeReadOverride', {
+                    configured: poolMode.configured === 'priority' ? t('poolModeSequential') : t('poolModeBalanced'),
+                  })}
+                >
+                  {t('poolModeOverrideTag')}
+                </span>
+              ) : null}
+            </div>
+            <p style={styles.globalRowDesc}>
+              {poolModeError !== undefined
+                ? t('poolModeLoadFailed', { message: poolModeError })
+                : poolMode?.configured !== undefined && poolMode.mode !== poolMode.configured
+                  ? t('poolModeReadOverride', {
+                      configured: poolMode.configured === 'priority' ? t('poolModeSequential') : t('poolModeBalanced'),
+                    })
+                  : t('poolModeHint')}
+            </p>
+          </div>
+          <div style={styles.globalRowRight}>
+            <select
+              style={styles.globalSelect}
+              value={poolMode?.mode ?? 'quota_aware'}
+              disabled={poolModeSaving}
+              onChange={(event) => { void setPoolModeOption(event.target.value as 'priority' | 'quota_aware') }}
+            >
+              <option value="priority">{t('poolModeSequential')}</option>
+              <option value="quota_aware">{t('poolModeBalanced')}</option>
+            </select>
+          </div>
         </div>
-        <p style={styles.statusLine}>
-          {poolModeError !== undefined
-            ? t('poolModeLoadFailed', { message: poolModeError })
-            : poolMode?.configured !== undefined && poolMode.mode !== poolMode.configured
-              ? t('poolModeReadOverride', { configured: poolMode.mode === 'priority' ? t('poolModeSequential') : t('poolModeBalanced') })
-              : t('poolModeHint')}
-        </p>
-      </div>
-      <div style={styles.proxyCard}>
-        <div style={styles.cardHeader}>
-          <span style={{
-            ...styles.dot,
-            background: proxy?.enabled === true
-              ? 'var(--dsw-alias-state-success-primary)'
-              : 'var(--dsw-alias-label-dimmed)',
-          }} />
-          <span style={styles.name}>{t('proxyTitle')}</span>
-          <button
-            type="button"
-            style={{ ...styles.button, marginLeft: 'auto', flexShrink: 0 }}
-            onClick={openProxyDialog}
-          >
-            {t('proxyConfigure')}
-          </button>
+
+        <div style={styles.globalDivider} />
+
+        {/* Row 2: 代理 */}
+        <div style={styles.globalRow}>
+          <div style={styles.globalRowLeft}>
+            <div style={styles.globalRowHeader}>
+              <span style={{
+                ...styles.dot,
+                background: proxy?.enabled === true
+                  ? 'var(--dsw-alias-state-success-primary)'
+                  : 'var(--dsw-alias-label-dimmed)',
+              }} />
+              <span style={styles.globalRowTitle}>{t('proxyTitle')}</span>
+            </div>
+            <p style={styles.globalRowDesc}>{proxyStatusText(t, proxy, proxyLoadError)}</p>
+          </div>
+          <div style={styles.globalRowRight}>
+            <button
+              type="button"
+              style={styles.button}
+              onClick={openProxyDialog}
+            >
+              {t('proxyConfigure')}
+            </button>
+          </div>
         </div>
-        <p style={styles.statusLine}>{proxyStatusText(t, proxy, proxyLoadError)}</p>
       </div>
-      <div style={styles.separator} />
+
+      <div style={styles.providersHeader}>
+        <span style={styles.providersTitle}>{t('providersSectionTitle')}</span>
+      </div>
+
       {PROVIDERS.map(({ id, name }) => {
         const status = statuses[id]
         const busy = status?.busy === true
