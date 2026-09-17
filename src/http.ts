@@ -14,6 +14,7 @@
  * browser/system proxy and is outside this module's reach.
  */
 import { ProxyAgent, fetch as undiciFetch } from 'undici'
+import { promises as dnsPromises } from 'node:dns'
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
@@ -691,21 +692,51 @@ async function probeSingleProvider(
         ok: true,
         latencyMs,
         region: '中国',
-        city: '腾讯云',
         countryCode: 'CN',
         emoji: '🇨🇳',
         viaProxy: useProxy,
         status: response.status,
       }
     }
+
+    // Providers without cf-ray: resolve host IP to determine actual geographic location
+    try {
+      const parsedUrl = new URL(target.url)
+      const lookup = await dnsPromises.lookup(parsedUrl.hostname)
+      if (lookup?.address) {
+        const geoInit: RequestInit = {
+          method: 'GET',
+          signal: AbortSignal.timeout(3000),
+          ...(useProxy && probeAgent !== undefined ? { dispatcher: probeAgent } as RequestInit : {}),
+        }
+        const geoRes = await dispatchFetch(`http://ip-api.com/json/${lookup.address}?lang=zh-CN`, geoInit)
+        if (geoRes.ok) {
+          const geoData = await geoRes.json() as Record<string, unknown>
+          if (geoData && geoData.status === 'success') {
+            const code = String(geoData.countryCode || '').toUpperCase()
+            const emoji = countryCodeToEmoji(code)
+            const name = code === 'TW' ? '中国台湾' : String(geoData.country || COMMON_COUNTRY_NAMES_ZH[code] || code)
+            return {
+              ok: true,
+              latencyMs,
+              region: name,
+              countryCode: code,
+              ...emoji !== '' ? { emoji } : {},
+              viaProxy: useProxy,
+              status: response.status,
+            }
+          }
+        }
+      }
+    } catch {}
+
     const fallback = useProxy ? fallbackProxyProbe : fallbackDirectProbe
-    const region = id === 'agy' ? 'Google' : id === 'copilot' ? 'GitHub' : (fallback?.country ?? 'OK')
-    const emoji = fallback?.emoji ?? (id === 'agy' || id === 'copilot' ? '🌐' : '')
+    const region = fallback?.country ?? (useProxy ? '美国' : '中国')
+    const emoji = fallback?.emoji ?? (useProxy ? '🇺🇸' : '🇨🇳')
     return {
       ok: true,
       latencyMs,
       region,
-      ...fallback?.city ? { city: fallback.city } : {},
       ...fallback?.countryCode ? { countryCode: fallback.countryCode } : {},
       ...emoji !== '' ? { emoji } : {},
       viaProxy: useProxy,

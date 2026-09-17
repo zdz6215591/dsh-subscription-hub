@@ -1295,8 +1295,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     if (detail !== undefined) {
       if (detail.ok) {
         const flag = detail.emoji ? `${detail.emoji} ` : ''
-        const city = detail.city && detail.city !== detail.region ? ` (${detail.city})` : ''
-        const region = `${flag}${detail.region || detail.countryCode || 'OK'}${city}`
+        const region = `${flag}${detail.region || detail.countryCode || 'OK'}`
         const latency = ` · ${detail.latencyMs}ms`
         const direct = !detail.viaProxy ? ` · ${t('proxyDirectTag')}` : ''
         return (
