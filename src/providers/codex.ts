@@ -577,6 +577,41 @@ function normalizeCodexCallIds(input: ResponsesRequestInput['input']): Responses
   })
 }
 
+/** Text marking a repaired tool output as an unknown outcome; the model must verify before retrying. */
+export const CODEX_UNKNOWN_TOOL_OUTCOME = 'The tool call has no recorded result. Its outcome is unknown; verify external state before retrying any operation that may have side effects.'
+
+/**
+ * Reconcile one Responses input's tool-call pairing after id normalization:
+ * every `function_call` gets an output and every `function_call_output`
+ * matches a call. Missing outputs become error-style outputs whose text marks
+ * the outcome unknown; orphan outputs are dropped. Duplicate calls of one id
+ * receive exactly one repair output. The request is local repair only: the
+ * durable history stays authoritative and unchanged.
+ * @param input - normalized Responses input items.
+ * @returns the same array when already balanced, otherwise a repaired array.
+ */
+export function reconcileResponsesToolCalls(input: ResponsesRequestInput['input']): ResponsesRequestInput['input'] {
+  const calls = new Set<string>()
+  const outputs = new Set<string>()
+  for (const item of input) {
+    if (item.type === 'function_call' && typeof item.call_id === 'string') calls.add(item.call_id)
+    else if (item.type === 'function_call_output' && typeof item.call_id === 'string') outputs.add(item.call_id)
+  }
+  const missing = new Set([...calls].filter(callId => !outputs.has(callId)))
+  if (missing.size === 0 && [...outputs].every(callId => calls.has(callId))) return input
+  const balanced: ResponsesRequestInput['input'] = []
+  for (const item of input) {
+    if (item.type === 'function_call_output' && (typeof item.call_id !== 'string' || !calls.has(item.call_id))) {
+      continue
+    }
+    balanced.push(item)
+    if (item.type === 'function_call' && typeof item.call_id === 'string' && missing.delete(item.call_id)) {
+      balanced.push({ type: 'function_call_output', call_id: item.call_id, output: CODEX_UNKNOWN_TOOL_OUTCOME })
+    }
+  }
+  return balanced
+}
+
 /**
  * The Responses request body for one generation. A fast-tier request (the
  * composer Speed toggle, the codex CLI's fast mode) carries
@@ -591,12 +626,10 @@ export function codexRequestBody(
   return {
     model: options.model,
     instructions: resolved.instructions ?? DEFAULT_CODEX_INSTRUCTIONS,
-    input: normalizeCodexCallIds(resolved.input),
+    input: reconcileResponsesToolCalls(normalizeCodexCallIds(resolved.input)),
     ...options.tools !== undefined && options.tools.length > 0
-      ? { tools: toResponsesTools(options.tools) }
+      ? { tools: toResponsesTools(options.tools, { strict: false }), tool_choice: 'auto', parallel_tool_calls: true }
       : {},
-    tool_choice: 'auto',
-    parallel_tool_calls: true,
     ...options.reasoningEffort !== undefined
       ? { reasoning: { effort: String(options.reasoningEffort), summary: 'auto' } }
       : {},

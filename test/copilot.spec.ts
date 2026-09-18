@@ -216,7 +216,7 @@ test('copilotResponsesRequestBody maps the Responses wire shape', () => {
   )
   assert.equal('instructions' in bare, false)
   assert.equal('max_output_tokens' in bare, false)
-  assert.deepEqual(bare.tools, [{ type: 'function', name: 'bash', description: 'run', parameters: { type: 'object' } }])
+  assert.deepEqual(bare.tools, [{ type: 'function', name: 'bash', description: 'run', parameters: { type: 'object' }, strict: false }])
   assert.equal(bare.tool_choice, 'auto')
 })
 

@@ -15,11 +15,10 @@ import type {
   ContentBlock,
   StreamChunk,
   TokenUsage,
-  ToolResultBlock,
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import { parseSse } from './sse.js'
-import type { TranslatableMessage } from './resolved.js'
+import type { ResolvedToolResultBlock, TranslatableMessage } from './resolved.js'
 
 /**
  * The Claude Code identity block. The subscription endpoint rejects requests
@@ -56,9 +55,19 @@ export interface AnthropicMessage {
   content: Record<string, unknown>[]
 }
 
-/** Flatten a tool result's content to plain text for `tool_result`. */
-function toolResultText(block: ToolResultBlock): string {
-  return block.content.map(part => (part.type === 'text' ? part.text : '')).join('')
+/** Preserve native image blocks, retaining the existing text-only wire shape. */
+function toolResultContent(block: ResolvedToolResultBlock): string | Record<string, unknown>[] {
+  if (!block.content.some(part => part.type === 'image' && 'dataBase64' in part)) {
+    return block.content.map(part => (part.type === 'text' ? part.text : '')).join('')
+  }
+  const content: Record<string, unknown>[] = []
+  for (const part of block.content) {
+    if (part.type === 'text' && part.text.length > 0) content.push({ type: 'text', text: part.text })
+    if (part.type === 'image' && 'dataBase64' in part) {
+      content.push({ type: 'image', source: { type: 'base64', media_type: part.mediaType, data: part.dataBase64 } })
+    }
+  }
+  return content
 }
 
 /** Parse a tool call's raw JSON arguments into Anthropic's object-shaped `input`. */
@@ -169,7 +178,7 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[]): A
           blocks.push({
             type: 'tool_result',
             tool_use_id: String(block.toolCallId),
-            content: toolResultText(block),
+            content: toolResultContent(block),
             ...block.isError === true ? { is_error: true } : {},
           })
           break

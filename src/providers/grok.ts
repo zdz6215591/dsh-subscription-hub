@@ -20,6 +20,7 @@ import type { PoolAdapter } from './pool.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { resolveImages } from '../translate/resolved.js'
 import { streamResponses, toResponsesInput, toResponsesTools } from '../translate/responses.js'
+import type { ResponsesRequestInput } from '../translate/responses.js'
 import {
   httpLlmError,
   idleWatchdog,
@@ -352,12 +353,15 @@ export async function fetchGrokUsage(
   const payload = await response.json() as { config?: GrokBillingConfig | null; subscriptionTier?: string }
   const config = typeof payload.config === 'object' && payload.config !== null ? payload.config : {}
   const windows: UsageWindow[] = []
-  if (typeof config.creditUsagePercent === 'number' && Number.isFinite(config.creditUsagePercent)) {
+  if (config.currentPeriod || (typeof config.creditUsagePercent === 'number' && Number.isFinite(config.creditUsagePercent))) {
     const kind: UsageWindow['kind'] = config.currentPeriod?.type === 'USAGE_PERIOD_TYPE_WEEKLY'
       ? 'weekly'
       : 'other'
     const resetsAt = grokResetsAt(config.currentPeriod?.end)
-    windows.push({ kind, usedPercent: config.creditUsagePercent, ...resetsAt === undefined ? {} : { resetsAt } })
+    const usedPercent = typeof config.creditUsagePercent === 'number' && Number.isFinite(config.creditUsagePercent)
+      ? config.creditUsagePercent
+      : 0
+    windows.push({ kind, usedPercent, ...resetsAt === undefined ? {} : { resetsAt } })
   } else if (typeof config.monthlyLimit?.val === 'number' && config.monthlyLimit.val > 0) {
     const used = typeof config.used?.val === 'number' ? config.used.val : 0
     const resetsAt = grokResetsAt(config.billingPeriodEnd)
@@ -568,6 +572,41 @@ export async function fetchGrokModels(
   // the picker.
   if (discovered.length === 0) throw new Error('grok models endpoint returned an empty catalog')
   return discovered
+}
+
+/**
+ * Build one xAI Responses request body (exported for tests, like
+ * {@link codexRequestBody}). The tool trio renders only when tools exist:
+ * A reported xAI 400 invalid-argument on tool-less calls motivated omitting
+ * tool controls when no tools are supplied. Keep this endpoint-specific
+ * compatibility measure separate from assumptions about other backends.
+ */
+export function grokRequestBody(
+  options: GenerateOptions,
+  resolved: ResponsesRequestInput,
+): Record<string, unknown> {
+  return {
+    model: options.model,
+    ...resolved.instructions === undefined ? {} : { instructions: resolved.instructions },
+    input: resolved.input,
+    ...options.tools !== undefined && options.tools.length > 0
+      ? { tools: toResponsesTools(options.tools), tool_choice: 'auto', parallel_tool_calls: true }
+      : {},
+    ...options.maxTokens !== undefined ? { max_output_tokens: options.maxTokens } : {},
+    // The harness only passes an effort the resolved model advertised (the
+    // CLI catalog's), so this never reaches a model that rejects it.
+    ...options.reasoningEffort !== undefined
+      ? { reasoning: { effort: String(options.reasoningEffort) } }
+      : {},
+    // Cache-affinity hint (mirrors codex): xAI caches prompts per server,
+    // and `prompt_cache_key` is the Responses-API signal that routes repeat
+    // requests back to the cache-holding shard — without it every turn's
+    // cache hit is shard-routing luck. The session id is the stable key
+    // xAI's own docs recommend.
+    ...options.sessionId !== undefined ? { prompt_cache_key: String(options.sessionId) } : {},
+    store: false,
+    stream: true,
+  }
 }
 
 /** Constructor dependencies for {@link GrokAdapter}. */
@@ -822,31 +861,7 @@ export class GrokAdapter extends LlmAdapter {
 
   private async request(options: GenerateOptions, session: GrokSession, signal: AbortSignal): Promise<Response> {
     const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal)
-    const { instructions, input } = toResponsesInput(messages, options.system)
-    const body = {
-      model: options.model,
-      ...instructions === undefined ? {} : { instructions },
-      input,
-      ...options.tools !== undefined && options.tools.length > 0
-        ? { tools: toResponsesTools(options.tools) }
-        : {},
-      tool_choice: 'auto',
-      parallel_tool_calls: true,
-      ...options.maxTokens !== undefined ? { max_output_tokens: options.maxTokens } : {},
-      // The harness only passes an effort the resolved model advertised (the
-      // CLI catalog's), so this never reaches a model that rejects it.
-      ...options.reasoningEffort !== undefined
-        ? { reasoning: { effort: String(options.reasoningEffort) } }
-        : {},
-      // Cache-affinity hint (mirrors codex): xAI caches prompts per server,
-      // and `prompt_cache_key` is the Responses-API signal that routes repeat
-      // requests back to the cache-holding shard — without it every turn's
-      // cache hit is shard-routing luck. The session id is the stable key
-      // xAI's own docs recommend.
-      ...options.sessionId !== undefined ? { prompt_cache_key: String(options.sessionId) } : {},
-      store: false,
-      stream: true,
-    }
+    const body = grokRequestBody(options, toResponsesInput(messages, options.system))
     return proxiedFetch(GROK_API_URL, {
       method: 'POST',
       headers: {

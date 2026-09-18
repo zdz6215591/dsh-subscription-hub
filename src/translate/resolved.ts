@@ -7,7 +7,7 @@
  */
 
 import { LlmError } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, Message } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, Message, ToolResultBlock } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 
 /** An image block with its bytes resolved to inline base64 for the wire. */
@@ -20,12 +20,47 @@ export interface ResolvedImagePart {
 }
 
 /** Translator input block: a harness block, with images pre-resolved. */
-export type TranslatableBlock = ContentBlock | ResolvedImagePart
+export type TranslatableBlock = Exclude<ContentBlock, ToolResultBlock> | ResolvedImagePart | ResolvedToolResultBlock
+
+/** Tool results may themselves carry attachment-backed images. */
+export interface ResolvedToolResultBlock extends Omit<ToolResultBlock, 'content'> {
+  content: readonly TranslatableBlock[]
+}
+
+/**
+ * Wires with text-only tool outputs receive images in a following user turn.
+ * Defer that turn until all consecutive user messages have been processed:
+ * parallel tool results can arrive in separate harness messages, and a user
+ * image message must not interrupt their tool-call/output pairing.
+ */
+export function withToolResultImages(messages: readonly TranslatableMessage[]): TranslatableMessage[] {
+  const out: TranslatableMessage[] = []
+  let images: TranslatableBlock[] = []
+  const flush = (): void => {
+    if (images.length > 0) out.push({ role: 'user', content: images })
+    images = []
+  }
+  for (const message of messages) {
+    if (message.role === 'assistant') flush()
+    out.push(message)
+    for (const block of message.content) {
+      if (block.type !== 'tool-result') continue
+      const parts = block.content.filter((part): part is ResolvedImagePart => part.type === 'image' && 'dataBase64' in part)
+      if (parts.length > 0) {
+        images.push({ type: 'text', text: `Images from tool result ${String(block.toolCallId)}:` }, ...parts)
+      }
+    }
+  }
+  flush()
+  return out
+}
 
 /** Translator input message: role plus resolved blocks. */
 export interface TranslatableMessage {
   role: 'system' | 'user' | 'assistant'
   content: readonly TranslatableBlock[]
+  /** Preserved for adapters whose provider-private replay metadata is required. */
+  source?: Message['source']
 }
 
 /**
@@ -43,7 +78,9 @@ export async function resolveImages(
   attachments: AttachmentStore | undefined,
   signal?: AbortSignal,
 ): Promise<readonly TranslatableMessage[]> {
-  if (!messages.some(message => message.content.some(block => block.type === 'image'))) {
+  const hasImage = (block: ContentBlock): boolean => block.type === 'image'
+    || (block.type === 'tool-result' && block.content.some(hasImage))
+  if (!messages.some(message => message.content.some(hasImage))) {
     return messages
   }
   if (attachments === undefined) {
@@ -53,16 +90,27 @@ export async function resolveImages(
       'UNSUPPORTED',
     )
   }
+  const resolveBlock = async (block: ContentBlock): Promise<TranslatableBlock[]> => {
+    if (block.type === 'tool-result') {
+      return [{ ...block, content: (await Promise.all(block.content.map(resolveBlock))).flat() }]
+    }
+    if (block.type !== 'image') return [block]
+    const stored = await attachments.readImage(block.attachment, signal)
+    const { attachmentId, mediaType, bytes, width, height, name } = stored.ref
+    return [{
+      type: 'image',
+      mediaType: stored.ref.mediaType,
+      dataBase64: Buffer.from(stored.data).toString('base64'),
+    }, {
+      type: 'text',
+      text: `Image reference (for image_generate.referenceImages): ${JSON.stringify({
+        attachmentId, mediaType, bytes, width, height, ...name === undefined ? {} : { name },
+      })}`,
+    }]
+  }
   return Promise.all(messages.map(async (message): Promise<TranslatableMessage> => ({
     role: message.role,
-    content: await Promise.all(message.content.map(async (block): Promise<TranslatableBlock> => {
-      if (block.type !== 'image') return block
-      const stored = await attachments.readImage(block.attachment, signal)
-      return {
-        type: 'image',
-        mediaType: stored.ref.mediaType,
-        dataBase64: Buffer.from(stored.data).toString('base64'),
-      }
-    })),
+    source: message.source,
+    content: (await Promise.all(message.content.map(resolveBlock))).flat(),
   })))
 }

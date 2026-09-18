@@ -18,11 +18,11 @@ import type {
   ContentBlock,
   StreamChunk,
   TokenUsage,
-  ToolResultBlock,
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import { parseSse } from './sse.js'
-import type { TranslatableMessage } from './resolved.js'
+import { withToolResultImages } from './resolved.js'
+import type { ResolvedToolResultBlock, TranslatableMessage } from './resolved.js'
 
 /** Assembled `instructions` + `input` pair for one Responses request. */
 export interface ResponsesRequestInput {
@@ -55,7 +55,7 @@ export interface ReasoningReplayItem {
 }
 
 /** Flatten a tool result's content to plain text for `function_call_output`. */
-function toolResultText(block: ToolResultBlock): string {
+function toolResultText(block: ResolvedToolResultBlock): string {
   return block.content.map(part => (part.type === 'text' ? part.text : '')).join('')
 }
 
@@ -89,7 +89,7 @@ export function toResponsesInput(
   // ARRAY REFERENCE so parallel calls of one response (which share one array
   // instance) replay the items once, before the first of them]
   let lastReplay: readonly ReasoningReplayItem[] | undefined
-  for (const message of messages) {
+  for (const message of withToolResultImages(messages)) {
     if (message.role === 'system') {
       for (const block of message.content) {
         if (block.type === 'text') systemTexts.push(block.text)
@@ -163,15 +163,25 @@ export function toResponsesInput(
 
 /**
  * Map harness tool schemas to Responses function tools.
+ *
+ * OpenAI Responses may normalize schemas into strict mode when `strict` is
+ * omitted. Codex and Copilot opt out to preserve harness optional parameters;
+ * this does not prevent a model from voluntarily supplying optional fields.
+ * Other providers keep their existing defaults unless explicitly opted out.
  * @param tools - tool schemas from the request.
+ * @param options - provider-specific opt-out from strict schema normalization.
  * @returns Responses `tools` array entries.
  */
-export function toResponsesTools(tools: readonly ToolSchema[]): Record<string, unknown>[] {
+export function toResponsesTools(
+  tools: readonly ToolSchema[],
+  options: { strict?: false } = {},
+): Record<string, unknown>[] {
   return tools.map(tool => ({
     type: 'function',
     name: tool.name,
     description: tool.description,
     parameters: tool.parameters,
+    ...options.strict === undefined ? {} : { strict: options.strict },
   }))
 }
 

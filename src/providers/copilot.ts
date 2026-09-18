@@ -470,7 +470,7 @@ export function copilotResponsesRequestBody(
     ...resolved.instructions !== undefined ? { instructions: resolved.instructions } : {},
     input: resolved.input,
     ...options.tools !== undefined && options.tools.length > 0
-      ? { tools: toResponsesTools(options.tools), tool_choice: 'auto' }
+      ? { tools: toResponsesTools(options.tools, { strict: false }), tool_choice: 'auto' }
       : {},
     ...options.maxTokens !== undefined ? { max_output_tokens: options.maxTokens } : {},
     // The Responses wire spells the effort nested; only advertised efforts

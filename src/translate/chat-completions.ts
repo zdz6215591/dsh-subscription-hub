@@ -12,14 +12,14 @@ import type {
   ContentBlock,
   StreamChunk,
   TokenUsage,
-  ToolResultBlock,
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import { parseSse } from './sse.js'
-import type { TranslatableMessage } from './resolved.js'
+import { withToolResultImages } from './resolved.js'
+import type { ResolvedToolResultBlock, TranslatableMessage } from './resolved.js'
 
 /** Flatten a tool result's content to plain text for a `tool` message. */
-function toolResultText(block: ToolResultBlock): string {
+function toolResultText(block: ResolvedToolResultBlock): string {
   return block.content.map(part => (part.type === 'text' ? part.text : '')).join('')
 }
 
@@ -41,7 +41,7 @@ export function toChatMessages(
 ): Record<string, unknown>[] {
   const out: Record<string, unknown>[] = []
   const systemTexts: string[] = []
-  for (const message of messages) {
+  for (const message of withToolResultImages(messages)) {
     if (message.role === 'system') {
       for (const block of message.content) {
         if (block.type === 'text') systemTexts.push(block.text)
@@ -66,7 +66,8 @@ export function toChatMessages(
       for (const block of message.content) {
         switch (block.type) {
           case 'text':
-            texts.push(block.text)
+            if (parts.length > 0) parts.push({ type: 'text', text: block.text })
+            else texts.push(block.text)
             break
           case 'image':
             if ('dataBase64' in block) {

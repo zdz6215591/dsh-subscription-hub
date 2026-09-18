@@ -432,8 +432,9 @@ test('codexRequestBody bounds tool-call ids without losing their pairings', () =
   }, false)
   const collisionIds = (collision.input as Record<string, unknown>[]).map(item => String(item.call_id))
   assert.equal(collisionIds[0], reserved)
-  assert.equal(collisionIds[1], collisionIds[2])
-  assert.notEqual(collisionIds[1], reserved)
+  assert.equal(collisionIds[1], reserved)
+  assert.equal(collisionIds[2], collisionIds[3])
+  assert.notEqual(collisionIds[0], collisionIds[2])
 })
 
 /** One text-only message of any role, for request-body assembly. */
