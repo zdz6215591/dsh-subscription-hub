@@ -205,50 +205,187 @@ export async function checkinCodeBuddy(
   }
 }
 
-function checkinSlotNow(now = new Date()): string {
-  const day = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
-  return `${day}-${now.getHours() < 12 ? 'am' : 'pm'}`
+export interface CodeBuddyCheckinState {
+  /** The calendar date of the last successful check-in ("YYYY-MM-DD"). */
+  lastDate?: string
+  /** Timestamp of the last check-in. */
+  lastTime?: number
+  /** Status message returned by the last check-in. */
+  lastMessage?: string
+  /** The calendar date for which a random morning check-in is planned ("YYYY-MM-DD"). */
+  scheduledDate?: string
+  /** Epoch ms timestamp of the scheduled morning check-in (between 06:00:00 and 07:55:00). */
+  scheduledTime?: number
+  /** Compatibility with legacy state file ({ slot: "YYYY-MM-DD-am" }). */
+  slot?: string
 }
 
-function checkinStatePath(): string {
+export interface CodeBuddyCheckinStatusView {
+  lastDate?: string
+  lastTime?: number
+  lastMessage?: string
+  scheduledDate?: string
+  scheduledTime?: number
+  checkedInToday: boolean
+}
+
+export function localDateString(now = new Date()): string {
+  const y = now.getFullYear()
+  const m = String(now.getMonth() + 1).padStart(2, '0')
+  const d = String(now.getDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+}
+
+/**
+ * Randomly pick a check-in time before 8:00 AM on the given calendar date.
+ * Default range: between 06:00:00 and 07:55:00 (115-minute morning window).
+ */
+export function generateMorningTargetTime(date: Date): number {
+  const target = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 6, 0, 0, 0)
+  const offsetMs = Math.floor(Math.random() * 115 * 60 * 1000)
+  return target.getTime() + offsetMs
+}
+
+export function checkinStatePath(): string {
   return dshHomePath('plugins', 'subscriptions', 'codebuddy-checkin.json')
 }
 
-async function lastCheckinSlot(): Promise<string | undefined> {
+export async function readCheckinState(): Promise<CodeBuddyCheckinState> {
   try {
-    const raw = JSON.parse(await readFile(checkinStatePath(), 'utf8')) as { slot?: string }
-    return typeof raw.slot === 'string' ? raw.slot : undefined
+    const raw = JSON.parse(await readFile(checkinStatePath(), 'utf8')) as Record<string, unknown>
+    if (typeof raw !== 'object' || raw === null) return {}
+    const state: CodeBuddyCheckinState = {}
+    if (typeof raw.lastDate === 'string' && raw.lastDate.length > 0) state.lastDate = raw.lastDate
+    else if (typeof raw.slot === 'string' && raw.slot.length >= 10) state.lastDate = raw.slot.slice(0, 10)
+    if (typeof raw.lastTime === 'number' && Number.isFinite(raw.lastTime)) state.lastTime = raw.lastTime
+    if (typeof raw.lastMessage === 'string') state.lastMessage = raw.lastMessage
+    if (typeof raw.scheduledDate === 'string') state.scheduledDate = raw.scheduledDate
+    if (typeof raw.scheduledTime === 'number' && Number.isFinite(raw.scheduledTime)) state.scheduledTime = raw.scheduledTime
+    if (typeof raw.slot === 'string') state.slot = raw.slot
+    return state
   } catch {
-    return undefined
+    return {}
   }
 }
 
-async function writeCheckinSlot(slot: string): Promise<void> {
+export async function writeCheckinState(state: CodeBuddyCheckinState): Promise<void> {
   const path = checkinStatePath()
   await mkdir(dirname(path), { recursive: true })
   const tmp = `${path}.${process.pid}.tmp`
-  await writeFile(tmp, `${JSON.stringify({ slot }, null, 2)}\n`, { encoding: 'utf8' })
+  await writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`, { encoding: 'utf8' })
   try { await chmod(tmp, 0o600) } catch { /* windows */ }
   await rename(tmp, path)
 }
 
+export async function recordManualCheckin(message: string, now = new Date()): Promise<void> {
+  const todayStr = localDateString(now)
+  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
+  const tomorrowStr = localDateString(tomorrow)
+  const previous = await readCheckinState()
+  const state: CodeBuddyCheckinState = {
+    ...previous,
+    lastDate: todayStr,
+    lastTime: now.getTime(),
+    lastMessage: message,
+    scheduledDate: tomorrowStr,
+    scheduledTime: generateMorningTargetTime(tomorrow),
+    slot: `${todayStr}-am`,
+  }
+  await writeCheckinState(state)
+}
+
+export async function getCodeBuddyCheckinStatus(now = new Date()): Promise<CodeBuddyCheckinStatusView> {
+  const todayStr = localDateString(now)
+  let state = await readCheckinState()
+
+  if (state.lastDate === todayStr) {
+    const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
+    const tomorrowStr = localDateString(tomorrow)
+    if (state.scheduledDate !== tomorrowStr || state.scheduledTime === undefined) {
+      state.scheduledDate = tomorrowStr
+      state.scheduledTime = generateMorningTargetTime(tomorrow)
+      await writeCheckinState(state)
+    }
+  } else if (state.scheduledDate !== todayStr || state.scheduledTime === undefined) {
+    state.scheduledDate = todayStr
+    state.scheduledTime = generateMorningTargetTime(now)
+    await writeCheckinState(state)
+  }
+
+  return {
+    ...state.lastDate !== undefined ? { lastDate: state.lastDate } : {},
+    ...state.lastTime !== undefined ? { lastTime: state.lastTime } : {},
+    ...state.lastMessage !== undefined ? { lastMessage: state.lastMessage } : {},
+    ...state.scheduledDate !== undefined ? { scheduledDate: state.scheduledDate } : {},
+    ...state.scheduledTime !== undefined ? { scheduledTime: state.scheduledTime } : {},
+    checkedInToday: state.lastDate === todayStr,
+  }
+}
+
 /**
- * Run daily check-in for every logged-in CodeBuddy account when this morning
- * or afternoon slot has not been claimed yet. Idempotent across restarts.
+ * Run daily check-in once per day for every logged-in CodeBuddy account.
+ * Scheduled at a random time before 8:00 AM (between 06:00 and 07:55).
+ * If DSH was not running during the morning window, catches up on the next start.
  */
 export async function autoCheckinCodeBuddy(
   sessions: readonly CodeBuddySession[],
   fetchFn: FetchFn = proxiedFetch,
+  now = new Date(),
 ): Promise<void> {
   if (sessions.length === 0) return
-  const slot = checkinSlotNow()
-  if (await lastCheckinSlot() === slot) return
+
+  const todayStr = localDateString(now)
+  let state = await readCheckinState()
+
+  // 1. If today has already checked in, ensure tomorrow has a planned target and return
+  if (state.lastDate === todayStr) {
+    const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
+    const tomorrowStr = localDateString(tomorrow)
+    if (state.scheduledDate !== tomorrowStr || state.scheduledTime === undefined) {
+      state.scheduledDate = tomorrowStr
+      state.scheduledTime = generateMorningTargetTime(tomorrow)
+      await writeCheckinState(state)
+    }
+    return
+  }
+
+  // 2. Today has not checked in. Ensure a morning target is planned for today
+  if (state.scheduledDate !== todayStr || state.scheduledTime === undefined) {
+    state.scheduledDate = todayStr
+    state.scheduledTime = generateMorningTargetTime(now)
+    await writeCheckinState(state)
+  }
+
+  // 3. If current time has not reached the scheduled target, wait
+  if (now.getTime() < state.scheduledTime) {
+    return
+  }
+
+  // 4. Target time reached! Perform check-in for all accounts
   let anyOk = false
+  let lastMessage = ''
   for (const session of sessions) {
     const result = await checkinCodeBuddy(session, fetchFn)
-    if (result.ok) anyOk = true
+    if (result.ok) {
+      anyOk = true
+      lastMessage = result.message
+    }
   }
-  if (anyOk) await writeCheckinSlot(slot)
+
+  // 5. On success or already-checked-in, record today as completed and plan tomorrow
+  if (anyOk) {
+    const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
+    const tomorrowStr = localDateString(tomorrow)
+    state = {
+      lastDate: todayStr,
+      lastTime: now.getTime(),
+      lastMessage,
+      scheduledDate: tomorrowStr,
+      scheduledTime: generateMorningTargetTime(tomorrow),
+      slot: `${todayStr}-am`,
+    }
+    await writeCheckinState(state)
+  }
 }
 
 export interface CodeBuddyAdapterOptions {

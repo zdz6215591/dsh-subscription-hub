@@ -142,6 +142,8 @@ import {
   refreshCodeBuddy,
   startCodeBuddyLogin,
   autoCheckinCodeBuddy,
+  getCodeBuddyCheckinStatus,
+  recordManualCheckin,
 } from './providers/codebuddy.js'
 import {
   ZedAdapter,
@@ -1273,7 +1275,12 @@ export function apply(ctx: Context, config: Config): void {
       if (provider !== 'codebuddy') return { ok: false, message: 'Check-in is only available for CodeBuddy' }
       const tokens = accountTokens.get('codebuddy')
       if (tokens === undefined) return { ok: false, message: 'CodeBuddy is not registered' }
-      return checkinCodeBuddy(await tokens.session(account) as CodeBuddySession)
+      const res = await checkinCodeBuddy(await tokens.session(account) as CodeBuddySession)
+      if (res.ok) await recordManualCheckin(res.message).catch(() => undefined)
+      return res
+    },
+    async checkinStatus() {
+      return getCodeBuddyCheckinStatus()
     },
     async visibility(provider) {
       const adapter = adapters.get(provider)
@@ -1301,7 +1308,8 @@ export function apply(ctx: Context, config: Config): void {
       }).catch(() => undefined)
     }
     runCheckin()
-    const checkinTimer = setInterval(runCheckin, 15 * 60_000)
+    // Check every minute so the morning check-in fires within 60s of the randomly chosen time before 8:00 AM
+    const checkinTimer = setInterval(runCheckin, 60_000)
     ctx.effect(() => () => { clearInterval(checkinTimer) }, 'dsh-subscription-hub: codebuddy auto check-in')
   }
 

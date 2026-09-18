@@ -17,7 +17,7 @@ import { isAgyUnusableEndpoint } from '../src/providers/agy/constants.js'
 import { countryCodeToEmoji, providerForHostname } from '../src/http.js'
 import { toAgyRequestBody } from '../src/providers/agy/translate.js'
 import { parseSseDataLine } from '../src/providers/agy/parse.js'
-import { checkinCodeBuddy } from '../src/providers/codebuddy.js'
+import { checkinCodeBuddy, generateMorningTargetTime, localDateString } from '../src/providers/codebuddy.js'
 
 const TEMP_DIRS: string[] = []
 after(() => {
@@ -452,6 +452,18 @@ describe('codebuddy meter + check-in', () => {
     })
     assert.equal(result.ok, false)
     assert.match(result.message, /Global/)
+  })
+
+  it('generates a morning target time strictly before 8:00 AM', () => {
+    const d = new Date(2026, 8, 20, 10, 0, 0)
+    for (let i = 0; i < 50; i++) {
+      const target = new Date(generateMorningTargetTime(d))
+      assert.equal(target.getFullYear(), 2026)
+      assert.equal(target.getMonth(), 8)
+      assert.equal(target.getDate(), 20)
+      assert.equal(target.getHours() >= 6 && target.getHours() < 8, true, 'target hour must be 6 or 7 (before 8am)')
+      assert.equal(target.getHours() === 7 ? target.getMinutes() <= 55 : true, true)
+    }
   })
 })
 

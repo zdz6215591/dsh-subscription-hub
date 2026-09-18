@@ -14,6 +14,7 @@ import { PROVIDER_IDS, type ProviderId } from './store.js'
 import type { ProviderUsage } from '../providers/common.js'
 import type { ProxyConfigView, ProxyDraft, ProxyInput, ProxyTestResult } from '../http.js'
 import type { PoolModeController, PoolModeInput } from '../providers/pool-mode.js'
+import type { CodeBuddyCheckinStatusView } from '../providers/codebuddy.js'
 
 /**
  * Endpoint-name prefix under the shared `/api` channel: endpoint `status`
@@ -32,7 +33,7 @@ export const SUBSCRIPTIONS_AUTH_ENDPOINTS = [
   'speed', 'setSpeed',
   'proxyGet', 'proxySet', 'proxyTest',
   'modelDefaults', 'setModelDefault',
-  'checkin', 'visibility', 'setVisible',
+  'checkin', 'checkinStatus', 'visibility', 'setVisible',
   'poolGet', 'poolSet',
 ] as const
 
@@ -136,6 +137,7 @@ export interface ModelDefaultsCatalog {
 /** Model visibility + CodeBuddy check-in extras. */
 export interface ExtraOps {
   checkin(provider: ProviderId, account: string): Promise<{ ok: boolean; message: string }>
+  checkinStatus?(): Promise<CodeBuddyCheckinStatusView>
   visibility(provider: ProviderId): Promise<{ id: string; name: string; visible: boolean }[]>
   setVisible(provider: ProviderId, model: string, visible: boolean): Promise<void>
 }
@@ -628,6 +630,10 @@ async function dispatch(
       if (extras === undefined) throw new BadRequest('check-in is unavailable')
       const provider = readProvider(payload)
       return ok(await extras.checkin(provider, readString(payload, 'account')))
+    }
+    case 'checkinStatus': {
+      if (extras?.checkinStatus === undefined) throw new BadRequest('check-in status is unavailable')
+      return ok(await extras.checkinStatus())
     }
     case 'visibility': {
       if (extras === undefined) throw new BadRequest('visibility is unavailable')

@@ -161,6 +161,16 @@ export interface PoolModeView {
   error?: string
 }
 
+/** CodeBuddy daily auto check-in state. */
+export interface CheckinStatusView {
+  lastDate?: string
+  lastTime?: number
+  lastMessage?: string
+  scheduledDate?: string
+  scheduledTime?: number
+  checkedInToday: boolean
+}
+
 /** `login` endpoint value: the URL the user completes OAuth at. */
 interface LoginResponse {
   authorizeUrl: string
@@ -472,6 +482,24 @@ const styles: Record<string, CSSProperties> = {
     color: 'var(--dsw-alias-label-tertiary)',
     whiteSpace: 'nowrap', flexShrink: 0,
   },
+  checkinBadgeDone: {
+    display: 'inline-flex', alignItems: 'center',
+    fontSize: 11, lineHeight: '16px', fontWeight: 500,
+    padding: '2px 8px', borderRadius: 6,
+    background: 'var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1))',
+    border: '1px solid var(--dsw-alias-border-l2)',
+    color: 'var(--dsw-alias-state-success-primary)',
+    whiteSpace: 'nowrap', flexShrink: 0,
+  },
+  checkinBadgePlanned: {
+    display: 'inline-flex', alignItems: 'center',
+    fontSize: 11, lineHeight: '16px', fontWeight: 500,
+    padding: '2px 8px', borderRadius: 6,
+    background: 'var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1))',
+    border: '1px solid var(--dsw-alias-border-l2)',
+    color: 'var(--dsw-alias-label-secondary)',
+    whiteSpace: 'nowrap', flexShrink: 0,
+  },
   proxyMessage: { margin: 0, fontSize: 12, lineHeight: '18px' },
   proxyActions: { display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', marginTop: 2 },
   modalOverlay: {
@@ -732,6 +760,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [poolMode, setPoolMode] = useState<PoolModeView | undefined>(undefined)
   const [poolModeError, setPoolModeError] = useState<string | undefined>(undefined)
   const [poolModeSaving, setPoolModeSaving] = useState(false)
+  const [checkinStatus, setCheckinStatus] = useState<CheckinStatusView | undefined>(undefined)
   /** Per-model default-effort picker state as answered by `modelDefaults`. */
   const [modelDefaults, setModelDefaults] = useState<Partial<Record<SubscriptionProvider, ModelDefaultsCatalog>>>({})
   const [modelDefaultsLoading, setModelDefaultsLoading] = useState(false)
@@ -1181,6 +1210,18 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     return () => { alive = false }
   }, [rpc])
 
+  const loadCheckinStatus = useCallback(async (): Promise<void> => {
+    if (rpc === undefined) return
+    try {
+      const res = await callSubscriptionsAuth<CheckinStatusView>(rpc, 'checkinStatus', {})
+      if (mountedRef.current) setCheckinStatus(res)
+    } catch { /* best effort */ }
+  }, [rpc])
+
+  useEffect(() => {
+    void loadCheckinStatus()
+  }, [loadCheckinStatus])
+
   /** Save a new global multi-account call mode. */
   const setPoolModeOption = useCallback((mode: 'priority' | 'quota_aware'): void => {
     if (rpc === undefined || poolModeSaving) return
@@ -1492,20 +1533,39 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                     >
                       {t('logout')}
                     </button>
-                    {id === 'codebuddy' && rpc !== undefined && (
-                      <button
-                        type="button"
-                        style={styles.button}
-                        onClick={() => {
-                          void callSubscriptionsAuth<{ ok: boolean; message: string }>(rpc, 'checkin', { provider: id, account: account.key })
-                            .then(result => {
-                              setProviderError(id, result.ok ? t('checkinOk', { message: result.message }) : t('checkinFail', { message: result.message }))
-                            })
-                            .catch(error => { setProviderError(id, t('checkinFail', { message: messageOf(error) })) })
-                        }}
-                      >
-                        {t('checkin')}
-                      </button>
+                    {id === 'codebuddy' && (
+                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                        {checkinStatus !== undefined && (
+                          <span
+                            style={checkinStatus.checkedInToday ? styles.checkinBadgeDone : styles.checkinBadgePlanned}
+                            title={checkinStatus.lastMessage ? `${t('checkinAutoSchedule')}: ${checkinStatus.lastMessage}` : t('checkinAutoSchedule')}
+                          >
+                            {checkinStatus.checkedInToday
+                              ? `✓ ${t('checkinTodayDone')}`
+                              : `⏰ ${t('checkinNextScheduled', {
+                                  time: checkinStatus.scheduledTime
+                                    ? new Date(checkinStatus.scheduledTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                                    : '07:xx',
+                                })}`}
+                          </span>
+                        )}
+                        {rpc !== undefined && (
+                          <button
+                            type="button"
+                            style={styles.button}
+                            onClick={() => {
+                              void callSubscriptionsAuth<{ ok: boolean; message: string }>(rpc, 'checkin', { provider: id, account: account.key })
+                                .then(result => {
+                                  setProviderError(id, result.ok ? t('checkinOk', { message: result.message }) : t('checkinFail', { message: result.message }))
+                                  void loadCheckinStatus()
+                                })
+                                .catch(error => { setProviderError(id, t('checkinFail', { message: messageOf(error) })) })
+                            }}
+                          >
+                            {t('checkin')}
+                          </button>
+                        )}
+                      </div>
                     )}
                   </div>
                   {showUsage && (
