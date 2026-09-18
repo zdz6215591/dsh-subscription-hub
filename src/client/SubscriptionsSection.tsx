@@ -306,6 +306,13 @@ const styles: Record<string, CSSProperties> = {
     color: 'var(--dsw-alias-label-primary)', font: 'inherit', fontSize: 12, lineHeight: '18px',
     cursor: 'pointer',
   },
+  buttonDisabled: {
+    boxSizing: 'border-box', display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    height: 28, padding: '0 10px', borderRadius: 14,
+    border: '1px solid var(--dsw-alias-border-l2)', background: 'transparent',
+    color: 'var(--dsw-alias-label-tertiary)', font: 'inherit', fontSize: 12, lineHeight: '18px',
+    cursor: 'default', opacity: 0.75,
+  },
   usage: {
     display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4,
     borderTop: '1px solid var(--dsw-alias-border-l2)', paddingTop: 8,
@@ -480,24 +487,6 @@ const styles: Record<string, CSSProperties> = {
     fontSize: 11, lineHeight: '16px',
     padding: '1px 8px', borderRadius: 6,
     color: 'var(--dsw-alias-label-tertiary)',
-    whiteSpace: 'nowrap', flexShrink: 0,
-  },
-  checkinBadgeDone: {
-    display: 'inline-flex', alignItems: 'center',
-    fontSize: 11, lineHeight: '16px', fontWeight: 500,
-    padding: '2px 8px', borderRadius: 6,
-    background: 'var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1))',
-    border: '1px solid var(--dsw-alias-border-l2)',
-    color: 'var(--dsw-alias-state-success-primary)',
-    whiteSpace: 'nowrap', flexShrink: 0,
-  },
-  checkinBadgePlanned: {
-    display: 'inline-flex', alignItems: 'center',
-    fontSize: 11, lineHeight: '16px', fontWeight: 500,
-    padding: '2px 8px', borderRadius: 6,
-    background: 'var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1))',
-    border: '1px solid var(--dsw-alias-border-l2)',
-    color: 'var(--dsw-alias-label-secondary)',
     whiteSpace: 'nowrap', flexShrink: 0,
   },
   proxyMessage: { margin: 0, fontSize: 12, lineHeight: '18px' },
@@ -1533,26 +1522,26 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                     >
                       {t('logout')}
                     </button>
-                    {id === 'codebuddy' && (
-                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-                        {checkinStatus !== undefined && (
-                          <span
-                            style={checkinStatus.checkedInToday ? styles.checkinBadgeDone : styles.checkinBadgePlanned}
-                            title={checkinStatus.lastMessage ? `${t('checkinAutoSchedule')}: ${checkinStatus.lastMessage}` : t('checkinAutoSchedule')}
-                          >
-                            {checkinStatus.checkedInToday
-                              ? `✓ ${t('checkinTodayDone')}`
-                              : `⏰ ${t('checkinNextScheduled', {
-                                  time: checkinStatus.scheduledTime
-                                    ? new Date(checkinStatus.scheduledTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                                    : '07:xx',
-                                })}`}
-                          </span>
-                        )}
-                        {rpc !== undefined && (
+                    {id === 'codebuddy' && rpc !== undefined && (
+                      (() => {
+                        const isDone = checkinStatus?.checkedInToday === true
+                        const buttonText = isDone
+                          ? `✓ ${t('checkinDone')}`
+                          : t('checkin')
+                        const buttonTooltip = isDone
+                          ? (checkinStatus?.lastMessage
+                              ? `${t('checkinTodayDone')} · ${checkinStatus.lastMessage}`
+                              : t('checkinTodayDone'))
+                          : (checkinStatus?.scheduledTime
+                              ? t('checkinNextScheduled', {
+                                  time: new Date(checkinStatus.scheduledTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                                })
+                              : t('checkinAutoSchedule'))
+                        return (
                           <button
                             type="button"
-                            style={styles.button}
+                            style={isDone ? styles.buttonDisabled : styles.button}
+                            title={buttonTooltip}
                             onClick={() => {
                               void callSubscriptionsAuth<{ ok: boolean; message: string }>(rpc, 'checkin', { provider: id, account: account.key })
                                 .then(result => {
@@ -1562,10 +1551,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                                 .catch(error => { setProviderError(id, t('checkinFail', { message: messageOf(error) })) })
                             }}
                           >
-                            {t('checkin')}
+                            {buttonText}
                           </button>
-                        )}
-                      </div>
+                        )
+                      })()
                     )}
                   </div>
                   {showUsage && (
