@@ -69,24 +69,37 @@ describe('new provider account keys', () => {
   })
 })
 
-describe('model visibility deny-list', () => {
-  it('hides opted-out ids and leaves new ones visible', async () => {
+describe('model visibility management', () => {
+  it('defaults new models to hidden and tracks unread status', async () => {
     const home = mkdtempSync(join(tmpdir(), 'vis-'))
     TEMP_DIRS.push(home)
     const previous = process.env.DSH_HOME
     process.env.DSH_HOME = home
     try {
-      await setModelVisible('codex', 'gpt-hidden', false)
-      const hidden = await hiddenIds('codex')
-      assert.equal(hidden.has('gpt-hidden'), true)
-      const listed = await filterVisible('codex', [
-        { id: 'gpt-hidden' },
-        { id: 'gpt-shown' },
+      // First discovery initializes known list without tagging them all as new
+      const initial = await filterVisible('codex', [
+        { id: 'gpt-original' },
       ])
-      assert.deepEqual(listed.map(model => model.id), ['gpt-shown'])
-      await setModelVisible('codex', 'gpt-hidden', true)
-      const restored = await filterVisible('codex', [{ id: 'gpt-hidden' }])
-      assert.deepEqual(restored.map(model => model.id), ['gpt-hidden'])
+      assert.deepEqual(initial.map(m => m.id), ['gpt-original'])
+
+      // Newly discovered model defaults to hidden and unread
+      const withNew = await filterVisible('codex', [
+        { id: 'gpt-original' },
+        { id: 'gpt-brand-new' },
+      ])
+      // gpt-brand-new is hidden by default:
+      assert.deepEqual(withNew.map(m => m.id), ['gpt-original'])
+
+      const hidden = await hiddenIds('codex')
+      assert.equal(hidden.has('gpt-brand-new'), true)
+
+      // User explicitly enables the new model:
+      await setModelVisible('codex', 'gpt-brand-new', true)
+      const listedAfterEnable = await filterVisible('codex', [
+        { id: 'gpt-original' },
+        { id: 'gpt-brand-new' },
+      ])
+      assert.deepEqual(listedAfterEnable.map(m => m.id), ['gpt-original', 'gpt-brand-new'])
     } finally {
       if (previous === undefined) delete process.env.DSH_HOME
       else process.env.DSH_HOME = previous

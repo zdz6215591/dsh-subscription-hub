@@ -34,7 +34,7 @@ export const SUBSCRIPTIONS_AUTH_ENDPOINTS = [
   'speed', 'setSpeed',
   'proxyGet', 'proxySet', 'proxyTest',
   'modelDefaults', 'setModelDefault',
-  'checkin', 'checkinStatus', 'visibility', 'setVisible', 'refreshModels',
+  'checkin', 'checkinStatus', 'visibility', 'setVisible', 'refreshModels', 'markModelsRead',
   'poolGet', 'poolSet',
   'tokenStats',
 ] as const
@@ -140,9 +140,10 @@ export interface ModelDefaultsCatalog {
 export interface ExtraOps {
   checkin(provider: ProviderId, account: string): Promise<{ ok: boolean; message: string }>
   checkinStatus?(): Promise<CodeBuddyCheckinStatusView>
-  visibility(provider: ProviderId): Promise<{ id: string; name: string; visible: boolean }[]>
+  visibility(provider: ProviderId): Promise<{ id: string; name: string; visible: boolean; unread?: boolean }[]>
   setVisible(provider: ProviderId, model: string, visible: boolean): Promise<void>
   refreshModels?(provider?: ProviderId): Promise<{ ok: boolean }>
+  markModelsRead?(provider: ProviderId): Promise<{ ok: boolean }>
 }
 
 /** Default-effort picker operations behind the `modelDefaults/setModelDefault` endpoints. */
@@ -657,6 +658,10 @@ async function dispatch(
         ? (pStr as ProviderId)
         : undefined
       return ok(await extras.refreshModels(provider))
+    }
+    case 'markModelsRead': {
+      if (extras?.markModelsRead === undefined) throw new BadRequest('markModelsRead is unavailable')
+      return ok(await extras.markModelsRead(readProvider(payload)))
     }
     case 'tokenStats': {
       return ok(await getTokenSavingsSummary())

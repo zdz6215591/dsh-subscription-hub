@@ -696,7 +696,7 @@ function creditWindow(
     usedPercent: Math.min(100, Math.max(0, (used / cap) * 100)),
     remaining: Math.max(cap - used, 0),
     limit: cap,
-    ...typeof resetAt === 'number' ? { resetsAt: resetAt } : {},
+    ...typeof resetAt === 'number' && resetAt > 0 ? { resetsAt: resetAt } : {},
     ...scope === undefined ? {} : { scope },
   }
 }
@@ -769,42 +769,49 @@ export async function fetchCommandCodeUsage(
   signal?: AbortSignal,
 ): Promise<ProviderUsage> {
   const headers = { authorization: `Bearer ${session.accessToken}`, accept: 'application/json', ...attributionHeaders() }
-  const opts = { headers, ...signal === undefined ? {} : { signal } }
+
+  const getJson = async (path: string, timeoutMs: number): Promise<unknown> => {
+    try {
+      const perSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs)
+      const res = await fetchFn(`${COMMANDCODE_API_BASE}${path}`, { headers, signal: perSignal })
+      if (res.ok) return await res.json()
+    } catch {
+      // Degrades gracefully per endpoint
+    }
+    return undefined
+  }
+
+  // Fetch billing credits (essential) in parallel with optional identity
+  const [whoami, credits] = await Promise.all([
+    getJson('/alpha/whoami', 2500) as Promise<{ user?: { name?: string }; org?: { id?: string } } | undefined>,
+    getJson('/alpha/billing/credits', 8000),
+  ])
+
+  if (!credits) return { supported: false }
+
   let planName: string | undefined
   let planCap: number | undefined
   let periodEnd: number | undefined
-  let orgId: string | undefined
-  try {
-    const whoami = await fetchFn(`${COMMANDCODE_API_BASE}/alpha/whoami`, opts)
-    if (whoami.ok) {
-      const body = await whoami.json() as { user?: { name?: string }; org?: { id?: string } }
-      if (typeof body.user?.name === 'string') planName = body.user.name
-      if (typeof body.org?.id === 'string' && body.org.id.length > 0) orgId = body.org.id
+
+  if (typeof whoami?.user?.name === 'string') planName = whoami.user.name
+  const orgId = typeof whoami?.org?.id === 'string' && whoami.org.id.length > 0 ? whoami.org.id : undefined
+
+  // Optionally fetch subscription if orgId exists or directly
+  const subPath = orgId === undefined
+    ? '/alpha/billing/subscriptions'
+    : `/alpha/billing/subscriptions?orgId=${encodeURIComponent(orgId)}`
+  const subscription = await getJson(subPath, 2500) as { data?: { planId?: string; currentPeriodEnd?: unknown } } | undefined
+  if (subscription?.data) {
+    const planId = typeof subscription.data.planId === 'string' ? subscription.data.planId : undefined
+    const info = planId === undefined ? undefined : commandCodePlanInfo(planId)
+    if (info !== undefined) {
+      planName = info.name
+      planCap = info.monthlyCredits
     }
-  } catch { /* identity is optional */ }
-  try {
-    const subPath = orgId === undefined
-      ? '/alpha/billing/subscriptions'
-      : `/alpha/billing/subscriptions?orgId=${encodeURIComponent(orgId)}`
-    const subscription = await fetchFn(`${COMMANDCODE_API_BASE}${subPath}`, opts)
-    if (subscription.ok) {
-      const body = await subscription.json() as { data?: { planId?: string; currentPeriodEnd?: unknown } }
-      const planId = typeof body.data?.planId === 'string' ? body.data.planId : undefined
-      const info = planId === undefined ? undefined : commandCodePlanInfo(planId)
-      if (info !== undefined) {
-        planName = info.name
-        planCap = info.monthlyCredits
-      }
-      periodEnd = periodEndMs(body.data?.currentPeriodEnd)
-    }
-  } catch { /* plan cap is optional */ }
-  try {
-    const credits = await fetchFn(`${COMMANDCODE_API_BASE}/alpha/billing/credits`, opts)
-    if (!credits.ok) return { supported: false }
-    return parseCommandCodeCredits(await credits.json(), planCap, planName, periodEnd)
-  } catch {
-    return { supported: false }
+    periodEnd = periodEndMs(subscription.data.currentPeriodEnd)
   }
+
+  return parseCommandCodeCredits(credits, planCap, planName, periodEnd)
 }
 
 export async function startCommandCodeLogin(): Promise<{ authorizeUrl: string; wait: () => Promise<CommandCodeSession> }> {

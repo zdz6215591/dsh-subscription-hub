@@ -102,6 +102,7 @@ export interface VisibleModelView {
   id: string
   name: string
   visible: boolean
+  unread?: boolean
 }
 
 /** `proxyGet` endpoint value: the node half owns this shape (no secrets). */
@@ -477,6 +478,21 @@ const styles: Record<string, CSSProperties> = {
     height: 22, padding: 0, border: 'none', background: 'transparent',
     font: 'inherit', fontSize: 12, lineHeight: '18px', textAlign: 'left',
     color: 'var(--dsw-alias-label-secondary)', cursor: 'pointer',
+  },
+  unreadDot: {
+    width: 6, height: 6, borderRadius: '50%',
+    background: 'var(--dsw-alias-state-danger-primary, #f43f5e)',
+    display: 'inline-block', flexShrink: 0,
+    marginLeft: 6, marginRight: 2,
+    opacity: 0.85,
+  },
+  unreadModelDot: {
+    width: 5, height: 5, borderRadius: '50%',
+    background: 'var(--dsw-alias-state-danger-primary, #f43f5e)',
+    display: 'inline-block', flexShrink: 0,
+    marginLeft: 6,
+    verticalAlign: 'middle',
+    opacity: 0.85,
   },
   visibilityGrid: {
     display: 'flex', flexWrap: 'wrap', gap: '6px 12px',
@@ -1182,10 +1198,30 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const toggleVisibility = useCallback((provider: SubscriptionProvider): void => {
     setVisibilityOpen(prev => {
       const nextOpen = prev[provider] !== true
-      if (nextOpen) void loadVisibility(provider)
+      if (nextOpen) {
+        void loadVisibility(provider)
+        if (rpc !== undefined && visibilityModels[provider]?.some(m => m.unread)) {
+          void callSubscriptionsAuth(rpc, 'markModelsRead', { provider }).catch(() => {})
+        }
+      } else {
+        setVisibilityModels(cur => ({
+          ...cur,
+          [provider]: (cur[provider] ?? []).map(m => m.unread ? { ...m, unread: false } : m),
+        }))
+      }
       return { ...prev, [provider]: nextOpen }
     })
-  }, [loadVisibility])
+  }, [loadVisibility, rpc, visibilityModels])
+
+  // Preload visibility in background for connected providers so summary and unread badges show immediately.
+  useEffect(() => {
+    if (rpc === undefined) return
+    for (const { id } of PROVIDERS) {
+      if (hasAccount(statuses[id]) && visibilityModels[id] === undefined && !visibilityInflightRef.current.has(id)) {
+        void loadVisibility(id)
+      }
+    }
+  }, [rpc, statuses, loadVisibility, visibilityModels])
 
   /** Drop the server's cached catalogs, then re-read this provider's model list. */
   const refreshModelList = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
@@ -2050,6 +2086,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
               const open = visibilityOpen[id] === true
               const models = visibilityModels[id]
               const visibleCount = (models ?? []).filter(model => model.visible).length
+              const hasUnread = (models ?? []).some(model => model.unread === true)
               return (
                 <div style={styles.defaultEffort}>
                   <button
@@ -2058,7 +2095,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                     aria-expanded={open}
                     onClick={() => { toggleVisibility(id) }}
                   >
-                    <span style={styles.usageTitle}>{t('visibilityTitle')}</span>
+                    <span style={{ display: 'inline-flex', alignItems: 'center' }}>
+                      <span style={styles.usageTitle}>{t('visibilityTitle')}</span>
+                      {!open && hasUnread && <span style={styles.unreadDot} title={t('newModelBadge')} />}
+                    </span>
                     <span style={styles.usagePlan}>
                       {models === undefined
                         ? (visibilityLoading[id] === true ? t('visibilityLoading') : '')
@@ -2110,7 +2150,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                                   checked={model.visible}
                                   onChange={event => { void setVisible(id, model.id, event.target.checked) }}
                                 />
-                                <span style={styles.defaultEffortName} title={model.id}>{model.name}</span>
+                                <span style={styles.defaultEffortName} title={model.id}>
+                                  {model.name}
+                                  {model.unread && <span style={styles.unreadModelDot} title={t('newModelBadge')} />}
+                                </span>
                               </label>
                             ))}
                           </div>

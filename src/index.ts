@@ -158,7 +158,7 @@ import {
   refreshZed,
   sessionFromZedPaste,
 } from './providers/zed.js'
-import { filterVisible, hiddenIds, setModelVisible } from './model-visibility.js'
+import { filterVisible, hiddenIds, markProviderModelsRead, setModelVisible, syncDiscoveredModels } from './model-visibility.js'
 import { createXSearchTool } from './tools/x-search.js'
 import { createImageGenerateTool } from './tools/image-generate.js'
 import { createVideoGenerateTool, videosDirectory } from './tools/video-generate.js'
@@ -1302,8 +1302,20 @@ export function apply(ctx: Context, config: Config): void {
       const adapter = adapters.get(provider)
       if (adapter === undefined) return []
       const models = await adapter.listOwnModels(provider)
-      const hidden = await hiddenIds(provider)
-      return models.map(model => ({ id: model.id, name: model.name, visible: !hidden.has(model.id) }))
+      const modelIds = models.map(m => m.id)
+      const { hidden, unread } = await syncDiscoveredModels(provider, modelIds)
+      return models.map(model => ({
+        id: model.id,
+        name: model.name,
+        visible: !hidden.has(model.id),
+        unread: unread.has(model.id),
+      }))
+    },
+    async markModelsRead(provider) {
+      if (provider !== undefined) {
+        await markProviderModelsRead(provider)
+      }
+      return { ok: true }
     },
     async setVisible(provider, model, visible) {
       await setModelVisible(provider, model, visible)
