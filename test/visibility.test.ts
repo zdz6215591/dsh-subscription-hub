@@ -1,6 +1,7 @@
 import { describe, it, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
+import { readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { accountKeyOf } from '../src/auth/store.js'
@@ -100,6 +101,16 @@ describe('model visibility management', () => {
         { id: 'gpt-brand-new' },
       ])
       assert.deepEqual(listedAfterEnable.map(m => m.id), ['gpt-original', 'gpt-brand-new'])
+
+      // Trailing corruption in the file must self-heal and never throw
+      const { visibilityFilePath } = await import('../src/model-visibility.js')
+      const p = visibilityFilePath()
+      const corrupt = (await readFile(p, 'utf8')) + '\n  "unread": {}\n}\n'
+      await writeFile(p, corrupt, 'utf8')
+
+      // Reading or filtering now must succeed without syntax error:
+      const recovered = await filterVisible('codex', [{ id: 'gpt-original' }])
+      assert.deepEqual(recovered.map(m => m.id), ['gpt-original'])
     } finally {
       if (previous === undefined) delete process.env.DSH_HOME
       else process.env.DSH_HOME = previous
