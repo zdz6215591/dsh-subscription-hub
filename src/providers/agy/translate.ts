@@ -316,16 +316,25 @@ export function toAgyRequestBody(
   }
   if (options.stop !== undefined && options.stop.length > 0) generationConfig.stopSequences = options.stop
   // Level-thinking: map the DSH reasoning effort to thinkingConfig.
-  // Id-bound models (thinking !== 'level') never emit it — default is UI hint, not wire default.
   const effort = options.reasoningEffort?.toLowerCase()
-  if (effort && isLevelThinkingModel(options.model) && LEVEL_THINKING_LEVELS.has(effort)) {
+  let wireModel = options.model
+  if (wireModel === 'gemini-3.5-flash-low' || wireModel === 'gemini-3.5-flash') {
+    if (effort === 'low') wireModel = 'gemini-3.5-flash-extra-low'
+    else if (effort === 'high') wireModel = 'gemini-3-flash-agent'
+    else wireModel = 'gemini-3.5-flash-low'
+  } else if (wireModel === 'gemini-pro-agent' || wireModel === 'gemini-3.1-pro') {
+    if (effort === 'low') wireModel = 'gemini-3.1-pro-low'
+    else wireModel = 'gemini-pro-agent'
+  }
+
+  if (effort && LEVEL_THINKING_LEVELS.has(effort)) {
     generationConfig.thinkingConfig = { thinkingLevel: effort, includeThoughts: true }
   }
 
   return {
     ...context.projectId ? { project: context.projectId } : {},
     requestId: generateAntigravityRequestId(),
-    model: options.model,
+    model: wireModel,
     userAgent: 'antigravity',
     requestType: 'agent',
     request: {

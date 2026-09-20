@@ -30,6 +30,8 @@ import type { FetchFn, ModelEntry, ProviderUsage } from './common.js'
 import type { PoolAdapter } from './pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, subscriptionRetryPolicy } from './rate-limit.js'
 import type { RateLimitWait, RetryDefaults } from './rate-limit.js'
+import { resolveImages, withToolResultImages } from '../translate/resolved.js'
+import type { TranslatableBlock, TranslatableMessage } from '../translate/resolved.js'
 
 export const COMMANDCODE_PREEMPT_MS = 365 * 24 * 60 * 60 * 1000
 export const COMMANDCODE_API_BASE = 'https://api.commandcode.ai'
@@ -233,9 +235,10 @@ function pairedToolCalls(messages: readonly Message[]): {
   return { ids: new Set([...callIds].filter((id) => resultIds.has(id))), names }
 }
 
-function isToolResultMessage(message: Message): boolean {
+function isToolResultMessage(message: Message | TranslatableMessage): boolean {
   if (message.role !== 'user') return false
-  const kind: string | undefined = message.source?.kind
+  const source = 'source' in message ? message.source : undefined
+  const kind: string | undefined = source?.kind
   if (kind !== undefined) return kind === 'tool'
   return message.content?.[0]?.type === 'tool-result'
 }
@@ -252,11 +255,11 @@ function toolParametersSchema(parameters: unknown): Record<string, unknown> {
   return { type: 'object', properties: {}, additionalProperties: true }
 }
 
-function blockText(block: ContentBlock): string {
+function blockText(block: ContentBlock | TranslatableBlock): string {
   return block.type === 'text' || block.type === 'reasoning' ? block.text : ''
 }
 
-function toolResultText(block: Extract<ContentBlock, { type: 'tool-result' }>): string {
+function toolResultText(block: { content: readonly (ContentBlock | TranslatableBlock)[]; isError?: boolean }): string {
   return block.content.map(blockText).filter(Boolean).join('\n')
 }
 
@@ -272,19 +275,90 @@ function toolResultText(block: Extract<ContentBlock, { type: 'tool-result' }>): 
  * Reasoning blocks are intentionally NOT replayed on the CLI transport
  * (they are replayed via messagesToOpenAI on the Provider API transport).
  */
-export function messagesToCommandCode(messages: readonly Message[]): unknown[] {
-  const out: unknown[] = []
-  const { ids: paired, names: toolNames } = pairedToolCalls(messages)
+/** Models whose Capabilities include Vision in Command Code. */
+export const KNOWN_COMMANDCODE_IMAGE_MODELS: ReadonlySet<string> = new Set([
+  'deepseek/deepseek-v4.1-flash',
+  'deepseek/deepseek-v4-flash-vision-exp',
+  'MiniMaxAI/MiniMax-M3',
+  'Qwen/Qwen3.6-Plus',
+  'Qwen/Qwen3.7-Flash',
+  'Qwen/Qwen3.7-Plus',
+  'Qwen/Qwen3.8-27B',
+  'Qwen/Qwen3.8-Flash',
+  'Qwen/Qwen3.8-Max',
+  'Qwen/Qwen3.8-Max-0902',
+  'claude-fable-5-1',
+  'claude-fable-5',
+  'claude-haiku-4-5-20251001',
+  'claude-opus-4-7',
+  'claude-opus-4-8',
+  'claude-opus-5',
+  'claude-sonnet-4-6',
+  'claude-sonnet-5',
+  'google/gemini-3.1-flash-lite',
+  'google/gemini-3.5-flash',
+  'google/gemini-3.5-flash-lite',
+  'google/gemini-3.6-flash',
+  'google/gemini-3.7-flash',
+  'google/gemini-3.8-flash',
+  'gpt-5.3-codex',
+  'gpt-5.4',
+  'gpt-5.4-mini',
+  'gpt-5.5',
+  'gpt-5.6-luna',
+  'gpt-5.6-sol',
+  'gpt-5.6-terra',
+  'gpt-6-astra',
+  'meta/muse-spark-1.1',
+  'meta/muse-spark-1.2',
+  'meta/muse-spark-1.2-contributor',
+  'meta/muse-spark-1.3',
+  'meta/muse-spark-1.3-contributor',
+  'moonshotai/Kimi-K2.5',
+  'moonshotai/Kimi-K2.6',
+  'moonshotai/Kimi-K2.7-Code',
+  'moonshotai/Kimi-K2.7-Code-Highspeed',
+  'moonshotai/Kimi-K3',
+  'sakana/fugu-ultra',
+  'stepfun/Step-3.7-Flash',
+  'thinkingmachines/inkling',
+  'thinkingmachines/inkling-small',
+  'xai/grok-4.5',
+  'xai/grok-4.6',
+  'xiaomi/mimo-v2.5',
+  'z-ai/glm-5.3-flash',
+])
 
-  for (const message of messages) {
+export function isCommandCodeVisionModel(modelId: string): boolean {
+  if (KNOWN_COMMANDCODE_IMAGE_MODELS.has(modelId)) return true
+  const lower = modelId.toLowerCase()
+  return lower.includes('v4.1-flash') || lower.includes('vision')
+    || lower.startsWith('claude-') || lower.startsWith('google/') || lower.startsWith('gemini')
+    || lower.startsWith('gpt-4') || lower.startsWith('gpt-5') || lower.startsWith('gpt-6')
+}
+
+export function messagesToCommandCode(messages: readonly (Message | TranslatableMessage)[]): unknown[] {
+  const out: unknown[] = []
+  const { ids: paired, names: toolNames } = pairedToolCalls(messages as readonly Message[])
+
+  for (const message of withToolResultImages(messages as readonly TranslatableMessage[])) {
     if (message.role === 'system') continue
 
     if (message.role === 'user' && !isToolResultMessage(message)) {
       const parts: unknown[] = []
       for (const block of message.content) {
-        if (block.type === 'text') parts.push({ type: 'text', text: block.text })
-        // Images are not yet wired through the attachment service on this
-        // path; skip rather than invent a half-baked image part.
+        if (block.type === 'text') {
+          parts.push({ type: 'text', text: block.text })
+        } else if (block.type === 'image' && 'dataBase64' in block) {
+          parts.push({
+            type: 'image',
+            source: {
+              type: 'base64',
+              media_type: block.mediaType,
+              data: block.dataBase64,
+            },
+          })
+        }
       }
       if (parts.length > 0) out.push({ role: 'user', content: parts })
       continue
@@ -342,23 +416,33 @@ function projectSlugFromPath(pathName: string): string {
 /**
  * Convert harness messages to the Provider API (`/provider/v1/chat/completions`)
  * OpenAI Chat Completions shape.
- *
- * DeepSeek's thinking-mode contract requires historical `reasoning_content` to
- * be passed back whenever tools are in play — omitting it fails the turn with
- * "The `reasoning_content` in the thinking mode must be passed back to the
- * API." The CLI transport carries no such field, so thinking models must ride
- * this transport instead.
  */
-export function messagesToOpenAI(messages: readonly Message[]): unknown[] {
+export function messagesToOpenAI(messages: readonly (Message | TranslatableMessage)[]): unknown[] {
   const out: unknown[] = []
-  const { ids: paired } = pairedToolCalls(messages)
+  const { ids: paired } = pairedToolCalls(messages as readonly Message[])
 
-  for (const message of messages) {
+  for (const message of withToolResultImages(messages as readonly TranslatableMessage[])) {
     if (message.role === 'system') continue
 
     if (message.role === 'user' && !isToolResultMessage(message)) {
-      const text = message.content.map(blockText).filter(Boolean).join('\n')
-      if (text.length > 0) out.push({ role: 'user', content: text })
+      const hasImage = message.content.some(b => b.type === 'image' && 'dataBase64' in b)
+      if (hasImage) {
+        const parts: unknown[] = []
+        for (const block of message.content) {
+          if (block.type === 'text') {
+            parts.push({ type: 'text', text: block.text })
+          } else if (block.type === 'image' && 'dataBase64' in block) {
+            parts.push({
+              type: 'image_url',
+              image_url: { url: `data:${block.mediaType};base64,${block.dataBase64}` },
+            })
+          }
+        }
+        if (parts.length > 0) out.push({ role: 'user', content: parts })
+      } else {
+        const text = message.content.map(blockText).filter(Boolean).join('\n')
+        if (text.length > 0) out.push({ role: 'user', content: text })
+      }
       continue
     }
 
@@ -385,8 +469,6 @@ export function messagesToOpenAI(messages: readonly Message[]): unknown[] {
         role: 'assistant',
         content: text === '' ? null : text,
       }
-      // The reason this transport exists for DeepSeek: replay private reasoning
-      // so the model can continue its chain of thought across tool calls.
       if (reasoning !== '') assistant.reasoning_content = reasoning
       if (toolCalls.length > 0) assistant.tool_calls = toolCalls
       out.push(assistant)
@@ -1005,7 +1087,7 @@ function toModelInfo(catalog: CommandCodeCatalogModel, provider: string): LlmMod
     provider,
     id: catalog.id,
     name: catalog.name,
-    inputModalities: ['text'],
+    inputModalities: isCommandCodeVisionModel(catalog.id) ? ['text', 'image'] : ['text'],
   }
 }
 
@@ -1080,7 +1162,7 @@ export class CommandCodeAdapter extends LlmAdapter {
         provider,
         id: model,
         name: live.name ?? configured?.name ?? model,
-        inputModalities: configured?.inputModalities ?? ['text'],
+        inputModalities: configured?.inputModalities ?? (isCommandCodeVisionModel(model) ? ['text', 'image'] : ['text']),
         context: { contextWindow: live.contextWindow },
         defaultMaxTokens: Math.min(live.maxTokens, DEFAULT_GENERATE_MAX_TOKENS),
       }
@@ -1089,7 +1171,7 @@ export class CommandCodeAdapter extends LlmAdapter {
       provider,
       id: model,
       name: configured?.name ?? model,
-      inputModalities: configured?.inputModalities ?? ['text'],
+      inputModalities: configured?.inputModalities ?? (isCommandCodeVisionModel(model) ? ['text', 'image'] : ['text']),
       context: { contextWindow: configured?.contextWindow ?? 128_000 },
       defaultMaxTokens: Math.min(configured?.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_GENERATE_MAX_TOKENS),
     }
@@ -1145,7 +1227,12 @@ export class CommandCodeAdapter extends LlmAdapter {
       if (cached !== undefined) return cached.models.map(model => toModelInfo(model, provider))
       this.options.onWarn?.(`commandcode catalog failed (${error instanceof Error ? error.message : String(error)})`)
     }
-    return this.options.models.map(model => ({ provider, id: model.id, name: model.name ?? model.id }))
+    return this.options.models.map(model => ({
+      provider,
+      id: model.id,
+      name: model.name ?? model.id,
+      inputModalities: isCommandCodeVisionModel(model.id) ? ['text', 'image'] : ['text'],
+    }))
   }
 
   streamAccount(options: GenerateOptions, account: string): AsyncIterable<StreamChunk> {
@@ -1176,6 +1263,8 @@ export class CommandCodeAdapter extends LlmAdapter {
         ? options.reasoningEffort
         : undefined
 
+      const resolvedMessages = await resolveImages(options.messages, this.options.resolveAttachments?.(), watchdog.signal)
+
       // CLI transport (`/alpha/generate`) — the Go plan's only surface.
       const cliBody = {
         config: {
@@ -1194,7 +1283,7 @@ export class CommandCodeAdapter extends LlmAdapter {
         skills: null,
         params: {
           model: options.model,
-          messages: messagesToCommandCode(options.messages),
+          messages: messagesToCommandCode(resolvedMessages),
           tools: (options.tools ?? []).map(tool => ({
             type: 'function',
             name: tool.name,
@@ -1222,7 +1311,7 @@ export class CommandCodeAdapter extends LlmAdapter {
         model: options.model,
         messages: [
           ...systemText.length > 0 ? [{ role: 'system', content: systemText }] : [],
-          ...messagesToOpenAI(options.messages),
+          ...messagesToOpenAI(resolvedMessages),
         ],
         ...openAiTools.length > 0 ? { tools: openAiTools } : {},
         max_tokens: maxTokens,

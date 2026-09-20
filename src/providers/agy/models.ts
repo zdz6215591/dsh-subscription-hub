@@ -7,7 +7,7 @@
 import { ReasoningEffortId, type LlmModelInfo, type LlmModelReasoningInfo, type LlmResolvedModelInfo, type ModelModality } from '@deepseek-ai/dsh-llm'
 import { AGY_ENDPOINT_FALLBACKS, getAgyBootstrapClientMetadata, getAgyBootstrapUserAgent } from './constants.js'
 import { proxiedFetch } from '../../http.js'
-import { AGY_PUBLIC_MODELS, catalogModel, isChatCallableModelId, isLevelThinkingModel } from './catalog.js'
+import { AGY_PUBLIC_MODELS, catalogModel, cleanAgyDisplayName, isChatCallableModelId, isLevelThinkingModel } from './catalog.js'
 import type { ProviderUsage, UsageWindow } from '../common.js'
 
 export const AGY_PROVIDER = 'agy'
@@ -80,16 +80,21 @@ export async function fetchAvailableModels(
   throw lastError instanceof Error ? lastError : new Error('fetchAvailableModels: all endpoints failed')
 }
 
-/** Merge dynamic ids with catalog metadata; non-chat models and unknowns keep minimal info. */
+/** Merge dynamic ids with catalog metadata; redundant variants and suffix tags are folded. */
 export function mergeModelCatalog(dynamic: DiscoveredModels): LlmModelInfo[] {
   const entries: LlmModelInfo[] = []
+  const seenNames = new Set<string>()
   for (const [id, entry] of Object.entries(dynamic.models ?? {})) {
     if (!isChatCallableModelId(id)) continue
     const meta = catalogModel(id)
+    const rawName = meta?.name ?? entry.displayName ?? entry.modelName ?? id
+    const cleanName = cleanAgyDisplayName(rawName)
+    if (seenNames.has(cleanName)) continue
+    seenNames.add(cleanName)
     entries.push({
       provider: AGY_PROVIDER,
       id,
-      name: entry.displayName ?? meta?.name ?? entry.modelName ?? id,
+      name: cleanName,
       inputModalities: inputModalitiesFor(meta),
       ...(meta ? { context: { contextWindow: meta.contextLength } } : {}),
     })
@@ -138,7 +143,7 @@ export function catalogModelList(): LlmModelInfo[] {
   return AGY_PUBLIC_MODELS.map((model) => ({
     provider: AGY_PROVIDER,
     id: model.id,
-    name: model.name,
+    name: cleanAgyDisplayName(model.name),
     inputModalities: inputModalitiesFor(model),
     context: { contextWindow: model.contextLength },
   }))
@@ -163,14 +168,16 @@ export async function listAgyModels(
 /** Resolve one exact model's metadata (catalog-backed; dynamic ids pass through). */
 export function resolveAgyModel(provider: string, model: string): LlmResolvedModelInfo {
   const meta = catalogModel(model)
+  const isClaude = model.toLowerCase().startsWith('claude-')
+  const cleanName = cleanAgyDisplayName(meta?.name ?? model)
   if (isLevelThinkingModel(model)) {
     return {
       provider,
       id: model,
-      name: meta?.name ?? model,
+      name: cleanName,
       inputModalities: inputModalitiesFor(meta),
       context: { contextWindow: meta?.contextLength ?? 1048576 },
-      defaultMaxTokens: meta?.maxOutputTokens ?? 65536,
+      defaultMaxTokens: isClaude ? 64000 : (meta?.maxOutputTokens ?? 65536),
       // Return a shallow copy so callers cannot mutate the frozen singleton.
       reasoning: { ...LEVEL_REASONING, efforts: [...LEVEL_REASONING.efforts] },
     }
@@ -178,8 +185,8 @@ export function resolveAgyModel(provider: string, model: string): LlmResolvedMod
   return {
     provider,
     id: model,
-    name: meta?.name ?? model,
+    name: cleanName,
     inputModalities: inputModalitiesFor(meta),
-    ...(meta ? { context: { contextWindow: meta.contextLength }, defaultMaxTokens: meta.maxOutputTokens } : {}),
+    ...(meta ? { context: { contextWindow: meta.contextLength }, defaultMaxTokens: isClaude ? 64000 : meta.maxOutputTokens } : {}),
   }
 }

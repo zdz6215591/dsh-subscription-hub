@@ -267,13 +267,21 @@ const styles: Record<string, CSSProperties> = {
     color: 'var(--dsw-alias-label-primary)',
   },
   intro: { margin: '0 0 2px 0', color: 'var(--dsw-alias-label-tertiary)', fontSize: 13, lineHeight: '20px' },
-  savingsSection: {
-    display: 'flex', flexDirection: 'column', gap: 10,
-    padding: '4px 2px 14px 2px',
-    borderBottom: '1px solid var(--dsw-alias-border-l2)',
+  savingsCard: {
+    position: 'relative', overflow: 'hidden',
+    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 14,
+    padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 12,
+    background: 'linear-gradient(135deg, var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1)) 0%, var(--dsw-alias-bg-layer-1) 60%)',
+  },
+  savingsGlow: {
+    position: 'absolute', top: -60, right: -40, width: 190, height: 190,
+    borderRadius: '50%', pointerEvents: 'none',
+    background: 'radial-gradient(circle, var(--dsw-alias-state-success-primary) 0%, transparent 70%)',
+    opacity: 0.13,
   },
   savingsHeader: {
     display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12,
+    position: 'relative',
   },
   savingsTitleRow: { display: 'flex', alignItems: 'center', gap: 6 },
   savingsTitle: {
@@ -286,6 +294,7 @@ const styles: Record<string, CSSProperties> = {
   },
   savingsHero: {
     display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap',
+    position: 'relative',
   },
   savingsHeroValue: {
     fontSize: 32, fontWeight: 700, lineHeight: '36px', letterSpacing: -0.5,
@@ -296,7 +305,7 @@ const styles: Record<string, CSSProperties> = {
     fontSize: 12, color: 'var(--dsw-alias-label-tertiary)',
     fontVariantNumeric: 'tabular-nums', marginLeft: 4,
   },
-  savingsMetrics: { display: 'flex', gap: 24, flexWrap: 'wrap' },
+  savingsMetrics: { display: 'flex', gap: 24, flexWrap: 'wrap', position: 'relative' },
   savingsMetric: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 70 },
   savingsMetricValue: {
     fontSize: 15, fontWeight: 600, lineHeight: '22px',
@@ -304,20 +313,28 @@ const styles: Record<string, CSSProperties> = {
   },
   savingsMetricLabel: { fontSize: 11, lineHeight: '16px', color: 'var(--dsw-alias-label-tertiary)' },
   savingsProviders: {
-    display: 'flex', flexDirection: 'column', gap: 5,
-    paddingTop: 6,
+    display: 'flex', flexDirection: 'column', gap: 6,
+    paddingTop: 8, borderTop: '1px solid var(--dsw-alias-border-l2)',
+    position: 'relative',
   },
-  savingsProviderRow: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, lineHeight: '18px' },
-  savingsProviderName: { color: 'var(--dsw-alias-label-secondary)', minWidth: 92 },
+  savingsProviderRow: { display: 'flex', alignItems: 'center', gap: 12, fontSize: 12, lineHeight: '18px' },
+  savingsProviderName: {
+    color: 'var(--dsw-alias-label-secondary)',
+    width: 175,
+    flexShrink: 0,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
   savingsProviderBar: {
-    flex: 1, height: 4, borderRadius: 2, overflow: 'hidden',
+    flex: 1, height: 5, borderRadius: 3, overflow: 'hidden',
     background: 'var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1))',
     border: '1px solid var(--dsw-alias-border-l2)',
   },
-  savingsProviderFill: { display: 'block', height: '100%', borderRadius: 2, background: 'var(--dsw-alias-state-success-primary)' },
+  savingsProviderFill: { display: 'block', height: '100%', borderRadius: 3, background: 'var(--dsw-alias-state-success-primary)' },
   savingsProviderValue: {
     color: 'var(--dsw-alias-label-tertiary)', fontVariantNumeric: 'tabular-nums',
-    minWidth: 104, textAlign: 'right', fontSize: 11,
+    width: 140, flexShrink: 0, textAlign: 'right', fontSize: 11,
   },
   emptyHint: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
   card: {
@@ -1560,7 +1577,8 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const savingsPeak = savingsProviders.length > 0 ? savingsProviders[0]![1].costUsd : 1
 
   const renderSavingsBanner = (): ReactNode => (
-    <div style={styles.savingsSection}>
+    <div style={styles.savingsCard}>
+      <div style={styles.savingsGlow} aria-hidden="true" />
       <div style={styles.savingsHeader}>
         <div>
           <div style={styles.savingsTitleRow}>
