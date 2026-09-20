@@ -11,7 +11,7 @@ import { sessionFromZedPaste, parseZedModels, ndjsonToSse, parseZedUsage, buildZ
 import { parseMeterUsage } from '../src/providers/codebuddy-lib/usage.js'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, Message } from '@deepseek-ai/dsh-llm'
-import { messagesToCommandCode, messagesToOpenAI, parseCommandCodeAuthFile, parseCommandCodeCredits, parseCommandCodeOpenAIStream, parseCommandCodeStream, sessionFromCommandCodePaste } from '../src/providers/commandcode.js'
+import { messagesToCommandCode, messagesToOpenAI, parseCommandCodeAuthFile, parseCommandCodeCredits, parseCommandCodeOpenAIStream, parseCommandCodeStream, sessionFromCommandCodePaste, COMMANDCODE_KNOWN_EFFORTS } from '../src/providers/commandcode.js'
 import { extractAgyProjectId } from '../src/providers/agy.js'
 import { parseAgyQuotaUsage } from '../src/providers/agy/models.js'
 import { isAgyUnusableEndpoint } from '../src/providers/agy/constants.js'
@@ -669,6 +669,26 @@ describe('commandcode OpenAI transport', () => {
     assert.equal(chunks.some(c => c.type === 'usage'), true)
     assert.equal(chunks.at(-1)?.type, 'finish')
     assert.deepEqual(chunks.at(-1)?.reason, { kind: 'tool-calls' })
+  })
+})
+
+describe('commandcode reasoning efforts', () => {
+  it('exposes selectable effort levels for models the CLI table lists', () => {
+    // Mirrors Mars-Sea/dsh-commandcode-provider's KNOWN_EFFORTS snapshot.
+    assert.deepEqual(COMMANDCODE_KNOWN_EFFORTS['z-ai/glm-5.3-flash'], ['low', 'high', 'max'])
+    assert.deepEqual(COMMANDCODE_KNOWN_EFFORTS['deepseek/deepseek-v4.1-flash'], ['low', 'high', 'max'])
+    assert.deepEqual(COMMANDCODE_KNOWN_EFFORTS['google/gemini-3.8-flash'], ['low', 'medium', 'high'])
+    assert.deepEqual(COMMANDCODE_KNOWN_EFFORTS['claude-sonnet-5'], ['low', 'medium', 'high', 'xhigh', 'max'])
+  })
+
+  it('omits selectable efforts for models that reason automatically', () => {
+    // Tencent Hy3 / GLM-5 / GLM-5.1 / GLM-5.2-Fast think at a fixed depth:
+    // the official CLI sends no reasoning_effort, so the picker must not offer
+    // a selector for them.
+    assert.equal(COMMANDCODE_KNOWN_EFFORTS['tencent/hy3'], undefined)
+    assert.equal(COMMANDCODE_KNOWN_EFFORTS['zai-org/GLM-5'], undefined)
+    assert.equal(COMMANDCODE_KNOWN_EFFORTS['zai-org/GLM-5.1'], undefined)
+    assert.equal(COMMANDCODE_KNOWN_EFFORTS['zai-org/GLM-5.2-Fast'], undefined)
   })
 })
 

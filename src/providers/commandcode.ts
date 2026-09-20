@@ -7,7 +7,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { readFile } from 'node:fs/promises'
-import { attributionHeaders, LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
+import { attributionHeaders, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   ContentBlock,
   FinishReason,
@@ -1088,6 +1088,87 @@ function coercePositiveNumber(value: unknown): number | undefined {
   return n
 }
 
+/**
+ * Selectable reasoning-effort levels per Command Code catalog id, mirroring the
+ * official CLI's bundled model table (`dist/cli.mjs`) exactly — the Provider API
+ * exposes no reasoning metadata, so this snapshot is the source of truth.
+ *
+ * Models absent here either reason automatically at a fixed depth (the CLI omits
+ * `reasoning_effort` for them, so the picker must not offer a selector) or take
+ * no reasoning at all.
+ *
+ * Adapted from Mars-Sea/dsh-commandcode-provider (MIT) `KNOWN_EFFORTS`.
+ * Keep in sync with the official registry when new models ship.
+ */
+export const COMMANDCODE_KNOWN_EFFORTS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  'Qwen/Qwen3.8-Max': ['low', 'medium', 'xhigh'],
+  'Qwen/Qwen3.8-Max-0902': ['low', 'medium', 'xhigh'],
+  'Qwen/Qwen3.8-27B': ['low', 'medium', 'xhigh'],
+  'Qwen/Qwen3.8-Flash': ['low', 'medium', 'xhigh'],
+  'claude-fable-5-1': ['low', 'medium', 'high', 'xhigh', 'max'],
+  'claude-fable-5': ['low', 'medium', 'high', 'xhigh', 'max'],
+  'claude-opus-4-7': ['low', 'medium', 'high', 'xhigh', 'max'],
+  'claude-opus-4-8': ['low', 'medium', 'high', 'xhigh', 'max'],
+  'claude-opus-5': ['low', 'medium', 'high', 'xhigh', 'max'],
+  'claude-sonnet-4-6': ['low', 'medium', 'high', 'xhigh', 'max'],
+  'claude-sonnet-5': ['low', 'medium', 'high', 'xhigh', 'max'],
+  'deepseek/deepseek-v4-flash-fast': ['low', 'high', 'max'],
+  'deepseek/deepseek-v4.1-flash': ['low', 'high', 'max'],
+  'deepseek/deepseek-v4-flash': ['high', 'max'],
+  'deepseek/deepseek-v4-flash-vision-exp': ['high', 'max'],
+  'deepseek/deepseek-v4-pro': ['high', 'max'],
+  'google/gemini-3.1-flash-lite': ['low', 'medium', 'high'],
+  'google/gemini-3.5-flash': ['low', 'medium', 'high'],
+  'google/gemini-3.5-flash-lite': ['low', 'medium', 'high'],
+  'google/gemini-3.6-flash': ['low', 'medium', 'high'],
+  'google/gemini-3.7-flash': ['low', 'medium', 'high'],
+  'google/gemini-3.8-flash': ['low', 'medium', 'high'],
+  'gpt-5.3-codex': ['low', 'medium', 'high', 'xhigh'],
+  'gpt-5.4': ['low', 'medium', 'high', 'xhigh'],
+  'gpt-5.4-mini': ['low', 'medium', 'high'],
+  'gpt-5.5': ['low', 'medium', 'high', 'xhigh'],
+  'gpt-5.6-luna': ['low', 'medium', 'high', 'xhigh', 'max'],
+  'gpt-5.6-sol': ['low', 'medium', 'high', 'xhigh', 'max'],
+  'gpt-5.6-terra': ['low', 'medium', 'high', 'xhigh', 'max'],
+  'gpt-6-astra': ['low', 'medium', 'high', 'xhigh', 'max'],
+  'moonshotai/Kimi-K3': ['low', 'high', 'max'],
+  'sakana/fugu-ultra': ['high', 'xhigh'],
+  'tencent/hy4-preview': ['low', 'medium', 'high'],
+  'xai/grok-4.5': ['low', 'medium', 'high'],
+  'xai/grok-4.6': ['low', 'medium', 'high', 'xhigh'],
+  'z-ai/glm-5.3-flash': ['low', 'high', 'max'],
+  'z-ai/glm-5.3-flashx': ['low', 'high', 'max'],
+  'zai-org/GLM-5.2': ['high', 'max'],
+  'zai-org/GLM-5.3': ['low', 'high', 'max'],
+  'meta/muse-spark-1.1': ['low', 'medium', 'high', 'xhigh'],
+  'meta/muse-spark-1.2': ['low', 'medium', 'high', 'xhigh'],
+  'meta/muse-spark-1.2-contributor': ['low', 'medium', 'high', 'xhigh'],
+  'meta/muse-spark-1.3': ['low', 'medium', 'high', 'xhigh', 'max'],
+  'meta/muse-spark-1.3-contributor': ['low', 'medium', 'high', 'xhigh'],
+  'MiniMaxAI/MiniMax-M3': ['low', 'medium', 'high'],
+})
+
+/** Display names for Command Code effort ids. */
+const COMMANDCODE_EFFORT_NAMES: Readonly<Record<string, string>> = Object.freeze({
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'Extra High',
+  max: 'Max',
+})
+
+/** The `reasoning` block for a model, or undefined when it has no selectable levels. */
+function commandCodeReasoning(model: string): LlmResolvedModelInfo['reasoning'] | undefined {
+  const efforts = COMMANDCODE_KNOWN_EFFORTS[model]
+  if (efforts === undefined || efforts.length === 0) return undefined
+  return {
+    efforts: efforts.map(effort => ({
+      id: ReasoningEffortId(effort),
+      name: COMMANDCODE_EFFORT_NAMES[effort] ?? effort,
+    })),
+  }
+}
+
 /** Project a sized catalog model into the harness model-info shape. */
 function toModelInfo(catalog: CommandCodeCatalogModel, provider: string): LlmModelInfo {
   return {
@@ -1153,6 +1234,11 @@ export class CommandCodeAdapter extends LlmAdapter {
 
   async resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     const configured = this.options.models.find(entry => entry.id === model)
+    // Selectable reasoning levels come from the pinned CLI-table snapshot: the
+    // Provider API exposes no reasoning metadata, so a model outside the map
+    // either reasons at a fixed depth or takes no reasoning at all, and the
+    // picker must not offer a selector for it.
+    const reasoning = commandCodeReasoning(model)
     let live = this.catalogModel(model)
     if (live === undefined) {
       // Prime the live catalog on the resolve path so a caller that resolves a
@@ -1172,6 +1258,7 @@ export class CommandCodeAdapter extends LlmAdapter {
         inputModalities: configured?.inputModalities ?? (isCommandCodeVisionModel(model) ? ['text', 'image'] : ['text']),
         context: { contextWindow: live.contextWindow },
         defaultMaxTokens: Math.min(live.maxTokens, DEFAULT_GENERATE_MAX_TOKENS),
+        ...reasoning === undefined ? {} : { reasoning },
       }
     }
     return {
@@ -1181,6 +1268,7 @@ export class CommandCodeAdapter extends LlmAdapter {
       inputModalities: configured?.inputModalities ?? (isCommandCodeVisionModel(model) ? ['text', 'image'] : ['text']),
       context: { contextWindow: configured?.contextWindow ?? 128_000 },
       defaultMaxTokens: Math.min(configured?.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_GENERATE_MAX_TOKENS),
+      ...reasoning === undefined ? {} : { reasoning },
     }
   }
 
