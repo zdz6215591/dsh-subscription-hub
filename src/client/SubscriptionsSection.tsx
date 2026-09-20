@@ -341,6 +341,11 @@ const styles: Record<string, CSSProperties> = {
     border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 12,
     padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6,
   },
+  cardHeaderStatus: {
+    fontSize: 12, lineHeight: '18px',
+    color: 'var(--dsw-alias-label-tertiary)',
+    marginLeft: 4,
+  },
   addSectionCard: {
     border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 12,
     background: 'var(--dsw-alias-bg-layer-1)',
@@ -1732,8 +1737,8 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
             <div style={styles.cardHeader}>
               <span style={{ ...styles.dot, background: dotColor(status) }} />
               <span style={styles.name}>{name}</span>
+              <span style={styles.cardHeaderStatus}>{statusText(t, status)}</span>
             </div>
-            <p style={styles.statusLine}>{statusText(t, status)}</p>
             {status?.detail !== undefined && status.detail !== '' && (
               <p style={styles.statusLine}>{status.detail}</p>
             )}

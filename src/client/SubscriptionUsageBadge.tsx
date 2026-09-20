@@ -374,14 +374,6 @@ export function SubscriptionUsageBadge(props: SubscriptionUsageBadgeProps) {
           >
             {refreshing ? '刷新中…' : '刷新'}
           </button>
-          <button
-            type="button"
-            style={styles.dialogCloseBtn}
-            aria-label="关闭"
-            onClick={() => setOpen(false)}
-          >
-            ×
-          </button>
         </div>
       </div>
 
@@ -500,9 +492,9 @@ const styles: Record<string, CSSProperties> = {
     color: 'var(--dsw-alias-label-secondary)',
     border: '1px solid var(--dsw-alias-border-l2)',
     borderRadius: 12,
-    padding: '12px 14px',
-    fontSize: 12,
-    lineHeight: '18px',
+    padding: '10px 14px',
+    fontSize: 11,
+    lineHeight: '16px',
   },
   dialogHeader: {
     display: 'flex',
@@ -512,13 +504,12 @@ const styles: Record<string, CSSProperties> = {
   },
   dialogTitle: {
     fontWeight: 600,
-    fontSize: 13,
+    fontSize: 12,
     color: 'var(--dsw-alias-label-primary)',
   },
   dialogHeaderActions: {
     display: 'flex',
     alignItems: 'center',
-    gap: 6,
   },
   dialogRefreshBtn: {
     background: 'transparent',
@@ -529,38 +520,29 @@ const styles: Record<string, CSSProperties> = {
     padding: '2px 4px',
     font: 'inherit',
   },
-  dialogCloseBtn: {
-    background: 'transparent',
-    border: 'none',
-    color: 'var(--dsw-alias-label-tertiary)',
-    fontSize: 15,
-    lineHeight: '15px',
-    cursor: 'pointer',
-    padding: '0 4px',
-    font: 'inherit',
-  },
   dialogDivider: {
     borderTop: '1px solid var(--dsw-alias-border-l2)',
-    margin: '8px 0',
+    margin: '6px 0',
   },
   dialogBody: {
     display: 'flex',
     flexDirection: 'column',
-    gap: 8,
+    gap: 6,
   },
   accountSection: {
     borderTop: '1px dashed var(--dsw-alias-border-l1)',
-    paddingTop: 8,
-    marginTop: 4,
+    paddingTop: 6,
+    marginTop: 3,
   },
   accountHeader: {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: 8,
-    marginBottom: 4,
+    marginBottom: 2,
   },
   accountTitle: {
+    fontSize: 11,
     fontWeight: 500,
     color: 'var(--dsw-alias-label-primary)',
     display: 'flex',
@@ -570,13 +552,13 @@ const styles: Record<string, CSSProperties> = {
   defaultTag: {
     fontSize: 10,
     lineHeight: '14px',
-    padding: '0 4px',
-    borderRadius: 4,
+    padding: '0 3px',
+    borderRadius: 3,
     background: 'var(--dsw-alias-interactive-bg-hover)',
     color: 'var(--dsw-alias-label-secondary)',
   },
   planBadge: {
-    fontSize: 11,
+    fontSize: 10,
     color: 'var(--dsw-alias-label-tertiary)',
   },
   detailRow: {
@@ -584,15 +566,16 @@ const styles: Record<string, CSSProperties> = {
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: 12,
-    padding: '2px 0',
-    fontSize: 12,
+    padding: '1.5px 0',
+    fontSize: 11,
+    lineHeight: '16px',
   },
   detailLabel: {
     color: 'var(--dsw-alias-label-secondary)',
   },
   detailValue: {
-    color: 'var(--dsw-alias-label-primary)',
-    fontWeight: 500,
+    color: 'var(--dsw-alias-label-secondary)',
+    fontWeight: 400,
     fontVariantNumeric: 'tabular-nums',
   },
 }
