@@ -30,7 +30,7 @@ import { VideoGenerateToolview, createVideoLoader } from './VideoGenerateToolvie
 import type { VideoGenerateToolviewInjected } from './VideoGenerateToolview.js'
 import { SpeedSelect, createSpeedLoader, createSpeedSetter } from './SpeedSelect.js'
 import type { ModelDirectoriesLike, SpeedSelectInjected } from './SpeedSelect.js'
-import { SubscriptionUsageBadge } from './SubscriptionUsageBadge.js'
+import { SubscriptionUsageBadge, createCurrentModelReader } from './SubscriptionUsageBadge.js'
 import type { SubscriptionUsageBadgeInjected } from './SubscriptionUsageBadge.js'
 import { en, zh } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
@@ -163,6 +163,20 @@ export function apply(ctx: ClientContext): void {
       setSpeed: createSpeedSetter(connection, sessionId),
     }),
   }, SpeedSelect))
+
+  // The subscription usage pill: a compact readout of the CURRENT model's
+  // provider quota (CodeBuddy reports credits, everyone else a percentage).
+  // The current-model read shares the Speed toggle's `modelDirectories` path.
+  ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
+    name: 'conversation.composer.dock',
+    id: 'subscription-usage',
+    order: 10,
+    locale: NS,
+    inject: (sessionId: string): SubscriptionUsageBadgeInjected => ({
+      rpc: connection.rpc,
+      currentModel: createCurrentModelReader(models, sessionId),
+    }),
+  }, SubscriptionUsageBadge))
 
   // The /fast slash command offers the same Standard/Fast choice as a popup.
   // `available` is synchronous and sees only the session id, so the command

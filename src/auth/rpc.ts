@@ -15,6 +15,7 @@ import type { ProviderUsage } from '../providers/common.js'
 import type { ProxyConfigView, ProxyDraft, ProxyInput, ProxyTestResult } from '../http.js'
 import type { PoolModeController, PoolModeInput } from '../providers/pool-mode.js'
 import type { CodeBuddyCheckinStatusView } from '../providers/codebuddy.js'
+import { getTokenSavingsSummary } from '../stats/token-savings.js'
 
 /**
  * Endpoint-name prefix under the shared `/api` channel: endpoint `status`
@@ -33,8 +34,9 @@ export const SUBSCRIPTIONS_AUTH_ENDPOINTS = [
   'speed', 'setSpeed',
   'proxyGet', 'proxySet', 'proxyTest',
   'modelDefaults', 'setModelDefault',
-  'checkin', 'checkinStatus', 'visibility', 'setVisible',
+  'checkin', 'checkinStatus', 'visibility', 'setVisible', 'refreshModels',
   'poolGet', 'poolSet',
+  'tokenStats',
 ] as const
 
 /** The legacy RPC channel, kept for backward compatibility. */
@@ -140,6 +142,7 @@ export interface ExtraOps {
   checkinStatus?(): Promise<CodeBuddyCheckinStatusView>
   visibility(provider: ProviderId): Promise<{ id: string; name: string; visible: boolean }[]>
   setVisible(provider: ProviderId, model: string, visible: boolean): Promise<void>
+  refreshModels?(provider?: ProviderId): Promise<{ ok: boolean }>
 }
 
 /** Default-effort picker operations behind the `modelDefaults/setModelDefault` endpoints. */
@@ -646,6 +649,17 @@ async function dispatch(
       if (typeof visible !== 'boolean') throw new BadRequest('payload.visible must be a boolean')
       await extras.setVisible(provider, readString(payload, 'model'), visible)
       return ok({ ok: true })
+    }
+    case 'refreshModels': {
+      if (extras?.refreshModels === undefined) throw new BadRequest('refresh models is unavailable')
+      const pStr = (payload as Record<string, unknown>).provider
+      const provider = typeof pStr === 'string' && PROVIDER_IDS.includes(pStr as ProviderId)
+        ? (pStr as ProviderId)
+        : undefined
+      return ok(await extras.refreshModels(provider))
+    }
+    case 'tokenStats': {
+      return ok(await getTokenSavingsSummary())
     }
     case 'poolGet':
       if (poolMode === undefined) throw new BadRequest('pool mode is unavailable')

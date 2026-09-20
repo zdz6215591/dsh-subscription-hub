@@ -12,8 +12,8 @@
  * ModelsSection vocabulary minus hover rules, which inline styles cannot
  * express.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
-import type { CSSProperties } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
 import type { ConnectionHandle, RpcResult } from '@deepseek-ai/dsh-api-remotes/client'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
@@ -171,6 +171,26 @@ export interface CheckinStatusView {
   checkedInToday: boolean
 }
 
+/** One provider's share of the token-savings estimate. */
+export interface ProviderSavingsView {
+  tokens: number
+  costUsd: number
+  turns: number
+}
+
+/** `tokenStats` endpoint value: lifetime subscription token totals and savings. */
+export interface TokenSavingsView {
+  totalTokens: number
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  savedRmb: number
+  savedUsd: number
+  turns: number
+  byProvider: Record<string, ProviderSavingsView>
+  updatedAt: number
+}
+
 /** `login` endpoint value: the URL the user completes OAuth at. */
 interface LoginResponse {
   authorizeUrl: string
@@ -233,12 +253,80 @@ function fallbackTranslate(key: SubscriptionsKey, params?: Record<string, unknow
   return text
 }
 
+/** Compact token count for the savings banner (1.24B / 2196.16M / 12.3K). */
+function formatTokens(tokens: number): string {
+  if (tokens >= 1_000_000_000) return `${(tokens / 1_000_000_000).toFixed(2)}B`
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(2)}M`
+  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}K`
+  return String(tokens)
+}
+
 const styles: Record<string, CSSProperties> = {
   section: {
     display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 560,
     color: 'var(--dsw-alias-label-primary)',
   },
   intro: { margin: '0 0 2px 0', color: 'var(--dsw-alias-label-tertiary)', fontSize: 13, lineHeight: '20px' },
+  savingsCard: {
+    position: 'relative', overflow: 'hidden',
+    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 14,
+    padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 12,
+    background: 'linear-gradient(135deg, var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1)) 0%, var(--dsw-alias-bg-layer-1) 60%)',
+  },
+  savingsGlow: {
+    position: 'absolute', top: -60, right: -40, width: 190, height: 190,
+    borderRadius: '50%', pointerEvents: 'none',
+    background: 'radial-gradient(circle, var(--dsw-alias-state-success-primary) 0%, transparent 70%)',
+    opacity: 0.13,
+  },
+  savingsHeader: {
+    display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12,
+    position: 'relative',
+  },
+  savingsTitle: {
+    margin: 0, fontWeight: 600, fontSize: 14, lineHeight: '22px',
+    color: 'var(--dsw-alias-label-primary)',
+  },
+  savingsSubtitle: {
+    margin: '2px 0 0 0', fontSize: 12, lineHeight: '18px',
+    color: 'var(--dsw-alias-label-tertiary)',
+  },
+  savingsHero: {
+    display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap', position: 'relative',
+  },
+  savingsHeroValue: {
+    fontSize: 34, fontWeight: 700, lineHeight: '40px', letterSpacing: -0.5,
+    color: 'var(--dsw-alias-state-success-primary)', fontVariantNumeric: 'tabular-nums',
+  },
+  savingsHeroLabel: { fontSize: 13, lineHeight: '20px', color: 'var(--dsw-alias-label-secondary)' },
+  savingsHeroUsd: {
+    fontSize: 13, lineHeight: '20px', color: 'var(--dsw-alias-label-tertiary)',
+    fontVariantNumeric: 'tabular-nums',
+  },
+  savingsMetrics: { display: 'flex', gap: 22, flexWrap: 'wrap', position: 'relative' },
+  savingsMetric: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 78 },
+  savingsMetricValue: {
+    fontSize: 16, fontWeight: 600, lineHeight: '24px',
+    color: 'var(--dsw-alias-label-primary)', fontVariantNumeric: 'tabular-nums',
+  },
+  savingsMetricLabel: { fontSize: 11, lineHeight: '16px', color: 'var(--dsw-alias-label-tertiary)' },
+  savingsProviders: {
+    display: 'flex', flexDirection: 'column', gap: 5,
+    borderTop: '1px solid var(--dsw-alias-border-l2)', paddingTop: 10, position: 'relative',
+  },
+  savingsProviderRow: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, lineHeight: '18px' },
+  savingsProviderName: { color: 'var(--dsw-alias-label-secondary)', minWidth: 92 },
+  savingsProviderBar: {
+    flex: 1, height: 5, borderRadius: 3, overflow: 'hidden',
+    background: 'var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1))',
+    border: '1px solid var(--dsw-alias-border-l2)',
+  },
+  savingsProviderFill: { display: 'block', height: '100%', borderRadius: 3, background: 'var(--dsw-alias-state-success-primary)' },
+  savingsProviderValue: {
+    color: 'var(--dsw-alias-label-tertiary)', fontVariantNumeric: 'tabular-nums',
+    minWidth: 104, textAlign: 'right',
+  },
+  emptyHint: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
   card: {
     border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 12,
     padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6,
@@ -750,6 +838,11 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [poolModeError, setPoolModeError] = useState<string | undefined>(undefined)
   const [poolModeSaving, setPoolModeSaving] = useState(false)
   const [checkinStatus, setCheckinStatus] = useState<CheckinStatusView | undefined>(undefined)
+  /** Lifetime subscription token totals + estimated pay-as-you-go savings. */
+  const [savings, setSavings] = useState<TokenSavingsView | undefined>(undefined)
+  const [savingsLoading, setSavingsLoading] = useState(false)
+  /** Provider whose model catalog is being refreshed (undefined = idle). */
+  const [refreshingModels, setRefreshingModels] = useState<string | undefined>(undefined)
   /** Per-model default-effort picker state as answered by `modelDefaults`. */
   const [modelDefaults, setModelDefaults] = useState<Partial<Record<SubscriptionProvider, ModelDefaultsCatalog>>>({})
   const [modelDefaultsLoading, setModelDefaultsLoading] = useState(false)
@@ -1012,8 +1105,9 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     }
   }, [rpc])
 
-  const loadVisibility = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
-    if (rpc === undefined || visibilityInflightRef.current.has(provider)) return
+  const loadVisibility = useCallback(async (provider: SubscriptionProvider, force = false): Promise<void> => {
+    if (rpc === undefined) return
+    if (visibilityInflightRef.current.has(provider) && !force) return
     visibilityInflightRef.current.add(provider)
     setVisibilityLoading(prev => ({ ...prev, [provider]: true }))
     try {
@@ -1040,6 +1134,20 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       return { ...prev, [provider]: nextOpen }
     })
   }, [loadVisibility])
+
+  /** Drop the server's cached catalogs, then re-read this provider's model list. */
+  const refreshModelList = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
+    if (rpc === undefined || refreshingModels !== undefined) return
+    setRefreshingModels(provider)
+    try {
+      await callSubscriptionsAuth<{ ok: boolean }>(rpc, 'refreshModels', { provider })
+      await loadVisibility(provider, true)
+    } catch (error) {
+      setVisibilityError(prev => ({ ...prev, [provider]: messageOf(error) }))
+    } finally {
+      if (mountedRef.current) setRefreshingModels(undefined)
+    }
+  }, [rpc, refreshingModels, loadVisibility])
 
   const setVisible = useCallback(async (provider: SubscriptionProvider, model: string, visible: boolean): Promise<void> => {
     if (rpc === undefined) return
@@ -1210,6 +1318,21 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   useEffect(() => {
     void loadCheckinStatus()
   }, [loadCheckinStatus])
+
+  const loadSavings = useCallback(async (showSpinner = false): Promise<void> => {
+    if (rpc === undefined) return
+    if (showSpinner) setSavingsLoading(true)
+    try {
+      const res = await callSubscriptionsAuth<TokenSavingsView>(rpc, 'tokenStats', {})
+      if (mountedRef.current) setSavings(res)
+    } catch { /* best effort */ } finally {
+      if (mountedRef.current) setSavingsLoading(false)
+    }
+  }, [rpc])
+
+  useEffect(() => {
+    void loadSavings()
+  }, [loadSavings])
 
   /** Save a new global multi-account call mode. */
   const setPoolModeOption = useCallback((mode: 'priority' | 'quota_aware'): void => {
@@ -1394,9 +1517,83 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     return <p style={styles.intro}>{t('unavailable')}</p>
   }
 
+  // Connected providers render first and keep every management control; the
+  // rest collapse under "Add a subscription" with only their sign-in buttons.
+  const connectedProviders = PROVIDERS.filter(({ id }) => hasAccount(statuses[id]))
+  const availableProviders = PROVIDERS.filter(({ id }) => !hasAccount(statuses[id]))
+  const orderedProviders = [...connectedProviders, ...availableProviders]
+  const savingsProviders = savings === undefined
+    ? []
+    : Object.entries(savings.byProvider)
+      .filter(([, stat]) => stat.tokens > 0)
+      .sort((a, b) => b[1].costUsd - a[1].costUsd)
+  const savingsPeak = savingsProviders.length > 0 ? savingsProviders[0]![1].costUsd : 1
+
+  const renderSavingsBanner = (): ReactNode => (
+    <div style={styles.savingsCard}>
+      <div style={styles.savingsGlow} aria-hidden="true" />
+      <div style={styles.savingsHeader}>
+        <div>
+          <p style={styles.savingsTitle}>{t('savingsTitle')}</p>
+          <p style={styles.savingsSubtitle}>{t('savingsSubtitle')}</p>
+        </div>
+        <button
+          type="button"
+          style={{ ...styles.button, ...savingsLoading ? { opacity: 0.5, cursor: 'default' } : {} }}
+          disabled={savingsLoading}
+          onClick={() => { void loadSavings(true) }}
+        >
+          {savingsLoading ? t('savingsScanning') : t('savingsRefresh')}
+        </button>
+      </div>
+      {savings === undefined || savings.totalTokens === 0 ? (
+        <p style={styles.emptyHint}>{t('savingsEmpty')}</p>
+      ) : (
+        <>
+          <div style={styles.savingsHero}>
+            <span style={styles.savingsHeroValue}>{`¥ ${savings.savedRmb.toFixed(2)}`}</span>
+            <span style={styles.savingsHeroLabel}>{t('savingsLabel')}</span>
+            <span style={styles.savingsHeroUsd}>{t('savingsUsd', { amount: savings.savedUsd.toFixed(2) })}</span>
+          </div>
+          <div style={styles.savingsMetrics}>
+            <div style={styles.savingsMetric}>
+              <span style={styles.savingsMetricValue}>{formatTokens(savings.totalTokens)}</span>
+              <span style={styles.savingsMetricLabel}>{t('savingsTokens')}</span>
+            </div>
+            <div style={styles.savingsMetric}>
+              <span style={styles.savingsMetricValue}>{String(savings.turns)}</span>
+              <span style={styles.savingsMetricLabel}>{t('savingsTurns')}</span>
+            </div>
+          </div>
+          {savingsProviders.length > 0 && (
+            <div style={styles.savingsProviders}>
+              {savingsProviders.map(([id, stat]) => (
+                <div key={id} style={styles.savingsProviderRow}>
+                  <span style={styles.savingsProviderName}>
+                    {PROVIDERS.find(entry => entry.id === id)?.name ?? id}
+                  </span>
+                  <span style={styles.savingsProviderBar}>
+                    <span style={{
+                      ...styles.savingsProviderFill,
+                      width: `${String(Math.max(3, Math.round((stat.costUsd / savingsPeak) * 100)))}%`,
+                    }} />
+                  </span>
+                  <span style={styles.savingsProviderValue}>
+                    {`${formatTokens(stat.tokens)} · ¥${(stat.costUsd * 7.23).toFixed(2)}`}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+
   return (
     <div style={styles.section}>
       <p style={styles.intro}>{t('intro')}</p>
+      {renderSavingsBanner()}
       <div style={styles.globalCard}>
         {/* Row 1: 多账号调用模式 */}
         <div style={styles.globalRow}>
@@ -1466,16 +1663,30 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       </div>
 
       <div style={styles.providersHeader}>
-        <span style={styles.providersTitle}>{t('providersSectionTitle')}</span>
+        <span style={styles.providersTitle}>{t('activeSectionTitle')}</span>
       </div>
 
-      {PROVIDERS.map(({ id, name }) => {
+      {connectedProviders.length === 0 && (
+        <p style={styles.emptyHint}>{t('addSectionHint')}</p>
+      )}
+
+      {orderedProviders.map(({ id, name }, index) => {
         const status = statuses[id]
         const busy = status?.busy === true
         const deviceCode = deviceCodes[id]
         const accounts = status?.accounts ?? []
+        const isFirstAvailable = index === connectedProviders.length && connectedProviders.length > 0
         return (
-          <div key={id} style={styles.card}>
+          <Fragment key={id}>
+            {isFirstAvailable && (
+              <>
+                <div style={styles.providersHeader}>
+                  <span style={styles.providersTitle}>{t('addSectionTitle')}</span>
+                </div>
+                <p style={styles.emptyHint}>{t('addSectionHint')}</p>
+              </>
+            )}
+          <div style={styles.card}>
             <div style={styles.cardHeader}>
               <span style={{ ...styles.dot, background: dotColor(status) }} />
               <span style={styles.name}>{name}</span>
@@ -1650,12 +1861,11 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 </div>
               )
             })}
+            {/* The sign-in controls are identical for a connected card and a
+                not-yet-connected one: adding another account of an already
+                connected provider is the same gesture as the first login, so
+                the panel never grows a second, provider-specific button row. */}
             <div style={styles.actions}>
-              {!busy && accounts.length === 0 && id !== 'zed' && id !== 'commandcode' && (
-                <button type="button" style={styles.button} onClick={() => { void login(id) }}>
-                  {t('login')}
-                </button>
-              )}
               {!busy && id === 'zed' && (
                 <>
                   <button type="button" style={styles.button} onClick={() => { void login(id, 'import') }}>
@@ -1675,9 +1885,11 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                   <button type="button" style={styles.button} onClick={() => { void login(id, 'import') }}>
                     {t('importCommandCode')}
                   </button>
-                  <button type="button" style={styles.button} onClick={() => { void login(id, 'oauth') }}>
-                    {t('addAccountOAuth')}
-                  </button>
+                  {accounts.length === 0 && (
+                    <button type="button" style={styles.button} onClick={() => { void login(id, 'oauth') }}>
+                      {t('login')}
+                    </button>
+                  )}
                   <button
                     type="button"
                     style={styles.button}
@@ -1687,19 +1899,19 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                   </button>
                 </>
               )}
-              {!busy && accounts.length > 0 && id === 'claude' && (
+              {!busy && id === 'claude' && (
                 <>
                   <button type="button" style={styles.button} onClick={() => { void login(id, 'oauth') }}>
-                    {t('addAccountOAuth')}
+                    {accounts.length > 0 ? t('addAccountOAuth') : t('login')}
                   </button>
                   <button type="button" style={styles.button} onClick={() => { void login(id, 'keychain') }}>
                     {t('addAccountKeychain')}
                   </button>
                 </>
               )}
-              {!busy && accounts.length > 0 && id !== 'claude' && id !== 'commandcode' && id !== 'zed' && (
+              {!busy && id !== 'claude' && id !== 'commandcode' && id !== 'zed' && (
                 <button type="button" style={styles.button} onClick={() => { void login(id) }}>
-                  {t('addAccount')}
+                  {accounts.length > 0 ? t('addAccount') : t('login')}
                 </button>
               )}
               {busy && (
@@ -1874,6 +2086,26 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                   {open && (
                     <>
                       <p style={styles.statusLine}>{t('visibilityHint')}</p>
+                      <div style={styles.actions}>
+                        <button
+                          type="button"
+                          style={{ ...styles.button, ...refreshingModels !== undefined ? { opacity: 0.5, cursor: 'default' } : {} }}
+                          disabled={refreshingModels !== undefined}
+                          onClick={() => { void refreshModelList(id) }}
+                        >
+                          {refreshingModels === id ? t('refreshModelsRunning') : t('refreshModels')}
+                        </button>
+                        {models !== undefined && models.length > 0 && (
+                          <>
+                            <button type="button" style={styles.button} onClick={() => { void setAllVisible(id, true) }}>
+                              {t('visibilityShowAll')}
+                            </button>
+                            <button type="button" style={styles.button} onClick={() => { void setAllVisible(id, false) }}>
+                              {t('visibilityHideAll')}
+                            </button>
+                          </>
+                        )}
+                      </div>
                       {visibilityError[id] !== undefined && (
                         <p style={styles.errorLine}>{t('visibilityLoadFailed', { message: visibilityError[id] })}</p>
                       )}
@@ -1885,14 +2117,6 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                       )}
                       {models !== undefined && models.length > 0 && (
                         <>
-                          <div style={styles.actions}>
-                            <button type="button" style={styles.button} onClick={() => { void setAllVisible(id, true) }}>
-                              {t('visibilityShowAll')}
-                            </button>
-                            <button type="button" style={styles.button} onClick={() => { void setAllVisible(id, false) }}>
-                              {t('visibilityHideAll')}
-                            </button>
-                          </div>
                           <div style={styles.visibilityGrid}>
                             {models.map(model => (
                               <label key={model.id} style={styles.visibilityItem}>
@@ -1991,6 +2215,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
               </div>
             )}
           </div>
+          </Fragment>
         )
       })}
       {proxyOpen && (

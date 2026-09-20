@@ -13,6 +13,7 @@ import z from '@deepseek-ai/schemastery'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import type {
   AdapterRegistrationHandle,
+  GenerateOptions,
   LlmAdapter,
   LlmModelInfo,
   LlmResolvedModelInfo,
@@ -26,6 +27,9 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { readClaudeCodeCredentials, refreshClaudeSynced } from './auth/claude-code-creds.js'
 import { BadRequest, registerAuthRpc } from './auth/rpc.js'
+import { CodexClientVersionCache } from './providers/codex-client-version.js'
+import { ImageAccountPool } from './providers/image-pool.js'
+import { recordStreamTokenUsage } from './stats/token-savings.js'
 import type {
   AuthController,
   ImageBytesResult,
@@ -769,11 +773,15 @@ export function apply(ctx: Context, config: Config): void {
   let poolHealth: PoolHealthRegistry | undefined
   let poolUsage: PoolUsageTracker | undefined
   let poolAdapter: PoolAdapter | undefined
+  const codexVersionCache = new CodexClientVersionCache(proxiedFetch)
+  const imagePool = new ImageAccountPool({ onWarn })
   const authChanged = (provider: ProviderId, account?: string): void => {
     // Login, logout, and credential death all pass through here; a copilot
     // auth transition also drops the adapter's captured reasoning replay
     // state (isolation is already account-scoped — this is memory hygiene).
     if (provider === 'copilot') copilotAdapter?.clearReplayState()
+    if (provider === 'codex') codexVersionCache.invalidate()
+    if (provider === 'codex' || provider === 'grok') imagePool.clear(provider, account)
     adapters.get(provider)?.clearAccountCatalog(account)
     poolHealth?.clear(provider, account)
     poolUsage?.invalidate(provider, account)
@@ -802,6 +810,21 @@ export function apply(ctx: Context, config: Config): void {
   // Dropped on every copilot auth transition so replay state (captured
   // reasoning) never survives an account switch in memory.
   let copilotAdapter: CopilotAdapter | undefined
+
+  function registerTrackedAdapter(provider: ProviderId, adapter: AccountAwareAdapter): void {
+    const originalStream = adapter.stream.bind(adapter)
+    adapter.stream = async function* (options: GenerateOptions) {
+      for await (const chunk of originalStream(options)) {
+        if (chunk.type === 'usage' && chunk.usage) {
+          recordStreamTokenUsage(provider, options.model, chunk.usage)
+        }
+        yield chunk
+      }
+    }
+    adapters.set(provider, adapter)
+    handles.set(provider, ctx.llm.registerAdapter([provider], adapter))
+  }
+
   for (const provider of providers) {
     switch (provider) {
       case 'codex': {
@@ -828,6 +851,7 @@ export function apply(ctx: Context, config: Config): void {
           discovery: !overridden.has('codex'),
           onWarn,
           resolveAttachments,
+          resolveClientVersion: () => codexVersionCache.resolve(),
           // Durable catalog: capability metadata (reasoning efforts) survives
           // restarts, so a resumed session's selected effort keeps resolving.
           catalogStore: catalogStore('codex'),
@@ -839,8 +863,7 @@ export function apply(ctx: Context, config: Config): void {
             && adapter.supportsFastTier(model),
         })
         codexAdapter = adapter
-        adapters.set('codex', adapter)
-        handles.set('codex', ctx.llm.registerAdapter(['codex'], adapter))
+        registerTrackedAdapter('codex', adapter)
         break
       }
       case 'claude': {
@@ -874,8 +897,7 @@ export function apply(ctx: Context, config: Config): void {
           defaultEffortOf: (model: string) => defaultEffortOf('claude', model),
           pool: () => poolAdapter,
         })
-        adapters.set('claude', adapter)
-        handles.set('claude', ctx.llm.registerAdapter(['claude'], adapter))
+        registerTrackedAdapter('claude', adapter)
         break
       }
       case 'grok': {
@@ -907,8 +929,7 @@ export function apply(ctx: Context, config: Config): void {
           defaultEffortOf: (model: string) => defaultEffortOf('grok', model),
           pool: () => poolAdapter,
         })
-        adapters.set('grok', adapter)
-        handles.set('grok', ctx.llm.registerAdapter(['grok'], adapter))
+        registerTrackedAdapter('grok', adapter)
         break
       }
       case 'copilot': {
@@ -937,8 +958,7 @@ export function apply(ctx: Context, config: Config): void {
           defaultEffortOf: (model: string) => defaultEffortOf('copilot', model),
           pool: () => poolAdapter,
         })
-        adapters.set('copilot', copilotAdapter)
-        handles.set('copilot', ctx.llm.registerAdapter(['copilot'], copilotAdapter))
+        registerTrackedAdapter('copilot', copilotAdapter)
         break
       }
       case 'agy': {
@@ -966,8 +986,7 @@ export function apply(ctx: Context, config: Config): void {
           catalogStore: catalogStore('agy'),
           pool: () => poolAdapter,
         })
-        adapters.set('agy', adapter)
-        handles.set('agy', ctx.llm.registerAdapter(['agy'], adapter))
+        registerTrackedAdapter('agy', adapter)
         break
       }
       case 'commandcode': {
@@ -994,8 +1013,7 @@ export function apply(ctx: Context, config: Config): void {
           resolveAttachments,
           pool: () => poolAdapter,
         })
-        adapters.set('commandcode', adapter)
-        handles.set('commandcode', ctx.llm.registerAdapter(['commandcode'], adapter))
+        registerTrackedAdapter('commandcode', adapter)
         break
       }
       case 'codebuddy': {
@@ -1023,8 +1041,7 @@ export function apply(ctx: Context, config: Config): void {
           defaultEffortOf: (model: string) => defaultEffortOf('codebuddy', model),
           pool: () => poolAdapter,
         })
-        adapters.set('codebuddy', adapter)
-        handles.set('codebuddy', ctx.llm.registerAdapter(['codebuddy'], adapter))
+        registerTrackedAdapter('codebuddy', adapter)
         break
       }
       case 'zed': {
@@ -1052,8 +1069,7 @@ export function apply(ctx: Context, config: Config): void {
           defaultEffortOf: (model: string) => defaultEffortOf('zed', model),
           pool: () => poolAdapter,
         })
-        adapters.set('zed', adapter)
-        handles.set('zed', ctx.llm.registerAdapter(['zed'], adapter))
+        registerTrackedAdapter('zed', adapter)
         break
       }
     }
@@ -1293,6 +1309,19 @@ export function apply(ctx: Context, config: Config): void {
       await setModelVisible(provider, model, visible)
       handles.get(provider)?.replace([provider])
     },
+    async refreshModels(provider) {
+      if (provider === 'codex' || provider === undefined) {
+        codexVersionCache.invalidate()
+      }
+      if (provider !== undefined) {
+        adapters.get(provider)?.clearAccountCatalog()
+        handles.get(provider)?.replace([provider])
+      } else {
+        for (const [, a] of adapters) a.clearAccountCatalog()
+        for (const [id, h] of handles) h.replace([id])
+      }
+      return { ok: true }
+    },
   }, poolMode)
 
   const codebuddyTokens = accountTokens.get('codebuddy') as AccountTokenManager<CodeBuddySession> | undefined
@@ -1344,6 +1373,7 @@ export function apply(ctx: Context, config: Config): void {
     }
     if (codexTokens !== undefined || grokTokens !== undefined) {
       registerWithAlias(toolsCtx.tools, createImageGenerateTool({
+        imagePool,
         ...codexTokens === undefined ? {} : { codexTokens },
         ...grokTokens === undefined ? {} : { grokTokens },
         resolveAttachments,

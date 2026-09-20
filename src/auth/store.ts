@@ -301,12 +301,16 @@ function parseStore(text: string, path: string): SessionMap {
     const entry = raw[provider]
     if (entry === undefined) continue
     if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
-      throw new Error(`subscriptions auth store: entry "${provider}" is not an object; fix or delete the store file`)
+      console.warn(`subscriptions auth store: entry "${provider}" is not an object; skipped`)
+      continue
     }
     const record = entry as Record<string, unknown>
     if (typeof record.accessToken === 'string') {
       // Single-account format: wrap the bare session, preserving every field.
-      assertSessionShape(provider, '(legacy)', record)
+      if (!isValidSessionShape(record)) {
+        console.warn(`subscriptions auth store: legacy entry "${provider}" has no usable tokens; skipped`)
+        continue
+      }
       const session = record as unknown as StoredSession
       const key = accountKeyOf(provider, session)
       ;(store as Record<string, unknown>)[provider] = { default: key, accounts: { [key]: session } }
@@ -314,19 +318,39 @@ function parseStore(text: string, path: string): SessionMap {
     }
     const accounts = record.accounts
     if (typeof accounts !== 'object' || accounts === null || Array.isArray(accounts)) {
-      throw new Error(
-        `subscriptions auth store: entry "${provider}" has no accounts map; fix or delete the store file`,
-      )
+      console.warn(`subscriptions auth store: entry "${provider}" has no accounts map; skipped`)
+      continue
     }
     if (record.default !== undefined && typeof record.default !== 'string') {
-      throw new Error(`subscriptions auth store: entry "${provider}" default is not a string; fix or delete the store file`)
+      console.warn(`subscriptions auth store: entry "${provider}" default is not a string; skipped`)
+      continue
     }
+    const kept: Record<string, StoredSession> = {}
     for (const [account, session] of Object.entries(accounts)) {
-      assertSessionShape(provider, account, session)
+      if (isValidSessionShape(session)) {
+        kept[account] = session as StoredSession
+      } else {
+        console.warn(
+          `subscriptions auth store: entry "${provider}/${account}" has no usable accessToken/refreshToken/expiresAt; skipped`,
+        )
+      }
     }
-    ;(store as Record<string, unknown>)[provider] = record
+    if (Object.keys(kept).length === 0) continue
+    const validDefault = record.default === undefined || record.default in kept
+      ? record.default as string | undefined
+      : Object.keys(kept)[0]
+    ;(store as Record<string, unknown>)[provider] = { ...record, default: validDefault, accounts: kept }
   }
   return store
+}
+
+/** Whether a value carries the fields every stored session needs (non-empty tokens). */
+function isValidSessionShape(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  const entry = value as Record<string, unknown>
+  return typeof entry.accessToken === 'string' && entry.accessToken.length > 0
+    && typeof entry.refreshToken === 'string' && entry.refreshToken.length > 0
+    && typeof entry.expiresAt === 'number' && Number.isFinite(entry.expiresAt)
 }
 
 /** Persist the whole store atomically with owner-only permissions. */

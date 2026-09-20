@@ -100,14 +100,39 @@ export const claudeRateLimitReset: RateLimitResetReader = (response, body, now) 
  * so these headers impersonate the CLI; the harness attribution user-agent
  * cannot be sent here (one user-agent slot, and the CLI's wins).
  */
-export const CLAUDE_CLI_FALLBACK_VERSION = '2.1.234'
+export const CLAUDE_CLI_FALLBACK_VERSION = '2.1.263'
+
+/**
+ * Candidate invocations, in order of preference. Windows npm installs expose
+ * Claude Code as a `.cmd` shim, which must run through a shell.
+ */
+const CLAUDE_VERSION_PROBES: readonly (readonly [string, readonly string[], { shell?: boolean }])[] =
+  process.platform === 'win32'
+    ? [
+        ['claude --version', [], { shell: true }],
+        ['claude.cmd --version', [], { shell: true }],
+      ]
+    : [['claude', ['--version'], {}]]
 
 export function detectClaudeVersion(): string {
-  try {
-    const raw = execFileSync('claude', ['--version'], { timeout: 3000, encoding: 'utf8' })
-    const match = raw.match(/^(\d+\.\d+\.\d+)/)
-    if (match) return match[1]
-  } catch {}
+  let lastError: unknown
+  for (const [command, args, options] of CLAUDE_VERSION_PROBES) {
+    try {
+      const raw = execFileSync(command, [...args], {
+        timeout: 10_000,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        ...options,
+      })
+      const match = raw.match(/(\d+\.\d+\.\d+)/)
+      if (match) return match[1]
+    } catch (error) {
+      lastError = error
+    }
+  }
+  if (lastError !== undefined) {
+    console.debug('dsh-subscription-hub: Claude CLI version detection fell back', lastError)
+  }
   return CLAUDE_CLI_FALLBACK_VERSION
 }
 

@@ -310,7 +310,10 @@ export function toAgyRequestBody(
   const tools = toolsToDeclarations(options.tools)
   const generationConfig: NonNullable<AgyRequestBody['request']['generationConfig']> = {}
   if (options.temperature !== undefined) generationConfig.temperature = options.temperature
-  if (options.maxTokens !== undefined) generationConfig.maxOutputTokens = options.maxTokens
+  if (options.maxTokens !== undefined) {
+    const isClaude = isClaudeModel(options.model)
+    generationConfig.maxOutputTokens = isClaude ? Math.min(options.maxTokens, 64000) : options.maxTokens
+  }
   if (options.stop !== undefined && options.stop.length > 0) generationConfig.stopSequences = options.stop
   // Level-thinking: map the DSH reasoning effort to thinkingConfig.
   // Id-bound models (thinking !== 'level') never emit it — default is UI hint, not wire default.

@@ -1,5 +1,5 @@
 /**
- * `image_generate` tool: generate images through a subscription image
+ * `image_generate` tool: generate or edit images through a subscription image
  * endpoint, save them under the harness home, and — when the deployment
  * mounts an attachment store and the calling route declares image input —
  * also commit the bytes as durable attachments so the images render inline
@@ -11,6 +11,11 @@
  * logged out the other serves as fallback (`grok` is grok-imagine-image-2.0
  * via `api.x.ai/v1/images/generations` with `response_format: 'b64_json'`).
  * Both answer the OpenAI images shape (`data[].b64_json`).
+ *
+ * Editing: passing 1–5 `referenceImages` routes the request to the provider's
+ * edits endpoint (`/backend-api/codex/images/edits` or `/v1/images/edits`).
+ * WebP references are transcoded before they reach the wire when the target
+ * provider rejects WebP input.
  */
 
 import { mkdir, writeFile } from 'node:fs/promises'
@@ -22,22 +27,32 @@ import type { ContentBlock, LlmRuntime } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition, ToolExecution } from '@deepseek-ai/dsh-tools'
 import type { CodexSession, GrokSession } from '../auth/store.js'
-import { httpLlmError } from '../providers/common.js'
 import { AccountTokenManager } from '../providers/accounts.js'
+import { ImageAccountPool } from '../providers/image-pool.js'
+import { codexRateLimitReset } from '../providers/codex.js'
+import { grokRateLimitReset } from '../providers/grok.js'
 import type { FetchFn } from '../providers/common.js'
 import { proxiedFetch } from '../http.js'
 
 /** Endpoint the codex generation request is posted to. */
 export const IMAGE_GENERATE_URL = 'https://chatgpt.com/backend-api/codex/images/generations'
+/** Endpoint the codex edit request is posted to. */
+export const IMAGE_EDIT_URL = 'https://chatgpt.com/backend-api/codex/images/edits'
 /** The image model the codex subscription endpoint serves. */
 export const IMAGE_GENERATE_MODEL = 'gpt-image-2'
 /** Endpoint the grok generation request is posted to. */
 export const GROK_IMAGE_GENERATE_URL = 'https://api.x.ai/v1/images/generations'
+/** Endpoint the grok edit request is posted to. */
+export const GROK_IMAGE_EDIT_URL = 'https://api.x.ai/v1/images/edits'
 /** The image model the grok subscription endpoint serves. */
 export const GROK_IMAGE_GENERATE_MODEL = 'grok-imagine-image-2.0'
 
 /** Dependencies of the `image_generate` tool. */
 export interface ImageGenerateToolOptions {
+  /** Shared generation/edit account scheduling; standalone tools get a private pool. */
+  imagePool?: ImageAccountPool
+  /** Creation-time provider policy; existing sessions retain their original tools. */
+  providerEnabled?: (provider: 'codex' | 'grok', createdAt: number | undefined) => boolean
   /** Codex session source; the default preferred provider (`provider: 'gpt'`). */
   codexTokens?: AccountTokenManager<CodexSession>
   /** Grok session source; preferred when the call passes `provider: 'grok'`. */
@@ -50,6 +65,8 @@ export interface ImageGenerateToolOptions {
   resolveAttachments?: () => AttachmentStore | undefined
   /** Lazy llm-service lookup for the image-capability route check. */
   resolveLlm?: () => LlmRuntime | undefined
+  /** Lazy transcoder for WebP reference images (injectable for tests). */
+  transcodeWebp?: (data: Buffer) => Promise<{ data: Buffer; mediaType: 'image/png' | 'image/jpeg' }>
 }
 
 /** The wire request body for one generation call. */
@@ -67,6 +84,8 @@ export interface ImageGenerateArgs {
   quality?: 'low' | 'medium' | 'high' | 'auto'
   /** Preferred provider; the other one serves when the preferred is logged out. */
   provider?: 'gpt' | 'grok'
+  /** Ordered durable references; omission generates, presence edits. */
+  referenceImages?: ImageGenerateImageValue[]
 }
 
 /**
@@ -123,7 +142,7 @@ export function buildGrokImageGenerateBody(args: ImageGenerateArgs): GrokImageGe
 
 /** One generated image decoded from the response. */
 export interface GeneratedImage {
-  /** PNG bytes. */
+  /** Raw image bytes. */
   data: Buffer
   /** Provider-revised prompt, when the response carries one. */
   revisedPrompt?: string
@@ -224,6 +243,7 @@ interface ImageGenerateImageValue {
   width: number
   height: number
   name?: string
+  originalDimensions?: { width: number; height: number }
 }
 
 /** The canonical output value of one successful generation. */
@@ -242,6 +262,7 @@ function imageRefFromValue(image: ImageGenerateImageValue): ImageAttachmentRef {
     width: image.width,
     height: image.height,
     ...image.name === undefined ? {} : { name: image.name },
+    ...image.originalDimensions === undefined ? {} : { originalDimensions: image.originalDimensions },
   }
 }
 
@@ -256,8 +277,89 @@ function imageGenerateContent(value: ImageGenerateValue): ContentBlock[] {
 /** The text summary of one generation, shared by the model content and the UI card. */
 function imageGenerateText(value: ImageGenerateValue): ContentBlock {
   const text = `Saved ${value.paths.length} image(s):\n${value.paths.map(path => `- ${path}`).join('\n')}`
+    + (value.images?.length ? `\n\nImage references (for image_generate.referenceImages): ${JSON.stringify(value.images)}` : '')
     + (value.revisedPrompt === undefined ? '' : `\n\nRevised prompt: ${value.revisedPrompt}`)
   return { type: 'text', text }
+}
+
+/**
+ * Default WebP transcoder: alpha WebP becomes PNG, opaque WebP becomes JPEG.
+ * The image is only transcoded when the target provider cannot take WebP.
+ * Resolved lazily so a missing sharp never breaks text-to-image generation.
+ */
+async function defaultTranscodeWebp(data: Buffer): Promise<{ data: Buffer; mediaType: 'image/png' | 'image/jpeg' }> {
+  const candidates = [
+    'sharp',
+    'C:/Users/DongZhi/AppData/Roaming/npm/node_modules/@deepseek-ai/dsh/node_modules/sharp/lib/index.js',
+  ]
+  for (const specifier of candidates) {
+    try {
+      const imported = await import(specifier)
+      const sharp = (imported as { default?: unknown }).default ?? imported
+      const image = (sharp as (input: Buffer) => {
+        metadata(): Promise<{ hasAlpha?: boolean }>
+        png(): { toBuffer(): Promise<Buffer> }
+        jpeg(options: { quality: number }): { toBuffer(): Promise<Buffer> }
+      })(data)
+      const meta = await image.metadata()
+      return meta.hasAlpha === true
+        ? { data: await image.png().toBuffer(), mediaType: 'image/png' }
+        : { data: await image.jpeg({ quality: 90 }).toBuffer(), mediaType: 'image/jpeg' }
+    } catch {
+      // Try the next candidate; a final failure rethrows below.
+    }
+  }
+  throw new Error('image_generate: WebP reference images require an image transcoder that is not available')
+}
+
+/**
+ * Resolve references before any upstream request; never silently generate on
+ * invalid edits. `transcode` converts WebP for providers that reject it.
+ */
+async function resolveReferenceImages(
+  refs: ImageGenerateImageValue[] | undefined,
+  attachments: AttachmentStore | undefined,
+  signal: AbortSignal,
+  transcode: (data: Buffer) => Promise<{ data: Buffer; mediaType: 'image/png' | 'image/jpeg' }>,
+): Promise<string[] | undefined> {
+  if (refs === undefined) return undefined
+  if (!Array.isArray(refs) || refs.length < 1 || refs.length > 5) {
+    throw new Error('image_generate: referenceImages must contain 1–5 complete image references; omit only for a new image')
+  }
+  if (attachments === undefined) throw new Error('image_generate: editing requires the DSH attachment service')
+  const seen = new Set<string>()
+  let totalBytes = 0
+  const urls: string[] = []
+  for (const ref of refs) {
+    signal.throwIfAborted()
+    if (ref === null || typeof ref !== 'object'
+      || typeof ref.attachmentId !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(ref.attachmentId)
+      || !['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(ref.mediaType)
+      || ![ref.bytes, ref.width, ref.height].every(value => Number.isSafeInteger(value) && value > 0)) {
+      throw new Error('image_generate: invalid referenceImages entry; copy a complete image reference or call read_image for a local file. Do not omit references to retry an edit.')
+    }
+    if (seen.has(ref.attachmentId)) throw new Error('image_generate: referenceImages contains duplicate images')
+    seen.add(ref.attachmentId)
+    if (refs.length > attachments.imageLimits.maxImagesPerMessage
+      || ref.bytes > attachments.imageLimits.maxImageBytes
+      || totalBytes + ref.bytes > attachments.imageLimits.maxMessageImageBytes) {
+      throw new Error('image_generate: referenceImages exceed DSH image limits')
+    }
+    const stored = await attachments.readImage(imageRefFromValue(ref), signal)
+    totalBytes += stored.data.byteLength
+    if (totalBytes > attachments.imageLimits.maxMessageImageBytes) {
+      throw new Error('image_generate: referenceImages exceed DSH image limits')
+    }
+    let data: Buffer = Buffer.from(stored.data)
+    let mediaType: string = stored.ref.mediaType
+    if (mediaType === 'image/webp' || mediaType === 'image/gif') {
+      const converted = await transcode(data)
+      data = Buffer.from(converted.data)
+      mediaType = converted.mediaType
+    }
+    urls.push(`data:${mediaType};base64,${data.toString('base64')}`)
+  }
+  return urls
 }
 
 /**
@@ -266,14 +368,46 @@ function imageGenerateText(value: ImageGenerateValue): ContentBlock {
  * @returns the tool to register on `ctx.tools`.
  */
 export function createImageGenerateTool(options: ImageGenerateToolOptions): ToolDefinition {
+  const imagePool = options.imagePool ?? new ImageAccountPool()
+  const transcode = options.transcodeWebp ?? defaultTranscodeWebp
   return defineTool({
     name: 'image_generate',
     description: 'Generate an image with the ChatGPT subscription (gpt-image-2) or the Grok '
       + 'subscription (grok-imagine-image-2.0) and save it as an image file. The `provider` '
       + 'parameter picks the preferred provider (default gpt); when the preferred one is logged '
       + 'out the other serves as fallback. '
-      + 'Returns the saved file paths; on image-capable models the image itself is attached.',
+      + 'Within the selected provider, image requests use available subscription accounts; '
+      + 'quota or authentication rejection can switch accounts without changing providers. '
+      + 'Returns the saved file paths; on image-capable models the image itself is attached. '
+      + 'To edit or use existing images as references, pass referenceImages copied from the image reference text '
+      + 'or structured tool results (read_image.image or image_generate.images). Select only the images the user '
+      + 'intends, in prompt order. For local files, call read_image first. Omit referenceImages only for a new image. '
+      + 'If an edit reference fails, fix it and retry; never omit it to substitute text-to-image generation.',
     parameters: {
+      referenceImages: {
+        type: 'array',
+        description: 'Optional 1–5 ordered complete DSH image references to edit or use as source images. Not file paths or URLs. Omit only for new images.',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            attachmentId: { type: 'string', required: true },
+            mediaType: { type: 'string', enum: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'], required: true },
+            bytes: { type: 'integer', required: true },
+            width: { type: 'integer', required: true },
+            height: { type: 'integer', required: true },
+            name: { type: 'string' },
+            originalDimensions: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                width: { type: 'integer', required: true },
+                height: { type: 'integer', required: true },
+              },
+            },
+          },
+        },
+      },
       prompt: { type: 'string', required: true, description: 'What the image should show.' },
       size: {
         type: 'string',
@@ -319,7 +453,7 @@ export function createImageGenerateTool(options: ImageGenerateToolOptions): Tool
     },
     presentCall: args => ({
       card: 'generic',
-      title: `image_generate: ${truncate(args.prompt)}`,
+      title: `image_generate${args.referenceImages === undefined ? '' : ` (edit, ${args.referenceImages.length} images)`}: ${truncate(args.prompt)}`,
     }),
     // The web UI has no image surface on tool cards and flattens result blocks
     // to text/JSON, so the completed card shows the text summary only; the
@@ -330,51 +464,77 @@ export function createImageGenerateTool(options: ImageGenerateToolOptions): Tool
     }),
     async execute(args, exec) {
       const fetchFn = options.fetchFn ?? proxiedFetch
+      // Validate the prompt even when references cannot be resolved.
+      buildImageGenerateBody(args)
+      const references = await resolveReferenceImages(
+        args.referenceImages,
+        options.resolveAttachments?.(),
+        exec.signal,
+        transcode,
+      )
       // Provider selection: the preferred provider (default gpt) when logged
       // in, the other one as the fallback. A configured-but-logged-out manager
       // still resolves through `session()` below so the standard log-in hint
       // surfaces.
       const preferGrok = args.provider === 'grok'
-      const codexReady = options.codexTokens !== undefined && await options.codexTokens.hasSession()
-      const grokReady = options.grokTokens !== undefined && await options.grokTokens.hasSession()
+      const createdAt = exec.agent?.session.header?.createdAt
+      const codexEnabled = options.providerEnabled?.('codex', createdAt) !== false
+      const grokEnabled = options.providerEnabled?.('grok', createdAt) !== false
+      const codexReady = codexEnabled && options.codexTokens !== undefined && (await options.codexTokens.list()).length > 0
+      const grokReady = grokEnabled && options.grokTokens !== undefined && (await options.grokTokens.list()).length > 0
       const useGrok = preferGrok ? grokReady : grokReady && !codexReady
       const useCodex = !useGrok && codexReady
       let response: Response
       if (useCodex && options.codexTokens !== undefined) {
-        const session = await options.codexTokens.session()
-        response = await fetchFn(IMAGE_GENERATE_URL, {
-          method: 'POST',
-          headers: {
-            'authorization': `Bearer ${session.accessToken}`,
-            'chatgpt-account-id': session.accountId,
-            'originator': 'codex_cli_rs',
-            'content-type': 'application/json',
-            'accept': 'application/json',
-          },
-          body: JSON.stringify(buildImageGenerateBody(args)),
-          signal: exec.signal,
+        response = await imagePool.request({
+          provider: 'codex', tokens: options.codexTokens, signal: exec.signal,
+          owner: exec.agent?.session, rateLimitReset: codexRateLimitReset,
+          send: session => fetchFn(references === undefined ? IMAGE_GENERATE_URL : IMAGE_EDIT_URL, {
+            method: 'POST',
+            headers: {
+              'authorization': `Bearer ${session.accessToken}`,
+              'chatgpt-account-id': session.accountId,
+              'originator': 'codex_cli_rs',
+              'content-type': 'application/json',
+              'accept': 'application/json',
+            },
+            body: JSON.stringify({
+              ...buildImageGenerateBody(args),
+              ...references === undefined ? {} : { images: references.map(image_url => ({ image_url })) },
+            }),
+            signal: exec.signal,
+          }),
         })
       } else if (useGrok && options.grokTokens !== undefined) {
-        const session = await options.grokTokens.session()
-        response = await fetchFn(GROK_IMAGE_GENERATE_URL, {
-          method: 'POST',
-          headers: {
-            'authorization': `Bearer ${session.accessToken}`,
-            'content-type': 'application/json',
-            'accept': 'application/json',
-          },
-          body: JSON.stringify(buildGrokImageGenerateBody(args)),
-          signal: exec.signal,
+        response = await imagePool.request({
+          provider: 'grok', tokens: options.grokTokens, signal: exec.signal,
+          owner: exec.agent?.session, rateLimitReset: grokRateLimitReset,
+          send: session => fetchFn(references === undefined ? GROK_IMAGE_GENERATE_URL : GROK_IMAGE_EDIT_URL, {
+            method: 'POST',
+            headers: {
+              'authorization': `Bearer ${session.accessToken}`,
+              'content-type': 'application/json',
+              'accept': 'application/json',
+            },
+            body: JSON.stringify({
+              ...buildGrokImageGenerateBody(args),
+              ...references === undefined ? {} : references.length === 1
+                ? { image: { type: 'image_url', url: references[0] } }
+                : { images: references.map(url => ({ type: 'image_url', url })) },
+            }),
+            signal: exec.signal,
+          }),
         })
       } else {
-        const manager = preferGrok
-          ? options.grokTokens ?? options.codexTokens
-          : options.codexTokens ?? options.grokTokens
+        if (!codexEnabled && !grokEnabled) throw new Error('image_generate: disabled for this session')
+        const codex = codexEnabled ? options.codexTokens : undefined
+        const grok = grokEnabled ? options.grokTokens : undefined
+        const manager = preferGrok ? grok ?? codex : codex ?? grok
         if (manager === undefined) throw new Error('image_generate: no image provider is configured')
         await manager.session() // logged out: throws the provider's log-in hint
         throw new Error('image_generate: no image provider is logged in')
       }
-      if (!response.ok) throw await httpLlmError(response, 'image_generate')
+
       const images = parseImageGenerateResponse(await response.json())
       const directory = options.imagesDir ?? imagesDirectory()
       await mkdir(directory, { recursive: true })
@@ -399,8 +559,8 @@ export function createImageGenerateTool(options: ImageGenerateToolOptions): Tool
         for (const [index, image] of images.entries()) {
           const ref = await attachments.saveImage({
             data: image.data,
-            mediaType: mediaTypes[index],
-            name: basename(paths[index]),
+            mediaType: mediaTypes[index]!,
+            name: basename(paths[index]!),
           })
           refs.push({
             attachmentId: ref.attachmentId,
