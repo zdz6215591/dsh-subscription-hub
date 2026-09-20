@@ -1,28 +1,27 @@
 /**
  * Subscription usage pill for the composer's dock
- * (`conversation.composer.dock`). Collapsed, it reports ONLY the quota headroom
- * of the provider behind the session's CURRENT model:
+ * (`conversation.composer.dock`).
  *
- *   - CodeBuddy reports remaining credits (`CodeBuddy 12/50`);
- *   - every other provider reports a remaining percentage with its reset
- *     countdown (`Codex 62% · 6d18h`).
+ * Portals directly into the host's stats row (`[data-composer-stats]`) so it
+ * appears on the exact same line as the host's time/token pills (e.g.,
+ * `⏱ 4 轮 38 步 · 72 tok/s  🗄 2.5M tok · 缓存命中 95%  📊 Grok 93%`).
  *
- * The current model comes from ui-model-selection's `modelDirectories` service
- * (the host pushes nothing on a model switch); usage rides the
- * `/subscriptions-auth` `usage` endpoint, whose server-side cache is shared
- * with the Settings page. Nothing renders until the current model's provider
- * has a logged-in account that reports quota.
+ * Only reports the quota headroom of the provider behind the session's CURRENT model:
+ *   - CodeBuddy reports remaining credits (`CodeBuddy 12 积分`);
+ *   - every other provider reports ONLY the remaining percentage (`Grok 93%`).
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
+import { createPortal } from 'react-dom'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
+import { IconDataOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { callSubscriptionsAuth } from './SubscriptionsSection.js'
 import type { AccountStatus, ProviderStatus, ProviderUsage, SubscriptionProvider, UsageWindow } from './SubscriptionsSection.js'
 import type { ModelDirectoriesLike } from './SpeedSelect.js'
 
 /** How often the pill re-reads usage and the current model. */
-const POLL_INTERVAL_MS = 20_000
+const POLL_INTERVAL_MS = 10_000
 
 /** Injected dependencies (slot `inject`, session-bound). */
 export interface SubscriptionUsageBadgeInjected {
@@ -66,25 +65,6 @@ function defaultAccountOf(status: ProviderStatus | undefined): AccountStatus | u
   return status.accounts.find(a => a.isDefault) ?? status.accounts[0]
 }
 
-/**
- * The `currentModel` half of the inject face: the session's effective model
- * selection through ui-model-selection's `modelDirectories` service, resolved
- * lazily per call (the service may register after this plugin, and a shell
- * without it simply reports "unknown", which the pill treats as "render
- * nothing").
- */
-export function createCurrentModelReader(
-  models: () => ModelDirectoriesLike | undefined,
-  sessionId: string,
-): SubscriptionUsageBadgeInjected['currentModel'] {
-  return async () => {
-    const directories = models()
-    if (directories === undefined) return undefined
-    const { current } = await directories.directoryFor(sessionId).load()
-    return current ?? undefined
-  }
-}
-
 /** Compact reset countdown from a window's `resetsAt` timestamp (`6d18h`, `1h58m`, `42m`). */
 function resetLabel(window: UsageWindow): string {
   if (window.resetsAt === undefined) {
@@ -108,53 +88,85 @@ function creditText(value: number): string {
 }
 
 /**
- * The collapsed label for one provider reading: credits for CodeBuddy (the only
- * provider that bills in points), otherwise the tightest window's remaining
- * percentage plus that window's reset countdown.
+ * The collapsed label for one provider reading:
+ * - For CodeBuddy: remaining credits only (`CodeBuddy 12 积分`)
+ * - For all other providers: remaining percentage only (`Grok 93%`, `Codex 62%`)
  */
 export function compactUsageLabel(reading: UsageReading): string {
   const { provider, name } = reading
   if (CREDIT_PROVIDERS.has(provider)) {
     if (reading.remaining !== undefined) {
       const left = creditText(reading.remaining)
-      return reading.limit === undefined ? `${name} ${left}` : `${name} ${left}/${creditText(reading.limit)}`
+      return `${name} ${left} 积分`
     }
-    // No credit pool disclosed — fall through to the window percentage.
   }
   if (reading.windows.length === 0) {
     return reading.remaining === undefined ? '' : `${name} ${String(Math.round(reading.remaining))}%`
   }
-  // The tightest window is the one worth surfacing; its reset rides along.
-  let tightest = reading.windows[0]!
+  // Find the tightest window
+  let worstPercent = 0
   for (const window of reading.windows) {
-    const left = 100 - Math.min(100, Math.max(0, window.usedPercent))
-    const tightestLeft = 100 - Math.min(100, Math.max(0, tightest.usedPercent))
-    if (left < tightestLeft) tightest = window
+    const used = Math.min(100, Math.max(0, window.usedPercent))
+    if (used > worstPercent) worstPercent = used
   }
-  const left = Math.round(100 - Math.min(100, Math.max(0, tightest.usedPercent)))
-  const reset = resetLabel(tightest)
-  return reset === '' ? `${name} ${String(left)}%` : `${name} ${String(left)}% · ${reset}`
+  const left = Math.round(100 - worstPercent)
+  return `${name} ${String(left)}%`
+}
+
+function makeTooltip(reading: UsageReading): string {
+  const { provider, name } = reading
+  if (CREDIT_PROVIDERS.has(provider) && reading.remaining !== undefined) {
+    const left = creditText(reading.remaining)
+    return `${name}: 剩余 ${left}${reading.limit !== undefined ? ` / ${creditText(reading.limit)}` : ''} 积分`
+  }
+  if (reading.windows.length > 0) {
+    const parts = reading.windows.map(w => {
+      const rem = Math.round(100 - Math.min(100, Math.max(0, w.usedPercent)))
+      const reset = resetLabel(w)
+      return `${rem}%${reset ? ` (${reset}后重置)` : ''}`
+    })
+    return `${name}: 剩余 ${parts.join(' · ')}`
+  }
+  if (reading.remaining !== undefined) {
+    return `${name}: 剩余 ${Math.round(reading.remaining)}%`
+  }
+  return name
 }
 
 /**
- * The composer's subscription usage pill. Renders nothing until the session's
- * current model resolves to a provider with reportable quota, so a host
- * without subscriptions is untouched.
+ * The `currentModel` half of the inject face: the session's effective model
+ * selection through ui-model-selection's `modelDirectories` service.
+ */
+export function createCurrentModelReader(
+  models: () => ModelDirectoriesLike | undefined,
+  sessionId: string,
+): SubscriptionUsageBadgeInjected['currentModel'] {
+  return async () => {
+    const directories = models()
+    if (directories === undefined) return undefined
+    const { current } = await directories.directoryFor(sessionId).load()
+    return current ?? undefined
+  }
+}
+
+/**
+ * The composer's subscription usage pill. Portals into `[data-composer-stats]`
+ * to sit on the exact same row as official statistics.
  */
 export function SubscriptionUsageBadge(props: SubscriptionUsageBadgeProps) {
   const { rpc, currentModel } = props
   const [reading, setReading] = useState<UsageReading | undefined>(undefined)
+  const [hover, setHover] = useState(false)
+  const [statsRow, setStatsRow] = useState<HTMLElement | null>(null)
+  const seatRef = useRef<HTMLSpanElement | null>(null)
   const inflightRef = useRef(false)
   const mountedRef = useRef(true)
-  /** Provider → default account key, refreshed whenever the lookup misses. */
   const accountsRef = useRef(new Map<SubscriptionProvider, string>())
 
   const refresh = useCallback(async (): Promise<void> => {
     if (rpc === undefined || inflightRef.current) return
     inflightRef.current = true
     try {
-      // The current model picks WHICH provider the pill reports; without a
-      // resolvable model there is nothing precise to show, so stay hidden.
       const current = await currentModel?.()
       if (!mountedRef.current) return
       const provider = current?.provider as SubscriptionProvider | undefined
@@ -184,7 +196,6 @@ export function SubscriptionUsageBadge(props: SubscriptionUsageBadgeProps) {
 
       const usage = await callSubscriptionsAuth<ProviderUsage>(rpc, 'usage', { provider, account })
       if (!mountedRef.current) return
-      // Unsupported or empty quota is a real answer: hide rather than guess.
       if (!usage.supported || ((usage.windows ?? []).length === 0 && usage.remaining === undefined)) {
         setReading(undefined)
         return
@@ -197,7 +208,7 @@ export function SubscriptionUsageBadge(props: SubscriptionUsageBadgeProps) {
         ...usage.limit === undefined ? {} : { limit: usage.limit },
       })
     } catch {
-      // A failed poll keeps the last reading; the next tick retries.
+      // Keep last reading on error
     } finally {
       inflightRef.current = false
     }
@@ -213,30 +224,91 @@ export function SubscriptionUsageBadge(props: SubscriptionUsageBadgeProps) {
     }
   }, [refresh])
 
+  // Look for the host's `[data-composer-stats]` container to portal into.
+  useEffect(() => {
+    const findRow = (): HTMLElement | null => {
+      if (seatRef.current) {
+        let node: HTMLElement | null = seatRef.current.parentElement
+        for (let i = 0; node !== null && i < 6; i++) {
+          const found = node.querySelector<HTMLElement>('[data-composer-stats]')
+          if (found) return found
+          node = node.parentElement
+        }
+      }
+      return document.querySelector<HTMLElement>('[data-composer-stats]')
+    }
+
+    const check = () => {
+      const found = findRow()
+      setStatsRow(found && found.isConnected ? found : null)
+    }
+
+    check()
+    const observer = new MutationObserver(check)
+    observer.observe(document.body, { childList: true, subtree: true })
+    return () => observer.disconnect()
+  }, [])
+
   const label = reading === undefined ? '' : compactUsageLabel(reading)
-  if (label === '') return null
+  const seat = <span ref={seatRef} style={styles.seat} aria-hidden="true" />
+
+  if (label === '' || !reading) return seat
+
+  const tooltip = makeTooltip(reading)
+
+  const pill = (
+    <span className="bOPqQW_anchor" style={styles.anchor}>
+      <button
+        type="button"
+        className="bOPqQW_pill"
+        style={{ ...styles.pill, ...(hover ? styles.pillHover : {}) }}
+        title={tooltip}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+      >
+        <IconDataOutline16 size={14} />
+        <span className="bOPqQW_label" style={styles.label}>{label}</span>
+      </button>
+    </span>
+  )
 
   return (
-    <span style={styles.pill} title={`${reading!.name}: ${label.slice(reading!.name.length + 1)}`}>
-      <span style={styles.dot} aria-hidden="true" />
-      <span style={styles.label}>{label}</span>
-    </span>
+    <>
+      {seat}
+      {statsRow && statsRow.isConnected ? createPortal(pill, statsRow) : null}
+    </>
   )
 }
 
 const styles: Record<string, CSSProperties> = {
+  seat: { display: 'none' },
+  anchor: { minWidth: 0, display: 'inline-flex' },
   pill: {
-    display: 'inline-flex', alignItems: 'center', gap: 6,
-    height: 20, padding: '0 8px', borderRadius: 10,
-    border: '1px solid var(--dsw-alias-border-l2)',
-    background: 'var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1))',
-    fontSize: 12, lineHeight: '18px',
+    boxSizing: 'border-box',
+    maxWidth: '100%',
+    color: 'var(--dsw-alias-label-tertiary)',
+    font: 'inherit',
+    fontSize: 'var(--dsh-content-font-size-secondary, 13px)',
+    fontVariantNumeric: 'tabular-nums',
+    lineHeight: 'calc(20px + var(--dsh-content-font-delta-secondary, 0px))',
+    whiteSpace: 'nowrap',
+    background: 'transparent',
+    border: 'none',
+    borderRadius: 24,
+    alignItems: 'center',
+    gap: 6,
+    padding: '1px 8px',
+    display: 'inline-flex',
+    cursor: 'default',
+    transition: 'background 120ms ease, color 120ms ease',
+  },
+  pillHover: {
+    background: 'var(--dsw-alias-interactive-bg-hover)',
     color: 'var(--dsw-alias-label-secondary)',
-    whiteSpace: 'nowrap', flexShrink: 0,
   },
-  dot: {
-    width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
-    background: 'var(--dsw-alias-state-success-primary)',
+  label: {
+    textOverflow: 'ellipsis',
+    minWidth: 0,
+    overflow: 'hidden',
   },
-  label: { fontVariantNumeric: 'tabular-nums' },
 }

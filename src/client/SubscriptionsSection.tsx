@@ -267,24 +267,17 @@ const styles: Record<string, CSSProperties> = {
     color: 'var(--dsw-alias-label-primary)',
   },
   intro: { margin: '0 0 2px 0', color: 'var(--dsw-alias-label-tertiary)', fontSize: 13, lineHeight: '20px' },
-  savingsCard: {
-    position: 'relative', overflow: 'hidden',
-    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 14,
-    padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 12,
-    background: 'linear-gradient(135deg, var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1)) 0%, var(--dsw-alias-bg-layer-1) 60%)',
-  },
-  savingsGlow: {
-    position: 'absolute', top: -60, right: -40, width: 190, height: 190,
-    borderRadius: '50%', pointerEvents: 'none',
-    background: 'radial-gradient(circle, var(--dsw-alias-state-success-primary) 0%, transparent 70%)',
-    opacity: 0.13,
+  savingsSection: {
+    display: 'flex', flexDirection: 'column', gap: 10,
+    padding: '4px 2px 14px 2px',
+    borderBottom: '1px solid var(--dsw-alias-border-l2)',
   },
   savingsHeader: {
     display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12,
-    position: 'relative',
   },
+  savingsTitleRow: { display: 'flex', alignItems: 'center', gap: 6 },
   savingsTitle: {
-    margin: 0, fontWeight: 600, fontSize: 14, lineHeight: '22px',
+    margin: 0, fontWeight: 600, fontSize: 15, lineHeight: '22px',
     color: 'var(--dsw-alias-label-primary)',
   },
   savingsSubtitle: {
@@ -292,44 +285,81 @@ const styles: Record<string, CSSProperties> = {
     color: 'var(--dsw-alias-label-tertiary)',
   },
   savingsHero: {
-    display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap', position: 'relative',
+    display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap',
   },
   savingsHeroValue: {
-    fontSize: 34, fontWeight: 700, lineHeight: '40px', letterSpacing: -0.5,
+    fontSize: 32, fontWeight: 700, lineHeight: '36px', letterSpacing: -0.5,
     color: 'var(--dsw-alias-state-success-primary)', fontVariantNumeric: 'tabular-nums',
   },
-  savingsHeroLabel: { fontSize: 13, lineHeight: '20px', color: 'var(--dsw-alias-label-secondary)' },
+  savingsHeroLabel: { fontSize: 13, fontWeight: 500, color: 'var(--dsw-alias-label-secondary)' },
   savingsHeroUsd: {
-    fontSize: 13, lineHeight: '20px', color: 'var(--dsw-alias-label-tertiary)',
-    fontVariantNumeric: 'tabular-nums',
+    fontSize: 12, color: 'var(--dsw-alias-label-tertiary)',
+    fontVariantNumeric: 'tabular-nums', marginLeft: 4,
   },
-  savingsMetrics: { display: 'flex', gap: 22, flexWrap: 'wrap', position: 'relative' },
-  savingsMetric: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 78 },
+  savingsMetrics: { display: 'flex', gap: 24, flexWrap: 'wrap' },
+  savingsMetric: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 70 },
   savingsMetricValue: {
-    fontSize: 16, fontWeight: 600, lineHeight: '24px',
+    fontSize: 15, fontWeight: 600, lineHeight: '22px',
     color: 'var(--dsw-alias-label-primary)', fontVariantNumeric: 'tabular-nums',
   },
   savingsMetricLabel: { fontSize: 11, lineHeight: '16px', color: 'var(--dsw-alias-label-tertiary)' },
   savingsProviders: {
     display: 'flex', flexDirection: 'column', gap: 5,
-    borderTop: '1px solid var(--dsw-alias-border-l2)', paddingTop: 10, position: 'relative',
+    paddingTop: 6,
   },
   savingsProviderRow: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, lineHeight: '18px' },
   savingsProviderName: { color: 'var(--dsw-alias-label-secondary)', minWidth: 92 },
   savingsProviderBar: {
-    flex: 1, height: 5, borderRadius: 3, overflow: 'hidden',
+    flex: 1, height: 4, borderRadius: 2, overflow: 'hidden',
     background: 'var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1))',
     border: '1px solid var(--dsw-alias-border-l2)',
   },
-  savingsProviderFill: { display: 'block', height: '100%', borderRadius: 3, background: 'var(--dsw-alias-state-success-primary)' },
+  savingsProviderFill: { display: 'block', height: '100%', borderRadius: 2, background: 'var(--dsw-alias-state-success-primary)' },
   savingsProviderValue: {
     color: 'var(--dsw-alias-label-tertiary)', fontVariantNumeric: 'tabular-nums',
-    minWidth: 104, textAlign: 'right',
+    minWidth: 104, textAlign: 'right', fontSize: 11,
   },
   emptyHint: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
   card: {
     border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 12,
     padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6,
+  },
+  addSectionCard: {
+    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 12,
+    background: 'var(--dsw-alias-bg-layer-1)',
+    display: 'flex', flexDirection: 'column',
+    overflow: 'hidden',
+  },
+  compactAddRow: {
+    display: 'flex', flexDirection: 'column',
+    padding: '8px 12px',
+    borderBottom: '1px solid var(--dsw-alias-border-l2)',
+    gap: 6,
+  },
+  compactAddMain: {
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+    gap: 8,
+  },
+  compactAddLeft: {
+    display: 'flex', alignItems: 'center', gap: 8, minWidth: 0,
+  },
+  compactAddName: {
+    fontSize: 13, fontWeight: 500,
+    color: 'var(--dsw-alias-label-primary)', whiteSpace: 'nowrap',
+  },
+  compactAddTag: {
+    fontSize: 11, lineHeight: '16px',
+    color: 'var(--dsw-alias-label-tertiary)', whiteSpace: 'nowrap',
+  },
+  compactAddActions: {
+    display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0,
+  },
+  buttonSmall: {
+    boxSizing: 'border-box', display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    height: 24, padding: '0 8px', borderRadius: 12,
+    border: '1px solid var(--dsw-alias-border-l2)', background: 'transparent',
+    color: 'var(--dsw-alias-label-primary)', font: 'inherit', fontSize: 11, lineHeight: '16px',
+    cursor: 'pointer',
   },
   globalCard: {
     border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 12,
@@ -1530,11 +1560,12 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const savingsPeak = savingsProviders.length > 0 ? savingsProviders[0]![1].costUsd : 1
 
   const renderSavingsBanner = (): ReactNode => (
-    <div style={styles.savingsCard}>
-      <div style={styles.savingsGlow} aria-hidden="true" />
+    <div style={styles.savingsSection}>
       <div style={styles.savingsHeader}>
         <div>
-          <p style={styles.savingsTitle}>{t('savingsTitle')}</p>
+          <div style={styles.savingsTitleRow}>
+            <span style={styles.savingsTitle}>{t('savingsTitle')}</span>
+          </div>
           <p style={styles.savingsSubtitle}>{t('savingsSubtitle')}</p>
         </div>
         <button
@@ -1551,9 +1582,9 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       ) : (
         <>
           <div style={styles.savingsHero}>
-            <span style={styles.savingsHeroValue}>{`¥ ${savings.savedRmb.toFixed(2)}`}</span>
+            <span style={styles.savingsHeroValue}>{`¥ ${savings.savedRmb.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</span>
             <span style={styles.savingsHeroLabel}>{t('savingsLabel')}</span>
-            <span style={styles.savingsHeroUsd}>{t('savingsUsd', { amount: savings.savedUsd.toFixed(2) })}</span>
+            <span style={styles.savingsHeroUsd}>{t('savingsUsd', { amount: savings.savedUsd.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) })}</span>
           </div>
           <div style={styles.savingsMetrics}>
             <div style={styles.savingsMetric}>
@@ -1561,8 +1592,14 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
               <span style={styles.savingsMetricLabel}>{t('savingsTokens')}</span>
             </div>
             <div style={styles.savingsMetric}>
-              <span style={styles.savingsMetricValue}>{String(savings.turns)}</span>
+              <span style={styles.savingsMetricValue}>{savings.turns.toLocaleString()}</span>
               <span style={styles.savingsMetricLabel}>{t('savingsTurns')}</span>
+            </div>
+            <div style={styles.savingsMetric}>
+              <span style={styles.savingsMetricValue}>{formatTokens(savings.cacheReadTokens)}</span>
+              <span style={styles.savingsMetricLabel}>
+                {`缓存读取 (${savings.totalTokens > 0 ? ((savings.cacheReadTokens / savings.totalTokens) * 100).toFixed(0) : 0}%)`}
+              </span>
             </div>
           </div>
           {savingsProviders.length > 0 && (
@@ -1592,7 +1629,6 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
 
   return (
     <div style={styles.section}>
-      <p style={styles.intro}>{t('intro')}</p>
       {renderSavingsBanner()}
       <div style={styles.globalCard}>
         {/* Row 1: 多账号调用模式 */}
@@ -1667,26 +1703,14 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       </div>
 
       {connectedProviders.length === 0 && (
-        <p style={styles.emptyHint}>{t('addSectionHint')}</p>
+        <p style={styles.emptyHint}>{t('noActiveSubscriptions')}</p>
       )}
 
-      {orderedProviders.map(({ id, name }, index) => {
+      {connectedProviders.map(({ id, name }) => {
         const status = statuses[id]
-        const busy = status?.busy === true
-        const deviceCode = deviceCodes[id]
         const accounts = status?.accounts ?? []
-        const isFirstAvailable = index === connectedProviders.length && connectedProviders.length > 0
         return (
-          <Fragment key={id}>
-            {isFirstAvailable && (
-              <>
-                <div style={styles.providersHeader}>
-                  <span style={styles.providersTitle}>{t('addSectionTitle')}</span>
-                </div>
-                <p style={styles.emptyHint}>{t('addSectionHint')}</p>
-              </>
-            )}
-          <div style={styles.card}>
+          <div key={id} style={styles.card}>
             <div style={styles.cardHeader}>
               <span style={{ ...styles.dot, background: dotColor(status) }} />
               <span style={styles.name}>{name}</span>
@@ -1861,68 +1885,6 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 </div>
               )
             })}
-            {/* The sign-in controls are identical for a connected card and a
-                not-yet-connected one: adding another account of an already
-                connected provider is the same gesture as the first login, so
-                the panel never grows a second, provider-specific button row. */}
-            <div style={styles.actions}>
-              {!busy && id === 'zed' && (
-                <>
-                  <button type="button" style={styles.button} onClick={() => { void login(id, 'import') }}>
-                    {t('importZed')}
-                  </button>
-                  <button
-                    type="button"
-                    style={styles.button}
-                    onClick={() => { setManualOpen(prev => ({ ...prev, [id]: !prev[id] })) }}
-                  >
-                    {manualOpen[id] ? t('cancel') : t('manualInput')}
-                  </button>
-                </>
-              )}
-              {!busy && id === 'commandcode' && (
-                <>
-                  <button type="button" style={styles.button} onClick={() => { void login(id, 'import') }}>
-                    {t('importCommandCode')}
-                  </button>
-                  {accounts.length === 0 && (
-                    <button type="button" style={styles.button} onClick={() => { void login(id, 'oauth') }}>
-                      {t('login')}
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    style={styles.button}
-                    onClick={() => { setManualOpen(prev => ({ ...prev, [id]: !prev[id] })) }}
-                  >
-                    {manualOpen[id] ? t('cancel') : t('manualInput')}
-                  </button>
-                </>
-              )}
-              {!busy && id === 'claude' && (
-                <>
-                  <button type="button" style={styles.button} onClick={() => { void login(id, 'oauth') }}>
-                    {accounts.length > 0 ? t('addAccountOAuth') : t('login')}
-                  </button>
-                  <button type="button" style={styles.button} onClick={() => { void login(id, 'keychain') }}>
-                    {t('addAccountKeychain')}
-                  </button>
-                </>
-              )}
-              {!busy && id !== 'claude' && id !== 'commandcode' && id !== 'zed' && (
-                <button type="button" style={styles.button} onClick={() => { void login(id) }}>
-                  {accounts.length > 0 ? t('addAccount') : t('login')}
-                </button>
-              )}
-              {busy && (
-                <button type="button" style={styles.button} onClick={() => { void cancel(id) }}>
-                  {t('cancel')}
-                </button>
-              )}
-            </div>
-            {!busy && accounts.length > 0 && (
-              <p style={styles.statusLine}>{t('addAccountHint')}</p>
-            )}
             {accounts.length > 0 && (() => {
               // Collapsed by default: providers with a large catalog (Copilot
               // lists dozens of models) must not push the page down. The
@@ -2136,70 +2098,127 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 </div>
               )
             })()}
-            {busy && deviceCode !== undefined && (
-              <div style={styles.deviceCode}>
-                <span style={styles.statusLine}>{t('deviceCodePrompt')}</span>
-                <span style={styles.deviceCodeText}>{deviceCode.userCode}</span>
-                <div style={styles.actions}>
-                  <button type="button" style={styles.button} onClick={() => { copyDeviceCode(id, deviceCode.userCode) }}>
-                    {copiedCode === id ? t('deviceCodeCopied') : t('deviceCodeCopy')}
-                  </button>
-                  <button
-                    type="button"
-                    style={styles.button}
-                    onClick={() => { window.open(deviceCode.verificationUrl, '_blank', 'noopener') }}
-                  >
-                    {t('deviceCodeOpenPage')}
-                  </button>
+          </div>
+        )
+      })}
+
+      {/* ── Section: 添加订阅（排版紧凑，统一样式） ── */}
+      <div style={styles.providersHeader}>
+        <span style={styles.providersTitle}>{t('addSectionTitle')}</span>
+      </div>
+      <p style={styles.emptyHint}>{t('addSectionHint')}</p>
+
+      <div style={styles.addSectionCard}>
+        {PROVIDERS.map(({ id, name }, idx) => {
+          const status = statuses[id]
+          const busy = status?.busy === true
+          const deviceCode = deviceCodes[id]
+          const accounts = status?.accounts ?? []
+          const isConnected = accounts.length > 0
+          const isLast = idx === PROVIDERS.length - 1
+          return (
+            <div
+              key={id}
+              style={{
+                ...styles.compactAddRow,
+                ...isLast ? { borderBottom: 'none' } : {},
+              }}
+            >
+              <div style={styles.compactAddMain}>
+                <div style={styles.compactAddLeft}>
+                  <span style={{ ...styles.dot, background: dotColor(status) }} />
+                  <span style={styles.compactAddName}>{name}</span>
+                  <span style={styles.compactAddTag}>
+                    {isConnected ? t('connectedCount', { count: accounts.length }) : t('notConnected')}
+                  </span>
+                </div>
+                <div style={styles.compactAddActions}>
+                  {busy ? (
+                    <button type="button" style={styles.buttonSmall} onClick={() => { void cancel(id) }}>
+                      {t('cancel')}
+                    </button>
+                  ) : (
+                    <>
+                      {id === 'zed' && (
+                        <>
+                          <button type="button" style={styles.buttonSmall} onClick={() => { void login(id, 'import') }}>
+                            {t('importZed')}
+                          </button>
+                          <button
+                            type="button"
+                            style={styles.buttonSmall}
+                            onClick={() => { setManualOpen(prev => ({ ...prev, [id]: !prev[id] })) }}
+                          >
+                            {manualOpen[id] ? t('cancel') : t('manualInput')}
+                          </button>
+                        </>
+                      )}
+                      {id === 'commandcode' && (
+                        <>
+                          <button type="button" style={styles.buttonSmall} onClick={() => { void login(id, 'import') }}>
+                            {t('importCommandCode')}
+                          </button>
+                          <button type="button" style={styles.buttonSmall} onClick={() => { void login(id, 'oauth') }}>
+                            {isConnected ? t('addAnotherAccount') : t('login')}
+                          </button>
+                          <button
+                            type="button"
+                            style={styles.buttonSmall}
+                            onClick={() => { setManualOpen(prev => ({ ...prev, [id]: !prev[id] })) }}
+                          >
+                            {manualOpen[id] ? t('cancel') : t('manualInput')}
+                          </button>
+                        </>
+                      )}
+                      {id === 'claude' && (
+                        <>
+                          <button type="button" style={styles.buttonSmall} onClick={() => { void login(id, 'oauth') }}>
+                            {isConnected ? t('addAnotherAccount') : t('login')}
+                          </button>
+                          <button type="button" style={styles.buttonSmall} onClick={() => { void login(id, 'keychain') }}>
+                            {t('addAccountKeychain')}
+                          </button>
+                        </>
+                      )}
+                      {id !== 'claude' && id !== 'commandcode' && id !== 'zed' && (
+                        <button type="button" style={styles.buttonSmall} onClick={() => { void login(id) }}>
+                          {isConnected ? t('addAnotherAccount') : t('login')}
+                        </button>
+                      )}
+                    </>
+                  )}
                 </div>
               </div>
-            )}
-            {busy && deviceCode === undefined && (
-              <details style={styles.manual}>
-                <summary>{t('manualSummary')}</summary>
-                <div style={styles.manualRow}>
-                  <input
-                    style={styles.manualInput}
-                    value={manualDrafts[id]}
-                    placeholder={t('manualPlaceholder')}
-                    onChange={event => setManualDrafts(prev => ({ ...prev, [id]: event.target.value }))}
-                  />
-                  <button type="button" style={styles.button} onClick={() => { void submitManual(id) }}>
-                    {t('submit')}
-                  </button>
+
+              {/* Status errors if any and not connected */}
+              {errors[id] !== undefined && !isConnected && (
+                <p style={styles.errorLine}>{errors[id]}</p>
+              )}
+
+              {/* Device code prompt */}
+              {busy && deviceCode !== undefined && (
+                <div style={styles.deviceCode}>
+                  <span style={styles.statusLine}>{t('deviceCodePrompt')}</span>
+                  <span style={styles.deviceCodeText}>{deviceCode.userCode}</span>
+                  <div style={styles.actions}>
+                    <button type="button" style={styles.buttonSmall} onClick={() => { copyDeviceCode(id, deviceCode.userCode) }}>
+                      {copiedCode === id ? t('deviceCodeCopied') : t('deviceCodeCopy')}
+                    </button>
+                    <button
+                      type="button"
+                      style={styles.buttonSmall}
+                      onClick={() => { window.open(deviceCode.verificationUrl, '_blank', 'noopener') }}
+                    >
+                      {t('deviceCodeOpenPage')}
+                    </button>
+                  </div>
                 </div>
-              </details>
-            )}
-            {!busy && (id === 'zed' || id === 'commandcode') && manualOpen[id] && (
-              <div style={styles.manualBox}>
-                <p style={styles.statusLine}>
-                  {id === 'zed' ? t('zedPasteHint') : t('commandCodePasteHint')}
-                </p>
-                {id === 'zed' ? (
-                  <>
-                    <div style={styles.manualRow}>
-                      <input
-                        style={styles.manualInput}
-                        value={zedUserId}
-                        placeholder={t('zedUserIdPlaceholder')}
-                        autoComplete="off"
-                        onChange={event => setZedUserId(event.target.value)}
-                      />
-                    </div>
-                    <div style={styles.manualRow}>
-                      <input
-                        style={styles.manualInput}
-                        value={zedToken}
-                        placeholder={t('zedTokenPlaceholder')}
-                        autoComplete="off"
-                        onChange={event => setZedToken(event.target.value)}
-                      />
-                      <button type="button" style={styles.button} onClick={() => { void submitManual(id) }}>
-                        {t('submit')}
-                      </button>
-                    </div>
-                  </>
-                ) : (
+              )}
+
+              {/* Manual fallback input during oauth */}
+              {busy && deviceCode === undefined && (
+                <details style={styles.manual}>
+                  <summary>{t('manualSummary')}</summary>
                   <div style={styles.manualRow}>
                     <input
                       style={styles.manualInput}
@@ -2207,17 +2226,62 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                       placeholder={t('manualPlaceholder')}
                       onChange={event => setManualDrafts(prev => ({ ...prev, [id]: event.target.value }))}
                     />
-                    <button type="button" style={styles.button} onClick={() => { void submitManual(id) }}>
+                    <button type="button" style={styles.buttonSmall} onClick={() => { void submitManual(id) }}>
                       {t('submit')}
                     </button>
                   </div>
-                )}
-              </div>
-            )}
-          </div>
-          </Fragment>
-        )
-      })}
+                </details>
+              )}
+
+              {/* Zed / CommandCode manual input form */}
+              {!busy && (id === 'zed' || id === 'commandcode') && manualOpen[id] && (
+                <div style={styles.manualBox}>
+                  <p style={styles.statusLine}>
+                    {id === 'zed' ? t('zedPasteHint') : t('commandCodePasteHint')}
+                  </p>
+                  {id === 'zed' ? (
+                    <>
+                      <div style={styles.manualRow}>
+                        <input
+                          style={styles.manualInput}
+                          value={zedUserId}
+                          placeholder={t('zedUserIdPlaceholder')}
+                          autoComplete="off"
+                          onChange={event => setZedUserId(event.target.value)}
+                        />
+                      </div>
+                      <div style={styles.manualRow}>
+                        <input
+                          style={styles.manualInput}
+                          value={zedToken}
+                          placeholder={t('zedTokenPlaceholder')}
+                          autoComplete="off"
+                          onChange={event => setZedToken(event.target.value)}
+                        />
+                        <button type="button" style={styles.buttonSmall} onClick={() => { void submitManual(id) }}>
+                          {t('submit')}
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <div style={styles.manualRow}>
+                      <input
+                        style={styles.manualInput}
+                        value={manualDrafts[id]}
+                        placeholder={t('manualPlaceholder')}
+                        onChange={event => setManualDrafts(prev => ({ ...prev, [id]: event.target.value }))}
+                      />
+                      <button type="button" style={styles.buttonSmall} onClick={() => { void submitManual(id) }}>
+                        {t('submit')}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
       {proxyOpen && (
         <div style={styles.modalOverlay} onClick={() => setProxyOpen(false)}>
           <div style={styles.modal} onClick={event => event.stopPropagation()}>

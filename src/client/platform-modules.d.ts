@@ -19,4 +19,18 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
     size?: number
     className?: string
   }): import('react').ReactNode
+
+  /** Mirror of IconDataOutline16 (packages/client/ui-primitives/src/icons/index.tsx). */
+  export function IconDataOutline16(props: {
+    size?: number
+    className?: string
+  }): import('react').ReactNode
+}
+
+declare module 'react-dom' {
+  export function createPortal(
+    children: import('react').ReactNode,
+    container: Element | DocumentFragment,
+    key?: null | string,
+  ): import('react').ReactPortal
 }
