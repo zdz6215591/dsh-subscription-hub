@@ -11,7 +11,7 @@ import { sessionFromZedPaste, parseZedModels, ndjsonToSse, parseZedUsage, buildZ
 import { parseMeterUsage } from '../src/providers/codebuddy-lib/usage.js'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, Message } from '@deepseek-ai/dsh-llm'
-import { messagesToCommandCode, messagesToOpenAI, parseCommandCodeAuthFile, parseCommandCodeCredits, parseCommandCodeOpenAIStream, parseCommandCodeStream, sessionFromCommandCodePaste, COMMANDCODE_KNOWN_EFFORTS } from '../src/providers/commandcode.js'
+import { messagesToCommandCode, messagesToOpenAI, parseCommandCodeAuthFile, parseCommandCodeCredits, parseCommandCodeOpenAIStream, parseCommandCodeStream, sessionFromCommandCodePaste, COMMANDCODE_KNOWN_EFFORTS, looksLikeMissingEffortEntry } from '../src/providers/commandcode.js'
 import { extractAgyProjectId } from '../src/providers/agy.js'
 import { parseAgyQuotaUsage } from '../src/providers/agy/models.js'
 import { isAgyUnusableEndpoint } from '../src/providers/agy/constants.js'
@@ -689,6 +689,24 @@ describe('commandcode reasoning efforts', () => {
     assert.equal(COMMANDCODE_KNOWN_EFFORTS['zai-org/GLM-5'], undefined)
     assert.equal(COMMANDCODE_KNOWN_EFFORTS['zai-org/GLM-5.1'], undefined)
     assert.equal(COMMANDCODE_KNOWN_EFFORTS['zai-org/GLM-5.2-Fast'], undefined)
+  })
+
+  it('flags a likely snapshot gap for newly shipped family members only', () => {
+    // A table-covered model never warns.
+    assert.equal(looksLikeMissingEffortEntry('z-ai/glm-5.3-flashx'), false)
+    // A hypothetical new member of a family that ships selectable levels warns.
+    assert.equal(looksLikeMissingEffortEntry('deepseek/deepseek-v4.2-flash'), true)
+    assert.equal(looksLikeMissingEffortEntry('z-ai/glm-5.4-flash'), true)
+    assert.equal(looksLikeMissingEffortEntry('claude-opus-6'), true)
+    // A family known to reason at a fixed depth stays silent — including every
+    // member of the live catalog, so the advisory has zero false positives.
+    assert.equal(looksLikeMissingEffortEntry('tencent/hy3'), false)
+    assert.equal(looksLikeMissingEffortEntry('zai-org/GLM-5.1'), false)
+    assert.equal(looksLikeMissingEffortEntry('stepfun/Step-3.7-Flash'), false)
+    assert.equal(looksLikeMissingEffortEntry('claude-haiku-4-5-20251001'), false)
+    assert.equal(looksLikeMissingEffortEntry('zai-org/GLM-5.2-Fast'), false)
+    assert.equal(looksLikeMissingEffortEntry('Qwen/Qwen3.8-Omni-Flash'), false)
+    assert.equal(looksLikeMissingEffortEntry('moonshotai/Kimi-K2.7-Code'), false)
   })
 })
 

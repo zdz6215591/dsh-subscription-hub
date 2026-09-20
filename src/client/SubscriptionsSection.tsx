@@ -2225,7 +2225,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                             {t('importCommandCode')}
                           </button>
                           <button type="button" style={styles.buttonSmall} onClick={() => { void login(id, 'oauth') }}>
-                            {isConnected ? t('addAnotherAccount') : t('login')}
+                            {t('loginAccount')}
                           </button>
                           <button
                             type="button"
@@ -2239,7 +2239,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                       {id === 'claude' && (
                         <>
                           <button type="button" style={styles.buttonSmall} onClick={() => { void login(id, 'oauth') }}>
-                            {isConnected ? t('addAnotherAccount') : t('login')}
+                            {t('loginAccount')}
                           </button>
                           <button type="button" style={styles.buttonSmall} onClick={() => { void login(id, 'keychain') }}>
                             {t('addAccountKeychain')}
@@ -2248,7 +2248,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                       )}
                       {id !== 'claude' && id !== 'commandcode' && id !== 'zed' && (
                         <button type="button" style={styles.buttonSmall} onClick={() => { void login(id) }}>
-                          {isConnected ? t('addAnotherAccount') : t('login')}
+                          {t('loginAccount')}
                         </button>
                       )}
                     </>

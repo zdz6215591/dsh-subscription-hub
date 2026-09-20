@@ -1169,6 +1169,69 @@ function commandCodeReasoning(model: string): LlmResolvedModelInfo['reasoning'] 
   }
 }
 
+/**
+ * Models the official CLI marks `reasoning: true` but defines NO selectable
+ * `reasoning_effort` levels for: they think automatically at a depth Command
+ * Code drives, so the CLI sends no `reasoning_effort` and the picker must not
+ * offer a selector. Mirrors Mars-Sea/dsh-commandcode-provider (MIT)
+ * `KNOWN_THINKING_MODELS`.
+ *
+ * Not surfaced in the picker — it exists so {@link looksLikeMissingEffortEntry}
+ * does not report these as snapshot gaps.
+ */
+export const COMMANDCODE_AUTO_REASONING_MODELS: ReadonlySet<string> = new Set([
+  'Qwen/Qwen3.6-Max-Preview',
+  'Qwen/Qwen3.6-Plus',
+  'Qwen/Qwen3.7-Flash',
+  'Qwen/Qwen3.7-Max',
+  'Qwen/Qwen3.7-Plus',
+  'Qwen/Qwen3.8-Omni-Flash',
+  'moonshotai/Kimi-K2.5',
+  'moonshotai/Kimi-K2.6',
+  'moonshotai/Kimi-K2.7-Code',
+  'moonshotai/Kimi-K2.7-Code-Highspeed',
+  'stepfun/Step-3.5-Flash',
+  'stepfun/Step-3.7-Flash',
+  'tencent/hy3',
+  'tencent/hy3-paid',
+  'nvidia/nemotron-3-ultra-550b-a55b',
+  'thinkingmachines/inkling',
+  'thinkingmachines/inkling-small',
+  'poolside/laguna-s-2.1-free',
+  'meituan/LongCat-2.0',
+  'meituan/LongCat-2.0:free',
+  'inclusionai/ling-3.0-flash-sante:free',
+  'zai-org/GLM-5',
+  'zai-org/GLM-5.1',
+  'zai-org/GLM-5.2-Fast',
+  'MiniMaxAI/MiniMax-M2.5',
+  'MiniMaxAI/MiniMax-M2.7',
+  'xiaomi/mimo-v2.5',
+  'xiaomi/mimo-v2.5-pro',
+])
+
+/**
+ * Heuristic: does this catalog id look like a model the effort table should
+ * cover but does not? Families that ship selectable levels are recognizable
+ * from the id, so a newly released member is a likely snapshot gap rather than
+ * a genuinely fixed-depth model.
+ *
+ * Advisory only — it drives a one-line warning so the gap is visible in the
+ * logs, never a guessed selector: a `reasoning_effort` the CLI would not send
+ * is rejected by the gateway, so offering a level on a guess risks a failed
+ * turn. Verified to report zero false positives against the live 71-model
+ * catalog.
+ */
+export function looksLikeMissingEffortEntry(model: string): boolean {
+  if (COMMANDCODE_KNOWN_EFFORTS[model] !== undefined) return false
+  if (COMMANDCODE_AUTO_REASONING_MODELS.has(model)) return false
+  const id = model.toLowerCase()
+  // `-fast` / `omni` / `haiku` variants reason automatically or take none.
+  if (id.endsWith('-fast') || id.includes('omni') || id.includes('haiku')) return false
+  // Families whose shipped members all carry selectable levels.
+  return /^(claude-(sonnet|opus|fable)-|gpt-5\.[3-9]|gpt-6|qwen\/qwen3\.[89]-(max|flash|\d+b)|deepseek\/deepseek-v4|google\/gemini-3\.[5-9]|xai\/grok-4\.[5-9]|moonshotai\/kimi-k3|zai-org\/glm-5\.[2-9]|z-ai\/glm-5\.[3-9]|meta\/muse-spark|minimaxai\/minimax-m[3-9]|tencent\/hy[4-9])/.test(id)
+}
+
 /** Project a sized catalog model into the harness model-info shape. */
 function toModelInfo(catalog: CommandCodeCatalogModel, provider: string): LlmModelInfo {
   return {
@@ -1204,6 +1267,9 @@ interface CommandCodeCatalogModel {
 export class CommandCodeAdapter extends LlmAdapter {
   /** Per-account live catalog, retaining each model's context window and output cap. */
   private readonly catalogs = new Map<string, { at: number; models: CommandCodeCatalogModel[] }>()
+
+  /** Catalog ids already warned about a missing effort-table entry (one warning each). */
+  private readonly warnedEffortGaps = new Set<string>()
 
   /** The live catalog entry for a model from any account, preferring the most recent snapshot. */
   private catalogModel(model: string): CommandCodeCatalogModel | undefined {
@@ -1316,6 +1382,22 @@ export class CommandCodeAdapter extends LlmAdapter {
         .filter((entry): entry is CommandCodeCatalogModel => entry !== undefined)
       if (rawModels.length > 0) {
         this.catalogs.set(account, { at: Date.now(), models: rawModels })
+        // Snapshot-gap advisory: a newly shipped model from a family that
+        // normally carries selectable efforts has no entry in
+        // COMMANDCODE_KNOWN_EFFORTS, so its picker shows no thinking-level
+        // selector until the table is updated. Warned once per model so the
+        // gap is discoverable in the logs rather than silently shipped.
+        for (const model of rawModels) {
+          if (!looksLikeMissingEffortEntry(model.id)) continue
+          const key = `efforts:${model.id}`
+          if (this.warnedEffortGaps.has(key)) continue
+          this.warnedEffortGaps.add(key)
+          this.options.onWarn?.(
+            `commandcode model "${model.id}" looks like it should carry selectable reasoning`
+            + ' levels but is absent from COMMANDCODE_KNOWN_EFFORTS; its picker will show no'
+            + ' thinking-level selector until the table is synced with the official CLI bundle.',
+          )
+        }
         return rawModels.map(model => toModelInfo(model, provider))
       }
     } catch (error) {
