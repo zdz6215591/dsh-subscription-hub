@@ -58,6 +58,7 @@ import {
 import type {
   AgySession,
   ClaudeSession,
+  ClineSession,
   CodexSession,
   CodeBuddySession,
   CommandCodeSession,
@@ -151,6 +152,20 @@ import {
   recordManualCheckin,
 } from './providers/codebuddy.js'
 import {
+  ClineAdapter,
+  CLINE_BASE_URL,
+  CLINE_PREEMPT_MS,
+  ClinePinStore,
+  assertUsableClineKey,
+  extractAvailableProviders,
+  fetchClineUsage,
+  isClinePermanentRefreshError,
+  maskClineKey,
+  mergeUpstreams,
+  refreshCline,
+  sessionFromClineKey,
+} from './providers/cline/index.js'
+import {
   TraeAdapter,
   TRAE_PREEMPT_MS,
   claimTraeCheckin,
@@ -221,6 +236,7 @@ export interface Config {
     copilot?: ModelEntry[]
     agy?: ModelEntry[]
     commandcode?: ModelEntry[]
+    cline?: ModelEntry[]
     codebuddy?: ModelEntry[]
     trae?: ModelEntry[]
     zed?: ModelEntry[]
@@ -244,7 +260,7 @@ export interface Config {
   }
 }
 
-const providerIdSchema = z.union(['codex', 'claude', 'grok', 'copilot', 'agy', 'commandcode', 'codebuddy', 'trae', 'zed'])
+const providerIdSchema = z.union(['codex', 'claude', 'grok', 'copilot', 'agy', 'commandcode', 'cline', 'codebuddy', 'trae', 'zed'])
 const modelEntrySchema: z<ModelEntry> = z.object({
   id: z.string().required(),
   name: z.string(),
@@ -261,7 +277,7 @@ const poolMemberSchema: z<PoolMemberRef> = z.object({
 })
 
 export const Config: z<Config> = z.object({
-  providers: z.array(providerIdSchema).default(['codex', 'claude', 'grok', 'agy', 'commandcode', 'codebuddy', 'trae', 'copilot', 'zed']),
+  providers: z.array(providerIdSchema).default(['codex', 'claude', 'grok', 'agy', 'commandcode', 'cline', 'codebuddy', 'trae', 'copilot', 'zed']),
   streamIdleTimeoutMs: z.number().min(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   rateLimit: z.object({
     wait: z.boolean().default(true),
@@ -274,6 +290,7 @@ export const Config: z<Config> = z.object({
     copilot: z.array(modelEntrySchema),
     agy: z.array(modelEntrySchema),
     commandcode: z.array(modelEntrySchema),
+    cline: z.array(modelEntrySchema),
     codebuddy: z.array(modelEntrySchema),
     trae: z.array(modelEntrySchema),
     zed: z.array(modelEntrySchema),
@@ -323,6 +340,14 @@ const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
     { id: 'deepseek/deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
     { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol' },
   ],
+  // Static fallback only: the live recommended-models roster wins whenever
+  // discovery succeeds. Every entry needs a positive contextWindow or the
+  // whole provider catalog is rejected as INVALID_MODEL_CONTEXT.
+  cline: [
+    { id: 'cline-pass/deepseek-v4-flash', name: 'DeepSeek V4 Flash', contextWindow: 1_000_000 },
+    { id: 'cline-pass/glm-5.3-flash', name: 'GLM-5.3 Flash', contextWindow: 1_000_000 },
+    { id: 'cline-pass/kimi-k3', name: 'Kimi K3', contextWindow: 1_048_576 },
+  ],
   codebuddy: [
     { id: 'auto', name: 'CodeBuddy Auto' },
   ],
@@ -355,6 +380,7 @@ function resolveCatalog(models: Config['models']): Record<ProviderId, ModelEntry
     copilot: resolve('copilot'),
     agy: resolve('agy'),
     commandcode: resolve('commandcode'),
+    cline: resolve('cline'),
     codebuddy: resolve('codebuddy'),
     trae: resolve('trae'),
     zed: resolve('zed'),
@@ -376,6 +402,7 @@ function accountOf(provider: ProviderId, session: StoredSession | undefined): st
     case 'copilot': return (session as CopilotSession).account
     case 'agy': return (session as AgySession).account
     case 'commandcode': return (session as CommandCodeSession).account
+    case 'cline': return (session as ClineSession).account
     case 'codebuddy': return (session as CodeBuddySession).account
     case 'trae': return (session as TraeSession).account ?? (session as TraeSession).userId
     case 'zed': return (session as ZedSession).account ?? (session as ZedSession).userId
@@ -391,6 +418,7 @@ function planOf(provider: ProviderId, session: StoredSession): string | undefine
     case 'copilot': return undefined
     case 'agy': return undefined
     case 'commandcode': return undefined
+    case 'cline': return undefined
     case 'codebuddy': return undefined
     // The channel IS the plan distinction for Trae: the two CN surfaces are
     // separate products with their own rosters.
@@ -593,6 +621,13 @@ export class SubscriptionsAuthController implements AuthController {
       this.lastError.delete('trae')
       return { authorizeUrl: '' }
     }
+    if (provider === 'cline') {
+      // Cline has no OAuth grant and no device flow: its only login is a pasted
+      // API key, which the panel collects through the manual-input field. This
+      // branch exists so the shared "login" button opens that field instead of
+      // trying to start an authorization-code flow that cannot exist.
+      return { authorizeUrl: '' }
+    }
     const spec = provider === 'grok' ? await grokFlow() : provider === 'agy' ? agyFlow : codexFlow
     const attempt = await this.flows.start(provider, spec)
     // Claimed only once the attempt exists: a rejected `start()` (one attempt
@@ -713,6 +748,7 @@ export class SubscriptionsAuthController implements AuthController {
       case 'agy':
         return exchangeAgyCode(code, attempt.pkce.verifier, attempt.redirectUri)
       case 'commandcode':
+      case 'cline':
       case 'codebuddy':
       case 'trae':
       case 'zed':
@@ -750,6 +786,16 @@ export class SubscriptionsAuthController implements AuthController {
       await this.persist('commandcode', session)
       this.lastError.delete('commandcode')
       this.onAuthChanged('commandcode', accountKeyOf('commandcode', session))
+      return
+    }
+    if (provider === 'cline') {
+      // A Cline login IS a pasted key: there is no OAuth or device flow, so the
+      // paste path doubles as the login path.
+      const key = assertUsableClineKey(input, 'cline')
+      const session = sessionFromClineKey(key, `cline-${maskClineKey(key)}`)
+      await this.persist('cline', session)
+      this.lastError.delete('cline')
+      this.onAuthChanged('cline', accountKeyOf('cline', session))
       return
     }
     const attempt = this.flows.pending(provider)
@@ -824,6 +870,9 @@ export function apply(ctx: Context, config: Config): void {
   let poolAdapter: PoolAdapter | undefined
   const codexVersionCache = new CodexClientVersionCache(proxiedFetch)
   const imagePool = new ImageAccountPool({ onWarn })
+  // Per-model upstream pins for Cline. Pins persist; the routing observations
+  // the store also holds are derived data any probe can rebuild.
+  const clinePins = new ClinePinStore()
   const authChanged = (provider: ProviderId, account?: string): void => {
     // Login, logout, and credential death all pass through here; a copilot
     // auth transition also drops the adapter's captured reasoning replay
@@ -1063,6 +1112,39 @@ export function apply(ctx: Context, config: Config): void {
           pool: () => poolAdapter,
         })
         registerTrackedAdapter('commandcode', adapter)
+        break
+      }
+      case 'cline': {
+        // Cline is API-key only: a static `sk_…` credential with no OAuth grant
+        // and no refresh contract, so the login path is a paste.
+        const tokens = new AccountTokenManager<ClineSession>({
+          provider: 'cline',
+          displayName: 'Cline',
+          makeOptions: () => ({
+            preemptMs: CLINE_PREEMPT_MS,
+            refresh: refreshCline,
+            isPermanent: isClinePermanentRefreshError,
+          }),
+          onAccountRemoved: account => { authChanged('cline', account) },
+        })
+        accountTokens.set('cline', tokens as unknown as AccountTokenManager<StoredSession>)
+        usageFetchers.cline = async (account, signal) => {
+          const session = await tokens.session(account)
+          return fetchClineUsage(session.accessToken, session.baseUrl ?? CLINE_BASE_URL, signal)
+        }
+        const adapter = new ClineAdapter({
+          models: catalog.cline,
+          streamIdleTimeoutMs,
+          rateLimit,
+          tokens,
+          pins: clinePins,
+          discovery: !overridden.has('cline'),
+          onWarn,
+          resolveAttachments,
+          defaultEffortOf: (model: string) => defaultEffortOf('cline', model),
+          pool: () => poolAdapter,
+        })
+        registerTrackedAdapter('cline', adapter)
         break
       }
       case 'codebuddy': {
@@ -1412,6 +1494,84 @@ export function apply(ctx: Context, config: Config): void {
         await markProviderModelsRead(provider)
       }
       return { ok: true }
+    },
+    async clinePins() {
+      const pinned = await clinePins.allPins()
+      const known = new Set<string>(Object.keys(pinned))
+      for (const meta of clinePins.allMeta()) known.add(meta.id)
+      return [...known].map((model) => {
+        const meta = clinePins.metaOf(model)
+        const pin = pinned[model]
+        return {
+          model,
+          channels: meta.upstreams ?? [],
+          upstreams: pin?.upstreams ?? [],
+          exclude: pin?.exclude ?? [],
+          pinMode: pin?.pinMode ?? 'strict',
+          sort: pin?.sort ?? '',
+          ...meta.pipeline === undefined ? {} : { pipeline: meta.pipeline },
+          verdicts: meta.upstreamStatus ?? {},
+        }
+      })
+    },
+    async setClinePin(model, pin) {
+      await clinePins.setPin(model, {
+        upstreams: pin.upstreams,
+        exclude: pin.exclude,
+        pinMode: pin.pinMode,
+        sort: pin.sort === 'cost' || pin.sort === 'ttft' || pin.sort === 'tps' ? pin.sort : '',
+      })
+    },
+    async probeClineChannels(model) {
+      // The gateway names every provider it could have used when it is handed
+      // an impossible `only` value, and it fails BEFORE spending a token — so a
+      // probe is free and does not consume the user's quota.
+      const sessions = accountTokens.get('cline')
+      if (sessions === undefined) return { channels: [] }
+      const accounts = await sessions.list()
+      if (accounts.length === 0) return { channels: [] }
+      const session = await sessions.session(accounts[0]!.key) as ClineSession
+      const base = (session.baseUrl ?? CLINE_BASE_URL).replace(/\/+$/, '')
+      const probeBody = {
+        model,
+        messages: [{ role: 'user', content: 'ping' }],
+        max_tokens: 1,
+        stream: false,
+        provider: { only: ['__probe__'] },
+        providerOptions: { gateway: { only: ['__probe__'] } },
+      }
+      try {
+        const response = await proxiedFetch(`${base}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${session.accessToken}`,
+            'content-type': 'application/json',
+            accept: 'application/json',
+          },
+          body: JSON.stringify(probeBody),
+          signal: AbortSignal.timeout(30_000),
+        })
+        const text = await response.text().catch(() => '')
+        const observed = clinePins.metaOf(model)
+        const planner = extractAvailableProviders(text, 'planner')
+        const direct = extractAvailableProviders(text, 'direct')
+        const channels = mergeUpstreams(planner ?? undefined, direct ?? undefined, observed.upstreams)
+        const pipeline = planner !== null ? 'planner' as const : direct !== null ? 'direct' as const : undefined
+        if (channels.length > 0) {
+          clinePins.learn(model, {
+            upstreams: channels,
+            ...pipeline === undefined ? {} : { pipeline },
+          })
+        }
+        return { channels, ...pipeline === undefined ? {} : { pipeline } }
+      } catch {
+        // A failed probe leaves whatever discovery already learned in place.
+        const observed = clinePins.metaOf(model)
+        return {
+          channels: observed.upstreams ?? [],
+          ...observed.pipeline === undefined ? {} : { pipeline: observed.pipeline },
+        }
+      }
     },
     async setVisible(provider, model, visible) {
       await setModelVisible(provider, model, visible)

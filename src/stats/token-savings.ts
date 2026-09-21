@@ -42,6 +42,7 @@ const SUBSCRIPTION_PROVIDERS = new Set([
   'copilot',
   'agy',
   'commandcode',
+  'cline',
   'codebuddy',
   'trae',
   'zed',

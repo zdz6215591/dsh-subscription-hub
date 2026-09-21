@@ -37,7 +37,7 @@ const MODEL_FILTER_THRESHOLD = 8
 const MODEL_LIST_MAX_HEIGHT = 260
 
 /** Subscription provider ids, fixed by the node half's OAuth adapters. */
-export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'agy' | 'commandcode' | 'codebuddy' | 'trae' | 'zed'
+export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'agy' | 'commandcode' | 'cline' | 'codebuddy' | 'trae' | 'zed'
 
 /** One logged-in account as answered by the `status` endpoint. */
 export interface AccountStatus {
@@ -103,6 +103,25 @@ export interface VisibleModelView {
   name: string
   visible: boolean
   unread?: boolean
+}
+
+/** One Cline model's upstream-channel pin, as answered by `clinePins`. */
+export interface ClinePinView {
+  model: string
+  /** Upstream channels discovered for this model. */
+  channels: string[]
+  /** Pinned channels, in try order. */
+  upstreams: string[]
+  /** Channels the user excluded. */
+  exclude: string[]
+  /** `strict` pins one channel; `preferred` fails over between them. */
+  pinMode: 'strict' | 'preferred'
+  /** Sort metric, or `''` for none. */
+  sort: string
+  /** Which gateway pipeline last served this model, when observed. */
+  pipeline?: 'direct' | 'planner'
+  /** Per-channel availability, for the row dots. */
+  verdicts: Record<string, { status: string; note: string; ms: number; checkedAt: number }>
 }
 
 /** `proxyGet` endpoint value: the node half owns this shape (no secrets). */
@@ -219,6 +238,7 @@ const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [  { id
   { id: 'grok', name: 'Grok (X Premium / SuperGrok)' },
   { id: 'agy', name: 'Antigravity' },
   { id: 'commandcode', name: 'Command Code Go' },
+  { id: 'cline', name: 'Cline' },
   { id: 'codebuddy', name: 'CodeBuddy' },
   { id: 'trae', name: 'Trae' },
   { id: 'copilot', name: 'GitHub Copilot' },
@@ -227,6 +247,17 @@ const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [  { id
 
 /** Providers that offer a daily check-in (each keeps its own schedule). */
 const CHECKIN_PROVIDERS: ReadonlySet<SubscriptionProvider> = new Set<SubscriptionProvider>(['codebuddy', 'trae'])
+
+/** Dot color for one Cline upstream availability verdict. */
+function verdictColor(status: string): string {
+  switch (status) {
+    case 'ok': return 'var(--dsw-alias-state-success-primary)'
+    case 'limited': return 'var(--dsw-alias-state-warn-label)'
+    case 'bad':
+    case 'auth': return 'var(--dsw-alias-state-danger-primary, #f43f5e)'
+    default: return 'var(--dsw-alias-label-caption)'
+  }
+}
 
 /** Human text of an action failure, SubscriptionsAuthError or not. */
 function messageOf(error: unknown): string {
@@ -497,6 +528,54 @@ const styles: Record<string, CSSProperties> = {
     verticalAlign: 'middle',
     opacity: 0.85,
   },
+  // ---- Cline upstream pins ----
+  pinList: { display: 'flex', flexDirection: 'column', gap: 8, maxHeight: MODEL_LIST_MAX_HEIGHT, overflowY: 'auto' },
+  pinRow: {
+    display: 'flex', flexDirection: 'column', gap: 5,
+    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8, padding: '6px 8px',
+  },
+  pinHeader: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 },
+  pinPipeline: {
+    fontSize: 10, lineHeight: '14px', padding: '0 4px', borderRadius: 4,
+    color: 'var(--dsw-alias-label-tertiary)', background: 'var(--dsw-alias-interactive-bg-hover)',
+  },
+  pinChips: { display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' },
+  pinChipGroup: { display: 'inline-flex', alignItems: 'center' },
+  pinChip: {
+    boxSizing: 'border-box', display: 'inline-flex', alignItems: 'center', gap: 4,
+    height: 20, padding: '0 6px',
+    borderTopLeftRadius: 10, borderBottomLeftRadius: 10,
+    borderTopRightRadius: 0, borderBottomRightRadius: 0,
+    border: '1px solid var(--dsw-alias-border-l2)', borderRight: 'none',
+    background: 'transparent', font: 'inherit', fontSize: 11, lineHeight: '18px',
+    color: 'var(--dsw-alias-label-secondary)', cursor: 'pointer',
+  },
+  pinChipActive: {
+    borderColor: 'var(--dsw-alias-state-business-primary)',
+    color: 'var(--dsw-alias-label-primary)',
+    background: 'var(--dsw-alias-interactive-bg-hover)',
+  },
+  pinChipExcluded: { textDecoration: 'line-through', opacity: 0.55 },
+  pinOrder: {
+    fontSize: 9, lineHeight: '12px', fontWeight: 600,
+    color: 'var(--dsw-alias-state-business-primary)', fontVariantNumeric: 'tabular-nums',
+  },
+  pinDot: { width: 5, height: 5, borderRadius: '50%', flexShrink: 0 },
+  pinChipLabel: { maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  pinExclude: {
+    boxSizing: 'border-box', display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    height: 20, width: 20,
+    borderTopRightRadius: 10, borderBottomRightRadius: 10,
+    borderTopLeftRadius: 0, borderBottomLeftRadius: 0,
+    border: '1px solid var(--dsw-alias-border-l2)',
+    background: 'transparent', font: 'inherit', fontSize: 11, lineHeight: '18px',
+    color: 'var(--dsw-alias-label-tertiary)', cursor: 'pointer',
+  },
+  pinExcludeActive: {
+    color: 'var(--dsw-alias-state-danger-primary, #f43f5e)',
+    borderColor: 'var(--dsw-alias-state-danger-primary, #f43f5e)',
+  },
+  pinControls: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
   visibilityGrid: {
     display: 'flex', flexWrap: 'wrap', gap: '6px 12px',
     maxHeight: MODEL_LIST_MAX_HEIGHT, overflowY: 'auto', paddingRight: 2,
@@ -868,7 +947,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [statuses, setStatuses] = useState<Partial<Record<SubscriptionProvider, ProviderStatus>>>({})
   const [errors, setErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
-    codex: '', claude: '', grok: '', copilot: '', agy: '', commandcode: '', codebuddy: '', trae: '', zed: '',
+    codex: '', claude: '', grok: '', copilot: '', agy: '', commandcode: '', cline: '', codebuddy: '', trae: '', zed: '',
   })
   /** Pending device-flow codes (copilot), shown while the attempt polls. */
   const [deviceCodes, setDeviceCodes] = useState<Partial<Record<SubscriptionProvider, { userCode: string; verificationUrl: string }>>>({})
@@ -898,7 +977,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [proxyBypass, setProxyBypass] = useState('')
   const [proxyProviders, setProxyProviders] = useState<Record<SubscriptionProvider, boolean>>({
     codex: true, claude: true, grok: true, copilot: true,
-    agy: true, commandcode: true, codebuddy: true, trae: true, zed: true,
+    agy: true, commandcode: true, cline: true, codebuddy: true, trae: true, zed: true,
   })
   const [proxySaving, setProxySaving] = useState(false)
   const [proxyTesting, setProxyTesting] = useState(false)
@@ -937,6 +1016,17 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [visibilityLoading, setVisibilityLoading] = useState<Partial<Record<SubscriptionProvider, boolean>>>({})
   const [visibilityError, setVisibilityError] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const visibilityInflightRef = useRef(new Set<SubscriptionProvider>())
+  /**
+   * Cline's per-model upstream pins. Cline is the only route with a channel
+   * layer, so this state is provider-specific rather than part of the shared
+   * visibility model.
+   */
+  const [clinePinsOpen, setClinePinsOpen] = useState(false)
+  const [clinePins, setClinePins] = useState<ClinePinView[] | undefined>(undefined)
+  const [clinePinsLoading, setClinePinsLoading] = useState(false)
+  const [clinePinsError, setClinePinsError] = useState<string | undefined>(undefined)
+  /** Model whose channels are being probed (undefined = idle). */
+  const [clineProbing, setClineProbing] = useState<string | undefined>(undefined)
 
   const setProviderError = useCallback((provider: SubscriptionProvider, message: string | undefined): void => {
     if (!mountedRef.current) return
@@ -1226,8 +1316,65 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   }, [rpc, statuses, loadVisibility, visibilityModels])
 
   /** Drop the server's cached catalogs, then re-read this provider's model list. */
-  const refreshModelList = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
-    if (rpc === undefined || refreshingModels !== undefined) return
+  /** Load Cline's per-model upstream pins plus whatever discovery knows. */
+  const loadClinePins = useCallback(async (): Promise<void> => {
+    if (rpc === undefined) return
+    setClinePinsLoading(true)
+    try {
+      const response = await callSubscriptionsAuth<{ models: ClinePinView[] }>(rpc, 'clinePins', {})
+      if (!mountedRef.current) return
+      setClinePins(response.models)
+      setClinePinsError(undefined)
+    } catch (error) {
+      if (mountedRef.current) setClinePinsError(messageOf(error))
+    } finally {
+      if (mountedRef.current) setClinePinsLoading(false)
+    }
+  }, [rpc])
+
+  /** Persist one model's pin, updating the row optimistically. */
+  const saveClinePin = useCallback(async (
+    model: string,
+    next: { upstreams: string[]; exclude: string[]; pinMode: 'strict' | 'preferred'; sort: string },
+  ): Promise<void> => {
+    if (rpc === undefined) return
+    setClinePins(prev => (prev ?? []).map(row => (row.model === model ? { ...row, ...next } : row)))
+    try {
+      await callSubscriptionsAuth<{ ok: true }>(rpc, 'setClinePin', { model, ...next })
+    } catch (error) {
+      setClinePinsError(messageOf(error))
+      void loadClinePins()
+    }
+  }, [rpc, loadClinePins])
+
+  /** Discover the channels one model can use (free: the probe spends no token). */
+  const probeClineChannels = useCallback(async (model: string): Promise<void> => {
+    if (rpc === undefined || clineProbing !== undefined) return
+    setClineProbing(model)
+    try {
+      const result = await callSubscriptionsAuth<{ channels: string[]; pipeline?: 'direct' | 'planner' }>(
+        rpc, 'probeClineChannels', { model },
+      )
+      if (!mountedRef.current) return
+      setClinePins(prev => (prev ?? []).map(row => (row.model === model
+        ? { ...row, channels: result.channels, ...result.pipeline === undefined ? {} : { pipeline: result.pipeline } }
+        : row)))
+    } catch (error) {
+      if (mountedRef.current) setClinePinsError(messageOf(error))
+    } finally {
+      if (mountedRef.current) setClineProbing(undefined)
+    }
+  }, [rpc, clineProbing])
+
+  const toggleClineSection = useCallback((): void => {
+    setClinePinsOpen((prev) => {
+      const next = !prev
+      if (next) void loadClinePins()
+      return next
+    })
+  }, [loadClinePins])
+
+  const refreshModelList = useCallback(async (provider: SubscriptionProvider): Promise<void> => {    if (rpc === undefined || refreshingModels !== undefined) return
     setRefreshingModels(provider)
     try {
       await callSubscriptionsAuth<{ ok: boolean }>(rpc, 'refreshModels', { provider })
@@ -1472,6 +1619,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       copilot: proxy.providers.copilot !== false,
       agy: proxy.providers.agy !== false,
       commandcode: proxy.providers.commandcode !== false,
+      cline: proxy.providers.cline !== false,
       codebuddy: proxy.providers.codebuddy !== false,
       trae: proxy.providers.trae !== false,
       zed: proxy.providers.zed !== false,
@@ -2092,6 +2240,178 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 </div>
               )
             })()}
+            {/* Cline only: per-model upstream channel pinning. The gateway fans
+                a model across several backing providers; this chooses which. */}
+            {id === 'cline' && accounts.length > 0 && (
+              <div style={styles.defaultEffort}>
+                <button
+                  type="button"
+                  style={styles.defaultEffortToggle}
+                  aria-expanded={clinePinsOpen}
+                  onClick={toggleClineSection}
+                >
+                  <span style={styles.usageTitle}>{t('clinePinsTitle')}</span>
+                  <span style={styles.usagePlan}>
+                    {clinePins === undefined
+                      ? (clinePinsLoading ? t('visibilityLoading') : '')
+                      : t('clinePinsSummary', {
+                          pinned: clinePins.filter(row => row.upstreams.length > 0).length,
+                          total: clinePins.length,
+                        })}
+                  </span>
+                  <span style={styles.defaultEffortChevron} aria-hidden="true">
+                    {clinePinsOpen ? '▲' : '▼'}
+                  </span>
+                </button>
+                {clinePinsOpen && (
+                  <>
+                    <p style={styles.statusLine}>{t('clinePinsHint')}</p>
+                    {clinePinsError !== undefined && <p style={styles.errorLine}>{clinePinsError}</p>}
+                    {clinePinsLoading && clinePins === undefined && (
+                      <p style={styles.statusLine}>{t('visibilityLoading')}</p>
+                    )}
+                    {clinePins !== undefined && clinePins.length === 0 && (
+                      <p style={styles.statusLine}>{t('clinePinsEmpty')}</p>
+                    )}
+                    {clinePins !== undefined && clinePins.length > 0 && (
+                      <div style={styles.pinList}>
+                        {clinePins.map((row) => {
+                          const probeKey = row.model
+                          return (
+                            <div key={row.model} style={styles.pinRow}>
+                              <div style={styles.pinHeader}>
+                                <span style={styles.defaultEffortName} title={row.model}>
+                                  {row.model.replace(/^cline-pass\//, '')}
+                                </span>
+                                {row.pipeline !== undefined && (
+                                  <span style={styles.pinPipeline}>{row.pipeline}</span>
+                                )}
+                                <button
+                                  type="button"
+                                  style={{ ...styles.buttonSmall, marginLeft: 'auto', ...clineProbing === probeKey ? { opacity: 0.5, cursor: 'default' } : {} }}
+                                  disabled={clineProbing !== undefined}
+                                  onClick={() => { void probeClineChannels(probeKey) }}
+                                >
+                                  {clineProbing === probeKey ? t('refreshModelsRunning') : t('clinePinProbe')}
+                                </button>
+                              </div>
+                              {/* Channel chips: click pins (in click order), ⊘ excludes. */}
+                              <div style={styles.pinChips}>
+                                {row.channels.length === 0 && (
+                                  <span style={styles.statusLine}>{t('clinePinNoChannels')}</span>
+                                )}
+                                {row.channels.map((channel) => {
+                                  const pinnedIndex = row.upstreams.indexOf(channel)
+                                  const excluded = row.exclude.includes(channel)
+                                  const verdict = row.verdicts[channel]
+                                  return (
+                                    <span key={channel} style={styles.pinChipGroup}>
+                                      <button
+                                        type="button"
+                                        title={verdict === undefined ? channel : `${channel}: ${verdict.status}${verdict.note === '' ? '' : ` · ${verdict.note}`}`}
+                                        style={{
+                                          ...styles.pinChip,
+                                          ...pinnedIndex >= 0 ? styles.pinChipActive : {},
+                                          ...excluded ? styles.pinChipExcluded : {},
+                                        }}
+                                        onClick={() => {
+                                          // Clicking appends to the pin order; clicking a pinned
+                                          // chip removes it again.
+                                          const upstreams = pinnedIndex >= 0
+                                            ? row.upstreams.filter(name => name !== channel)
+                                            : [...row.upstreams, channel]
+                                          void saveClinePin(row.model, {
+                                            upstreams,
+                                            exclude: row.exclude.filter(name => name !== channel),
+                                            pinMode: row.pinMode,
+                                            sort: row.sort,
+                                          })
+                                        }}
+                                      >
+                                        {pinnedIndex >= 0 && <span style={styles.pinOrder}>{pinnedIndex + 1}</span>}
+                                        {verdict !== undefined && (
+                                          <span style={{ ...styles.pinDot, background: verdictColor(verdict.status) }} />
+                                        )}
+                                        <span style={styles.pinChipLabel}>{channel}</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        title={t('clinePinExclude')}
+                                        style={{ ...styles.pinExclude, ...excluded ? styles.pinExcludeActive : {} }}
+                                        onClick={() => {
+                                          const next = excluded
+                                            ? row.exclude.filter(name => name !== channel)
+                                            : [...row.exclude, channel]
+                                          void saveClinePin(row.model, {
+                                            upstreams: row.upstreams.filter(name => name !== channel),
+                                            exclude: next,
+                                            pinMode: row.pinMode,
+                                            sort: row.sort,
+                                          })
+                                        }}
+                                      >
+                                        ⊘
+                                      </button>
+                                    </span>
+                                  )
+                                })}
+                              </div>
+                              <div style={styles.pinControls}>
+                                <select
+                                  style={styles.defaultEffortSelect}
+                                  aria-label={t('clinePinMode')}
+                                  value={row.pinMode}
+                                  onChange={(event) => {
+                                    void saveClinePin(row.model, {
+                                      upstreams: row.upstreams,
+                                      exclude: row.exclude,
+                                      pinMode: event.target.value === 'preferred' ? 'preferred' : 'strict',
+                                      sort: row.sort,
+                                    })
+                                  }}
+                                >
+                                  <option value="strict">{t('clinePinModeStrict')}</option>
+                                  <option value="preferred">{t('clinePinModePreferred')}</option>
+                                </select>
+                                <select
+                                  style={styles.defaultEffortSelect}
+                                  aria-label={t('clinePinSort')}
+                                  value={row.sort}
+                                  onChange={(event) => {
+                                    void saveClinePin(row.model, {
+                                      upstreams: row.upstreams,
+                                      exclude: row.exclude,
+                                      pinMode: row.pinMode,
+                                      sort: event.target.value,
+                                    })
+                                  }}
+                                >
+                                  <option value="">{t('clinePinSortNone')}</option>
+                                  <option value="cost">{t('clinePinSortCost')}</option>
+                                  <option value="ttft">{t('clinePinSortTtft')}</option>
+                                  <option value="tps">{t('clinePinSortTps')}</option>
+                                </select>
+                                {(row.upstreams.length > 0 || row.exclude.length > 0 || row.sort !== '') && (
+                                  <button
+                                    type="button"
+                                    style={styles.buttonSmall}
+                                    onClick={() => {
+                                      void saveClinePin(row.model, { upstreams: [], exclude: [], pinMode: 'strict', sort: '' })
+                                    }}
+                                  >
+                                    {t('clinePinReset')}
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
             {accounts.length > 0 && (() => {
               const open = visibilityOpen[id] === true
               const models = visibilityModels[id]
@@ -2251,6 +2571,20 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                           {t('importTrae')}
                         </button>
                       )}
+                      {id === 'cline' && (
+                        <>
+                          <button type="button" style={styles.buttonSmall} onClick={() => { void login(id) }}>
+                            {t('loginAccount')}
+                          </button>
+                          <button
+                            type="button"
+                            style={styles.buttonSmall}
+                            onClick={() => { setManualOpen(prev => ({ ...prev, [id]: !prev[id] })) }}
+                          >
+                            {manualOpen[id] ? t('cancel') : t('manualInput')}
+                          </button>
+                        </>
+                      )}
                       {id === 'claude' && (
                         <>
                           <button type="button" style={styles.buttonSmall} onClick={() => { void login(id, 'oauth') }}>
@@ -2261,7 +2595,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                           </button>
                         </>
                       )}
-                      {id !== 'claude' && id !== 'commandcode' && id !== 'zed' && id !== 'trae' && (
+                      {id !== 'claude' && id !== 'commandcode' && id !== 'zed' && id !== 'trae' && id !== 'cline' && (
                         <button type="button" style={styles.buttonSmall} onClick={() => { void login(id) }}>
                           {t('loginAccount')}
                         </button>
@@ -2357,6 +2691,26 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                       </button>
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* Cline's only login is a pasted API key: there is no OAuth or
+                  device flow, so the paste field IS the sign-in. */}
+              {!busy && id === 'cline' && manualOpen[id] && (
+                <div style={styles.manualBox}>
+                  <p style={styles.statusLine}>{t('clinePasteHint')}</p>
+                  <div style={styles.manualRow}>
+                    <input
+                      style={styles.manualInput}
+                      value={manualDrafts[id]}
+                      placeholder={t('clineKeyPlaceholder')}
+                      autoComplete="off"
+                      onChange={event => setManualDrafts(prev => ({ ...prev, [id]: event.target.value }))}
+                    />
+                    <button type="button" style={styles.buttonSmall} onClick={() => { void submitManual(id) }}>
+                      {t('submit')}
+                    </button>
+                  </div>
                 </div>
               )}
             </div>

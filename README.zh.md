@@ -4,7 +4,7 @@
 
 [English](README.md) | 中文
 
-一个 **设置 → 订阅** 页面覆盖九个订阅路由：
+一个 **设置 → 订阅** 页面覆盖十个订阅路由：
 
 | 路由 | 订阅 | 说明 |
 | --- | --- | --- |
@@ -13,6 +13,7 @@
 | `grok` | SuperGrok / X Premium | 实时目录、用量、Imagine 生图生视频 |
 | `agy` | Google Antigravity | **纯 HTTP OAuth**，不调用 `agy` CLI，不闪 `cmd.exe` |
 | `commandcode` | Command Code Go | 导入 `~/.commandcode/auth.json` 或粘贴 key（Studio 可选） |
+| `cline` | Cline（ClinePass） | 粘贴 `sk_…` Key；实时额度窗口，**分模型钉住上游渠道** |
 | `codebuddy` | 腾讯 CodeBuddy | 浏览器 OAuth，每日自动签到 |
 | `trae` | Trae（国内版） | 导入本机已登录的 **TRAE SOLO CN** 与 **Trae CN IDE**；实时目录、积分、每日自动签到 |
 | `copilot` | GitHub Copilot | 设备码登录 |
@@ -68,6 +69,35 @@
   `~/.dsh/plugins/subscriptions/videos/` 并在对话内联播放。支持时长（1–15 秒）、
   宽高比、分辨率，以及通过 `image_url` 做图生视频。
 - **`x_search`** —— xAI 托管的 X 搜索，返回 `{ answer, citations }`。
+
+## Cline 上游渠道
+
+Cline 的网关在同一个地址后面藏着两套不同的后端 —— 一套 OpenRouter 风格的路由器，
+一套 Vercel AI Gateway 风格的规划器。是哪一套在服务某个模型，同时决定了「谁能服务它」
+和「钉住该如何拼写」，因此本插件在运行时探测流水线，并写入对应的字段：
+
+| 流水线 | 判定依据 | 钉住字段 |
+| --- | --- | --- |
+| `direct`（OpenRouter） | 顶层 `provider` 字符串 | `provider.only` / `.order` / `.sort` |
+| `planner`（Vercel AI Gateway） | `provider_metadata.gateway.routing` | `providerOptions.gateway.only` / `.order` / `.sort` |
+
+在探测出流水线之前，请求会**同时带上两套拼写** —— 两套流水线都会忽略对方的字段，因此仍然正确路由。
+
+在 **设置 → 订阅 → Cline → 上游渠道** 中：
+
+- **探测渠道**：探测该模型可用的渠道列表。探测会故意下发一个不可能的渠道，
+  让路由在**消耗任何 Token 之前**就失败，再从错误信息里读出渠道清单 —— 一次零消耗的发现调用。
+- **点击渠道**即可钉住；点击顺序就是尝试顺序（渠道上的数字即序号）。再点一次取消钉住。
+- **⊘** 排除渠道。排除项会被编译成 `only` 白名单，因为网关会静默忽略 exclude/ignore 字段。
+- **严格**只发钉住的渠道；**优先**按顺序尝试，并在**首个 token 之前**失败时自动切换。
+  一旦内容已经返回给调用方，那一次流就是最终答案 —— 中途失败绝不会静默换渠道重试。
+- **排序指标**会按各流水线自己的词汇翻译（`cost`/`ttft`/`tps` → `price`/`latency`/`throughput`）。
+  空值会被丢弃而不是发送，因为 `sort: ""` 会直接被网关以 HTTP 400 拒绝。
+
+`AUTH` 或额度失败会立即终止整条候选链：所有候选都会以同样方式失败，继续轮换渠道只会掩盖真正的问题。
+
+渠道发现是**内存态**（属于任何一次探测都能重建的派生数据），而钉住配置会**持久化**到
+`~/.dsh/plugins/subscriptions/cline-pins.json`。
 
 ## 安装
 
@@ -133,17 +163,19 @@ bundle，并在其上继续自研。以下项目均已致谢。
 | [igormel81/dsh-chat-cost](https://github.com/igormel81/dsh-chat-cost) | 本仓库省钱看板背后的多服务商价格表与按百万 Token 计价模型。 |
 | [dingminhua/dsh-connect-trae](https://github.com/dingminhua/dsh-connect-trae) | Trae 路由的主参考：本机凭据发现（`storage.json` 与 `iCubeAuthInfo://icube.cloudide` 解密）、`llm_utils_chat` 请求信封、命名 SSE 事件集、工具调用处理，以及只读的积分/签到接口。 |
 | [Wang-JQ77/dsh-trae-api](https://github.com/Wang-JQ77/dsh-trae-api) | Trae 次参考：四版本布局（Trae CN / TRAE SOLO CN / Trae / TRAE SOLO）、`tc` 容器格式与端点回退形态。 |
+| [yhshzh/dsh-cline-pass](https://github.com/yhshzh/dsh-cline-pass) | Cline 路由的主参考：OpenAI 兼容线协议、SSE → harness 翻译、工具调用与思考处理（`reasoning` / `reasoning_content` / `reasoning_details`），以及最重要的 **分模型上游渠道钉住**：`PinProfile` 结构、两套流水线的不同拼写、排除项转白名单规则、按流水线翻译的排序指标，和零消耗的「不可能渠道」探测法。 |
+| [GooDAnDReaDY/dsh-clinebot](https://github.com/GooDAnDReaDY/dsh-clinebot) | Cline 次参考：`apiKeyEnv` 凭据引用模式、`disabledModels` 白名单思路、`/users/me/plan/usage-limits` 额度窗口（5 小时 / 每周 / 每月，80% 与 95% 阈值）—— 本仓库 Cline 用量条的来源，以及套餐标签解析。 |
 
-### 「查看参考项目并更新本仓库」的输出约定
+### 与参考项目保持同步
 
-当你要求**检查参考项目并更新本仓库**时，答复固定分成两张清单：
+**固定约定：每当用户要求「查看参考项目并更新本仓库」时，答复一律分成两张清单**，
+每条都写明来源项目，并标注 **采纳 / 改造 / 明确跳过**（含理由）：
 
-1. **需要修复的相同缺陷** —— 别的项目已修复、本仓库同样存在的具体问题
-   （并指明对应的上游提交或 PR）。
-2. **值得新增的功能** —— 别的项目具备、本仓库缺失的能力（并评估是否契合
-   本仓库的一体化设计）。
+1. **需要修复的相同缺陷** —— 别的项目已修复、本仓库同样存在的具体问题（指明上游提交或 PR）。
+2. **值得新增的功能** —— 别的项目具备、本仓库缺失的能力（并评估是否契合一体化设计）。
 
-每条都写明来源项目、具体改动，以及最终是**采纳 / 改造 / 明确跳过**（含理由）。
+上表中的 Trae 与 Cline 项目是**持续参考对象**，不是一次性致谢：它们的服务商端点、
+模型清单与钉住/探测机制会随上游产品变化，因此每次收到此类请求都必须重新核对这两张清单。
 不会有任何静默合并。
 
 ## 开发提示

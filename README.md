@@ -4,7 +4,7 @@ Unified subscription plugin for [DeepSeek Harness](https://github.com/deepseek-a
 
 English | [中文](README.zh.md)
 
-One Settings → **Subscriptions** page for nine subscription routes:
+One Settings → **Subscriptions** page for ten subscription routes:
 
 | Route | Subscription | Notes |
 | --- | --- | --- |
@@ -13,6 +13,7 @@ One Settings → **Subscriptions** page for nine subscription routes:
 | `grok` | SuperGrok / X Premium | live catalog, usage, Imagine tools |
 | `agy` | Google Antigravity | **HTTP OAuth only** — no `agy` CLI, no flashing `cmd.exe` windows |
 | `commandcode` | Command Code Go | Import `~/.commandcode/auth.json` or paste API key (Studio optional) |
+| `cline` | Cline (ClinePass) | paste a `sk_…` key; live quota windows, **per-model upstream channel pinning** |
 | `codebuddy` | Tencent CodeBuddy | browser OAuth, daily auto check-in |
 | `trae` | Trae (CN) | imports the local sign-in from **TRAE SOLO CN** and the **Trae CN IDE**; live catalog, credits, daily auto check-in |
 | `copilot` | GitHub Copilot | device-code login |
@@ -27,6 +28,10 @@ Also included:
   image-request account failover.
 - **Visible-model checkboxes** (composer picker only) plus a **Refresh models**
   button that drops the server's catalog cache and re-reads the live list.
+- **Cline upstream channel pinning** — the only route with a channel layer.
+  Cline fans one model across several backing providers; each model can pin an
+  ordered channel list, exclude channels, and pick a routing metric (cheapest /
+  fastest first token / highest throughput). See below.
 - **Composer usage pill** — a compact readout of the *current model's* provider
   quota: CodeBuddy reports remaining credits, every other provider a remaining
   percentage with its reset countdown.
@@ -75,6 +80,44 @@ violations fail loudly instead of silently generating a new image.
   play inline. Supports duration (1–15 s), aspect ratio, resolution, and
   image-to-video through `image_url`.
 - **`x_search`** — xAI-hosted X search returning `{ answer, citations }`.
+
+## Cline upstream channels
+
+Cline's gateway hides two different backends behind one URL — an
+OpenRouter-style router and a Vercel-AI-Gateway-style planner. Which one serves a
+model decides both which providers can serve it and how a pin must be spelled,
+so this plugin detects the pipeline at runtime and writes the matching fields:
+
+| Pipeline | Detection | Pin fields |
+| --- | --- | --- |
+| `direct` (OpenRouter) | top-level `provider` string | `provider.only` / `.order` / `.sort` |
+| `planner` (Vercel AI Gateway) | `provider_metadata.gateway.routing` | `providerOptions.gateway.only` / `.order` / `.sort` |
+
+Until a pipeline has been observed it gets **both** spellings, since each
+pipeline ignores the other's fields.
+
+In **Settings → Subscriptions → Cline → Upstream channels**:
+
+- **Detect channels** probes the model's channel list. The probe channels an
+  impossible provider so the router fails *before* spending a token, then reads
+  the provider list out of the error — a free discovery call.
+- **Click a channel** to pin it; the click order is the try order (the number on
+  the chip shows it). Click again to unpin.
+- **⊘** excludes a channel. Excludes are compiled into an `only` allow-list,
+  because the gateway silently ignores exclude/ignore fields.
+- **Strict** sends only the pinned channel; **Preferred** tries the pinned
+  channels in order and fails over **before the first token**. Once content has
+  reached the caller, that stream is the answer — a mid-stream failure is never
+  silently retried on another channel.
+- **Sort metric** maps to each pipeline's own vocabulary (`cost`/`ttft`/`tps` →
+  `price`/`latency`/`throughput`). An empty value is dropped rather than sent,
+  because `sort: ""` is rejected with HTTP 400.
+
+An `AUTH` or quota failure stops the chain immediately: every candidate would
+fail identically, so rotating channels would only hide the real problem.
+
+Channel discovery is **in-memory** (it is derived data any probe can rebuild),
+while pins are **persisted** to `~/.dsh/plugins/subscriptions/cline-pins.json`.
 
 ## Why this exists
 
@@ -167,20 +210,25 @@ work on top. Credit and thanks to every project below.
 | [igormel81/dsh-chat-cost](https://github.com/igormel81/dsh-chat-cost) | The multi-provider price catalog and per-million-token costing model behind this hub's savings banner. |
 | [dingminhua/dsh-connect-trae](https://github.com/dingminhua/dsh-connect-trae) | Primary reference for the Trae route: local credential discovery (`storage.json` + the `iCubeAuthInfo://icube.cloudide` decryption), the `llm_utils_chat` request envelope, the named-SSE vocabulary, tool-call handling, and the read-only credit/check-in endpoints. |
 | [Wang-JQ77/dsh-trae-api](https://github.com/Wang-JQ77/dsh-trae-api) | Secondary Trae reference: the four-edition layout (Trae CN / TRAE SOLO CN / Trae / TRAE SOLO), the `tc` container format, and the endpoint-fallback shape. |
+| [yhshzh/dsh-cline-pass](https://github.com/yhshzh/dsh-cline-pass) | Primary reference for the Cline route: the OpenAI-compatible wire shape, SSE → harness translation, tool-call and reasoning handling (`reasoning` / `reasoning_content` / `reasoning_details`), and — most importantly — the **per-model upstream channel pin**: the `PinProfile` schema, the two pipeline spellings, the exclude→allow-list rule, the per-pipeline sort mapping, and the zero-cost impossible-pin channel probe. |
+| [GooDAnDReaDY/dsh-clinebot](https://github.com/GooDAnDReaDY/dsh-clinebot) | Secondary Cline reference: the `apiKeyEnv` credential-reference pattern, the `disabledModels` allow-list model, the `/users/me/plan/usage-limits` quota windows (5-hour / weekly / monthly with 80% and 95% thresholds) that back this hub's Cline usage bars, and the plan-label parsing. |
 
-### Where a project's own update flow goes
+### Keeping in sync with the reference projects
 
-When asked to **review the reference projects and update this hub**, the answer is
-always reported in two clearly separated lists:
+**Standing rule: whenever the user asks to "check the reference projects and
+update this hub", the answer is reported as two clearly separated lists**, each
+entry naming the source project and marking the change **adopted / adapted /
+deliberately skipped** (with the reason):
 
 1. **Shared bugs worth fixing** — a concrete defect another project fixed that
-   this hub also has (with the upstream commit or PR named).
+   this hub also has (naming the upstream commit or PR).
 2. **Features worth adding** — a capability another project has that this hub
-   lacks (with an assessment of whether it fits this hub's one-bundle design).
+   lacks (with an assessment of whether it fits the one-bundle design).
 
-Each entry names the source project, states the concrete change, and says
-whether it was adopted, adapted, or deliberately skipped (and why). Nothing is
-merged silently.
+The Trae and Cline projects above are **live references**, not historical
+credits: their provider endpoints, model rosters, and pin/probe mechanics change
+with the upstream products, so both lists must be re-checked on every such
+request. Nothing is merged silently.
 
 ## Development notes
 

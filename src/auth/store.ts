@@ -26,6 +26,7 @@ export type ProviderId =
   | 'copilot'
   | 'agy'
   | 'commandcode'
+  | 'cline'
   | 'codebuddy'
   | 'trae'
   | 'zed'
@@ -37,6 +38,7 @@ export const PROVIDER_IDS: readonly ProviderId[] = [
   'grok',
   'agy',
   'commandcode',
+  'cline',
   'codebuddy',
   'trae',
   'copilot',
@@ -149,6 +151,20 @@ export interface ZedSession {
 }
 
 /**
+ * Cline (ClinePass) subscription session: a static, long-lived API key rather
+ * than an OAuth grant. Per-model upstream pinning lives in its own store (see
+ * `src/providers/cline/pins.ts`), so a session only carries the credential.
+ */
+export interface ClineSession {
+  accessToken: string
+  refreshToken: string
+  expiresAt: number
+  account?: string
+  /** Gateway base; empty means the built-in default. */
+  baseUrl?: string
+}
+
+/**
  * Trae (ByteDance) session, read from a locally signed-in Trae install rather
  * than an OAuth flow this plugin drives. Two CN channels share one credential
  * shape; `channel` records which product surface the account came from:
@@ -188,6 +204,7 @@ export interface SessionMap {
   copilot?: ProviderAccounts<CopilotSession>
   agy?: ProviderAccounts<AgySession>
   commandcode?: ProviderAccounts<CommandCodeSession>
+  cline?: ProviderAccounts<ClineSession>
   codebuddy?: ProviderAccounts<CodeBuddySession>
   trae?: ProviderAccounts<TraeSession>
   zed?: ProviderAccounts<ZedSession>
@@ -201,6 +218,7 @@ export type StoredSession =
   | CopilotSession
   | AgySession
   | CommandCodeSession
+  | ClineSession
   | CodeBuddySession
   | TraeSession
   | ZedSession
@@ -243,6 +261,10 @@ export function accountKeyOf(provider: ProviderId, session: StoredSession): stri
       return (session as CommandCodeSession).account
         ?? (session as CommandCodeSession).userId
         ?? tokenHash(session.refreshToken)
+    case 'cline':
+      // A Cline key IS the identity: there is no account endpoint to name a
+      // user, and re-pasting the same key must land on the same account.
+      return (session as ClineSession).account ?? tokenHash(session.refreshToken)
     case 'codebuddy':
       return (session as CodeBuddySession).uid
     case 'trae': {

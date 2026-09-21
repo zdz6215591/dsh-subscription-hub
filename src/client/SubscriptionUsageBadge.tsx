@@ -9,7 +9,7 @@
  * Click to expand a clean dialog floating above the pill showing all accounts'
  * 5-hour and weekly windows, credits, and reset countdowns without progress bars.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
@@ -63,6 +63,7 @@ const PROVIDER_NAMES: Record<SubscriptionProvider, string> = {
   copilot: 'Copilot',
   agy: 'Antigravity',
   commandcode: 'Command Code',
+  cline: 'Cline',
   codebuddy: 'CodeBuddy',
   trae: 'Trae',
   zed: 'Zed',
@@ -364,77 +365,77 @@ export function SubscriptionUsageBadge(props: SubscriptionUsageBadgeProps) {
         bottom: panelPos.bottom,
       }}
     >
-      <div style={styles.dialogHeader}>
-        <span style={styles.dialogTitle}>{reading.name} 额度详情</span>
-        <div style={styles.dialogHeaderActions}>
+      {/* Title row mirrors the official stat dialog: leading icon + label on
+          the left, value on the right, then a hairline rule. */}
+      <div style={styles.title}>
+        <span style={styles.titleLabel}>
+          <IconDataOutline16 size={14} />
+          {reading.name} 额度详情
+        </span>
+        <span style={styles.titleActions}>
           <button
             type="button"
-            style={styles.dialogRefreshBtn}
+            style={styles.refreshBtn}
             disabled={refreshing}
             onClick={() => { void refresh(true) }}
           >
             {refreshing ? '刷新中…' : '刷新'}
           </button>
-        </div>
+        </span>
       </div>
+      <div style={styles.titleRule} aria-hidden="true" />
 
-      <div style={styles.dialogDivider} />
-
-      <div style={styles.dialogBody}>
-        {reading.accounts.map((acc, accIdx) => (
-          <div key={acc.key} style={accIdx > 0 ? styles.accountSection : undefined}>
-            {reading.accounts.length > 1 && (
-              <div style={styles.accountHeader}>
-                <span style={styles.accountTitle}>
-                  {acc.account}
-                  {acc.isDefault && <span style={styles.defaultTag}>默认</span>}
-                </span>
-                {acc.plan && <span style={styles.planBadge}>{acc.plan}</span>}
-              </div>
-            )}
-
+      {/* One <dl> per account, exactly like the official `details` grid: label
+          column auto-sized, value column right-aligned tabular numerals. */}
+      {reading.accounts.map((acc, accIdx) => (
+        <div key={acc.key} style={accIdx > 0 ? styles.accountSection : undefined}>
+          {reading.accounts.length > 1 && (
+            <div style={styles.providerRow}>
+              <span style={styles.providerName}>
+                {acc.account}
+                {acc.isDefault && <span style={styles.currentTag}>默认</span>}
+              </span>
+              {acc.plan !== undefined && acc.plan !== '' && <span style={styles.providerMeta}>{acc.plan}</span>}
+            </div>
+          )}
+          <dl style={styles.details}>
             {CREDIT_PROVIDERS.has(reading.provider) ? (
               <>
-                <div style={styles.detailRow}>
-                  <span style={styles.detailLabel}>剩余积分</span>
-                  <span style={styles.detailValue}>{creditText(acc.remaining ?? 0)}</span>
-                </div>
+                <dt style={styles.dt}>剩余积分</dt>
+                <dd style={styles.dd}>{creditText(acc.remaining ?? 0)}</dd>
                 {acc.limit !== undefined && (
-                  <div style={styles.detailRow}>
-                    <span style={styles.detailLabel}>总限额</span>
-                    <span style={styles.detailValue}>{creditText(acc.limit)}</span>
-                  </div>
+                  <>
+                    <dt style={styles.dt}>总限额</dt>
+                    <dd style={styles.dd}>{creditText(acc.limit)}</dd>
+                  </>
                 )}
               </>
             ) : acc.windows.length === 0 ? (
               acc.remaining !== undefined ? (
-                <div style={styles.detailRow}>
-                  <span style={styles.detailLabel}>剩余额度</span>
-                  <span style={styles.detailValue}>{Math.round(acc.remaining)}%</span>
-                </div>
+                <>
+                  <dt style={styles.dt}>剩余额度</dt>
+                  <dd style={styles.dd}>{`${String(Math.round(acc.remaining))}%`}</dd>
+                </>
               ) : (
-                <div style={styles.detailRow}>
-                  <span style={styles.detailLabel}>额度状态</span>
-                  <span style={styles.detailValue}>正常</span>
-                </div>
+                <>
+                  <dt style={styles.dt}>额度状态</dt>
+                  <dd style={styles.dd}>正常</dd>
+                </>
               )
             ) : (
-              acc.windows.map((w, wIdx) => {
-                const percent = Math.round(100 - Math.min(100, Math.max(0, w.usedPercent)))
-                const reset = resetLabel(w)
-                return (
-                  <div key={wIdx} style={styles.detailRow}>
-                    <span style={styles.detailLabel}>{windowKindLabel(w)}</span>
-                    <span style={styles.detailValue}>
-                      剩余 {percent}%{reset ? ` · ${reset}` : ''}
-                    </span>
-                  </div>
-                )
-              })
+              acc.windows.map((w, wIdx) => (
+                <Fragment key={wIdx}>
+                  <dt style={styles.dt}>{windowKindLabel(w)}</dt>
+                  <dd style={styles.dd}>
+                    {`剩余 ${String(Math.round(100 - Math.min(100, Math.max(0, w.usedPercent))))}%`}
+                    {resetLabel(w) !== '' && <span style={styles.reset}>{` · ${resetLabel(w)}`}</span>}
+                  </dd>
+                </Fragment>
+              ))
             )}
-          </div>
-        ))}
-      </div>
+          </dl>
+        </div>
+      ))}
     </div>,
     document.body,
   )
@@ -479,104 +480,93 @@ const styles: Record<string, CSSProperties> = {
     minWidth: 0,
     overflow: 'hidden',
   },
+  // Mirrors the harness stat-dialog panel EXACTLY (StatsPills StatDialog
+  // module): `border: 0` with the hairline coming from the elevation stroke
+  // token, 16px padding, 12px/18px type. A 1px CSS border reads visibly
+  // heavier than the official 0.5px box-shadow stroke, which is why this
+  // previously looked "thicker" than the built-in dialog.
   panel: {
     position: 'fixed',
-    zIndex: 1200,
+    zIndex: 1100,
     boxSizing: 'border-box',
     background: 'var(--dsw-specific-menu)',
-    width: 'max-content',
-    minWidth: 260,
-    maxWidth: 360,
-    maxHeight: 'min(480px, 100dvh - 80px)',
-    overflowY: 'auto',
+    // The stroke color the elevation token reads; the official panel sets it
+    // on itself rather than inheriting the page's value.
+    ['--dsw-elevation-stroke-color' as string]: 'var(--dsw-alias-border-l1)',
     boxShadow: 'var(--dsw-elevation-prominent)',
     color: 'var(--dsw-alias-label-secondary)',
-    border: '1px solid var(--dsw-alias-border-l2)',
+    cursor: 'default',
+    border: 0,
     borderRadius: 12,
-    padding: '10px 14px',
-    fontSize: 11,
-    lineHeight: '16px',
-  },
-  dialogHeader: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 8,
-  },
-  dialogTitle: {
-    fontWeight: 600,
+    padding: 16,
     fontSize: 12,
+    lineHeight: '18px',
+    width: 'max-content',
+    minWidth: 'min(300px, 100vw - 24px)',
+    maxWidth: 'min(440px, 100vw - 24px)',
+    maxHeight: 'min(560px, 100dvh - 24px)',
+    overflowY: 'auto',
+    overscrollBehavior: 'contain',
+  },
+  title: {
     color: 'var(--dsw-alias-label-primary)',
-  },
-  dialogHeaderActions: {
     display: 'flex',
-    alignItems: 'center',
-  },
-  dialogRefreshBtn: {
-    background: 'transparent',
-    border: 'none',
-    color: 'var(--dsw-alias-state-business-primary, #1890ff)',
-    fontSize: 11,
-    cursor: 'pointer',
-    padding: '2px 4px',
-    font: 'inherit',
-  },
-  dialogDivider: {
-    borderTop: '1px solid var(--dsw-alias-border-l2)',
-    margin: '6px 0',
-  },
-  dialogBody: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 6,
-  },
-  accountSection: {
-    borderTop: '1px dashed var(--dsw-alias-border-l1)',
-    paddingTop: 6,
-    marginTop: 3,
-  },
-  accountHeader: {
-    display: 'flex',
-    alignItems: 'center',
     justifyContent: 'space-between',
-    gap: 8,
-    marginBottom: 2,
-  },
-  accountTitle: {
-    fontSize: 11,
+    alignItems: 'baseline',
+    gap: 16,
+    marginBottom: 8,
     fontWeight: 500,
-    color: 'var(--dsw-alias-label-primary)',
-    display: 'flex',
-    alignItems: 'center',
-    gap: 4,
   },
-  defaultTag: {
-    fontSize: 10,
-    lineHeight: '14px',
-    padding: '0 3px',
-    borderRadius: 3,
-    background: 'var(--dsw-alias-interactive-bg-hover)',
-    color: 'var(--dsw-alias-label-secondary)',
-  },
-  planBadge: {
-    fontSize: 10,
-    color: 'var(--dsw-alias-label-tertiary)',
-  },
-  detailRow: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 12,
-    padding: '1.5px 0',
-    fontSize: 11,
-    lineHeight: '16px',
-  },
-  detailLabel: {
-    color: 'var(--dsw-alias-label-secondary)',
-  },
-  detailValue: {
-    color: 'var(--dsw-alias-label-secondary)',
-    fontWeight: 400,
+  titleLabel: { alignItems: 'center', gap: 6, minWidth: 0, display: 'inline-flex' },
+  titleValue: {
     fontVariantNumeric: 'tabular-nums',
+    whiteSpace: 'nowrap',
+    display: 'inline-flex',
+    alignItems: 'baseline',
+    gap: 8,
   },
+  titleRule: { borderTop: '0.5px solid var(--dsw-alias-border-l2)', marginBottom: 10 },
+  refreshBtn: {
+    background: 'transparent',
+    border: 0,
+    padding: 0,
+    font: 'inherit',
+    fontSize: 12,
+    lineHeight: '18px',
+    color: 'var(--dsw-alias-label-tertiary)',
+    cursor: 'pointer',
+  },
+  // One account block; extra accounts get the same hairline rule the official
+  // dialog uses between sections.
+  accountSection: { marginTop: 12, paddingTop: 10, borderTop: '0.5px solid var(--dsw-alias-border-l2)' },
+  providerRow: {
+    display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 16, marginBottom: 6,
+  },
+  providerName: {
+    color: 'var(--dsw-alias-label-primary)', fontWeight: 500,
+    display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 0,
+  },
+  currentTag: {
+    fontSize: 10, lineHeight: '14px', fontWeight: 400, padding: '0 5px', borderRadius: 7,
+    color: 'var(--dsw-alias-label-secondary)', background: 'var(--dsw-alias-interactive-bg-hover)',
+  },
+  providerMeta: {
+    color: 'var(--dsw-alias-label-tertiary)', minWidth: 0, overflow: 'hidden',
+    textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+  },
+  // The official detail grid: label column auto-sized (76px floor), value
+  // column right-aligned tabular numerals.
+  details: {
+    color: 'var(--dsw-alias-label-tertiary)',
+    gridTemplateColumns: 'minmax(76px, auto) minmax(0, 1fr)',
+    gap: '6px 16px',
+    margin: 0,
+    display: 'grid',
+  },
+  dt: { minWidth: 0, margin: 0 },
+  dd: {
+    minWidth: 0, margin: 0, textAlign: 'right',
+    color: 'var(--dsw-alias-label-secondary)', fontVariantNumeric: 'tabular-nums',
+  },
+  reset: { color: 'var(--dsw-alias-label-tertiary)', whiteSpace: 'nowrap' },
 }

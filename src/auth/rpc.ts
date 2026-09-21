@@ -36,6 +36,7 @@ export const SUBSCRIPTIONS_AUTH_ENDPOINTS = [
   'modelDefaults', 'setModelDefault',
   'checkin', 'checkinStatus', 'visibility', 'setVisible', 'refreshModels', 'markModelsRead',
   'poolGet', 'poolSet',
+  'clinePins', 'setClinePin', 'probeClineChannels',
   'tokenStats',
 ] as const
 
@@ -136,7 +137,27 @@ export interface ModelDefaultsCatalog {
   models: ModelDefaultView[]
 }
 
-/** Model visibility + CodeBuddy/Trae check-in extras. */
+/** One model's upstream pin as the panel reads it. */
+export interface ClinePinView {
+  /** Wire model id this row configures. */
+  model: string
+  /** Upstream channel slugs known for this model. */
+  channels: string[]
+  /** Currently pinned channels, in try order. */
+  upstreams: string[]
+  /** Channels the user excluded. */
+  exclude: string[]
+  /** `strict` pins one channel; `preferred` fails over between them. */
+  pinMode: 'strict' | 'preferred'
+  /** Sort metric, or `''` for none. */
+  sort: string
+  /** Which gateway pipeline last served this model, when observed. */
+  pipeline?: 'direct' | 'planner'
+  /** Per-channel availability, for the panel's dots. */
+  verdicts: Record<string, { status: string; note: string; ms: number; checkedAt: number }>
+}
+
+/** Model visibility + check-in + Cline pin extras. */
 export interface ExtraOps {
   /** Claim the daily check-in for a provider that offers one. */
   checkin(provider: ProviderId, account: string): Promise<{ ok: boolean; message: string }>
@@ -146,6 +167,17 @@ export interface ExtraOps {
   setVisible(provider: ProviderId, model: string, visible: boolean): Promise<void>
   refreshModels?(provider?: ProviderId): Promise<{ ok: boolean }>
   markModelsRead?(provider: ProviderId): Promise<{ ok: boolean }>
+  /** Cline's per-model upstream pins, merged with discovery state. */
+  clinePins?(): Promise<ClinePinView[]>
+  /** Save one model's pin. */
+  setClinePin?(model: string, pin: {
+    upstreams: string[]
+    exclude: string[]
+    pinMode: 'strict' | 'preferred'
+    sort: string
+  }): Promise<void>
+  /** Discover the upstream channels available to one Cline model. */
+  probeClineChannels?(model: string): Promise<{ channels: string[]; pipeline?: 'direct' | 'planner' }>
 }
 
 /** Default-effort picker operations behind the `modelDefaults/setModelDefault` endpoints. */
@@ -669,6 +701,31 @@ async function dispatch(
     case 'markModelsRead': {
       if (extras?.markModelsRead === undefined) throw new BadRequest('markModelsRead is unavailable')
       return ok(await extras.markModelsRead(readProvider(payload)))
+    }
+    case 'clinePins': {
+      if (extras?.clinePins === undefined) throw new BadRequest('Cline pinning is unavailable')
+      return ok({ models: await extras.clinePins() })
+    }
+    case 'setClinePin': {
+      if (extras?.setClinePin === undefined) throw new BadRequest('Cline pinning is unavailable')
+      const record = payload as Record<string, unknown> | null
+      const model = record?.model
+      if (typeof model !== 'string' || model === '') throw new BadRequest('payload.model must be a non-empty string')
+      const strings = (value: unknown): string[] =>
+        Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : []
+      const pinMode = record?.pinMode === 'preferred' ? 'preferred' : 'strict'
+      const sort = typeof record?.sort === 'string' ? record.sort : ''
+      await extras.setClinePin(model, {
+        upstreams: strings(record?.upstreams),
+        exclude: strings(record?.exclude),
+        pinMode,
+        sort,
+      })
+      return ok({ ok: true })
+    }
+    case 'probeClineChannels': {
+      if (extras?.probeClineChannels === undefined) throw new BadRequest('Cline pinning is unavailable')
+      return ok(await extras.probeClineChannels(readString(payload, 'model')))
     }
     case 'tokenStats': {
       return ok(await getTokenSavingsSummary())
