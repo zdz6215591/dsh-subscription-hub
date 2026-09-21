@@ -149,7 +149,9 @@ export function traeUsageToProviderUsage(snapshot: TraeUsageSnapshot): ProviderU
       usedPercent: Math.min(100, Math.max(0, (pack.consumed / pack.limit) * 100)),
       remaining: pack.remaining,
       limit: pack.limit,
-      ...pack.expiresAt === undefined ? {} : { resetsAt: pack.expiresAt },
+      ...pack.expiresAt === undefined
+      ? {}
+      : { resetsAt: pack.expiresAt < 10_000_000_000 ? pack.expiresAt * 1000 : pack.expiresAt },
     })
   }
   return {

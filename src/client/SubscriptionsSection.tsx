@@ -1431,6 +1431,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const login = useCallback(async (provider: SubscriptionProvider, method?: 'oauth' | 'keychain' | 'import'): Promise<void> => {
     if (rpc === undefined) return
     setProviderError(provider, undefined)
+    if (provider === 'cline') {
+      setManualOpen(prev => ({ ...prev, [provider]: true }))
+      return
+    }
     try {
       const response = await callSubscriptionsAuth<LoginResponse>(rpc, 'login', {
         provider,
@@ -2602,18 +2606,13 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                         </button>
                       )}
                       {id === 'cline' && (
-                        <>
-                          <button type="button" style={styles.buttonSmall} onClick={() => { void login(id) }}>
-                            {t('loginAccount')}
-                          </button>
-                          <button
-                            type="button"
-                            style={styles.buttonSmall}
-                            onClick={() => { setManualOpen(prev => ({ ...prev, [id]: !prev[id] })) }}
-                          >
-                            {manualOpen[id] ? t('cancel') : t('manualInput')}
-                          </button>
-                        </>
+                        <button
+                          type="button"
+                          style={styles.buttonSmall}
+                          onClick={() => { setManualOpen(prev => ({ ...prev, [id]: !prev[id] })) }}
+                        >
+                          {manualOpen[id] ? t('cancel') : t('loginAccount')}
+                        </button>
                       )}
                       {id === 'claude' && (
                         <>

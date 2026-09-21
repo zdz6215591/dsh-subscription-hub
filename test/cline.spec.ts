@@ -36,7 +36,10 @@ import {
   toClineModelInfo,
 } from '../src/providers/cline/catalog.js'
 import { parseClinePlan, parseClineUsage } from '../src/providers/cline/usage.js'
-import { assertUsableClineKey, maskClineKey, sessionFromClineKey } from '../src/providers/cline/index.js'
+import { MessageId } from '@deepseek-ai/dsh-llm'
+import { assertUsableClineKey, maskClineKey, sessionFromClineKey, ClineAdapter } from '../src/providers/cline/index.js'
+import { AccountTokenManager } from '../src/providers/accounts.js'
+import type { ClineSession } from '../src/auth/store.js'
 
 // ---------------------------------------------------------------------------
 // Pin resolution
@@ -434,4 +437,72 @@ test('learnAvailableProviders auto-merges channels discovered from gateway error
   // Unrelated error doesn't wipe or alter
   store.learnAvailableProviders('cline-pass/glm-5.2', 'Some generic connection error')
   assert.deepEqual(store.metaOf('cline-pass/glm-5.2').upstreams, ['alibaba', 'baseten', 'deepinfra'])
+})
+
+test('ClineAdapter correctly yields tool calls without conversational text', async () => {
+  const store = new ClinePinStore()
+  const fakeSession: ClineSession = {
+    accessToken: 'sk_test12345678',
+    refreshToken: 'sk_test12345678',
+    expiresAt: Date.now() + 100000,
+    account: 'test-user',
+  }
+  const tokens = new AccountTokenManager<ClineSession>({
+    provider: 'cline',
+    displayName: 'Cline',
+    makeOptions: () => ({ preemptMs: 0, refresh: async s => s, isPermanent: () => false }),
+    io: {
+      list: async () => [{ key: 'default', session: fakeSession }],
+      get: async () => fakeSession,
+      save: async () => {},
+      remove: async () => {},
+    },
+  })
+
+  // Mock fetchFn that returns a stream with only tool_calls (no text/reasoning deltas)
+  const mockFetch = async () => {
+    const sseChunks = [
+      'data: {"id":"1","choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n',
+      'data: {"id":"1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"pwsh","arguments":"{\\"command\\":\\"ls\\"}"}}]}}]}\n\n',
+      'data: {"id":"1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}\n\n',
+      'data: [DONE]\n\n',
+    ]
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of sseChunks) controller.enqueue(new TextEncoder().encode(chunk))
+        controller.close()
+      },
+    })
+    return new Response(stream, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    })
+  }
+
+  const adapter = new ClineAdapter({
+    models: [],
+    streamIdleTimeoutMs: 10000,
+    tokens,
+    pins: store,
+    discovery: false,
+    fetchFn: mockFetch as never,
+  })
+
+  const chunks = []
+  for await (const chunk of adapter.stream({
+    provider: 'cline',
+    model: 'cline-pass/deepseek-v4.1-flash',
+    messages: [{ id: MessageId('u1'), role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'run ls' }] }],
+  })) {
+    chunks.push(chunk)
+  }
+
+  // Must not throw EMPTY_RESPONSE; must yield block-start, block-end with tool-call, usage, and finish
+  const toolCallChunk = chunks.find(c => c.type === 'block-end' && c.block.type === 'tool-call')
+  assert.ok(toolCallChunk !== undefined, 'tool-call block must be yielded')
+  assert.equal(toolCallChunk?.type === 'block-end' && toolCallChunk.block.type === 'tool-call' ? toolCallChunk.block.name : '', 'pwsh')
+
+  const finishChunk = chunks.find(c => c.type === 'finish')
+  assert.ok(finishChunk !== undefined)
+  assert.equal(finishChunk?.type === 'finish' ? finishChunk.reason.kind : '', 'tool-calls')
 })

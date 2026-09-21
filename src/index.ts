@@ -154,6 +154,7 @@ import {
 import {
   ClineAdapter,
   CLINE_BASE_URL,
+  CLINE_MODEL_CATALOG,
   CLINE_PREEMPT_MS,
   ClinePinStore,
   assertUsableClineKey,
@@ -1268,47 +1269,12 @@ export function apply(ctx: Context, config: Config): void {
     // fetch during member selection, and a hanging usage endpoint must
     // degrade the strategy (zero urgency), not stall the user's request.
     // Copilot has no usage endpoint, so its accounts resolve no fetcher and
-    // score zero urgency — the natural last resort.
+    // score zero urgency — the natural last resort. Every other provider delegates
+    // to its registered usage fetcher.
     const fetcherFor = (provider: ProviderId, account: string): (() => Promise<ProviderUsage>) | undefined => {
-      switch (provider) {
-        case 'codex': {
-          const tokens = codexTokens
-          return tokens === undefined ? undefined : async () =>
-            fetchCodexUsage(await tokens.session(account), proxiedFetch, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
-        }
-        case 'claude': {
-          const tokens = claudeTokens
-          return tokens === undefined ? undefined : async () =>
-            fetchClaudeUsage(await tokens.session(account), proxiedFetch, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
-        }
-        case 'grok': {
-          const tokens = grokTokens
-          return tokens === undefined ? undefined : async () =>
-            fetchGrokUsage(await tokens.session(account), proxiedFetch, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
-        }
-        case 'copilot':
-          return undefined
-        case 'agy': {
-          const tokens = accountTokens.get('agy')
-          return tokens === undefined ? undefined : async () =>
-            fetchAgyUsage(await tokens.session(account) as AgySession, proxiedFetch, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
-        }
-        case 'commandcode': {
-          const tokens = accountTokens.get('commandcode')
-          return tokens === undefined ? undefined : async () =>
-            fetchCommandCodeUsage(await tokens.session(account) as CommandCodeSession, proxiedFetch, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
-        }
-        case 'codebuddy': {
-          const tokens = accountTokens.get('codebuddy')
-          return tokens === undefined ? undefined : async () =>
-            fetchCodeBuddyUsage(await tokens.session(account) as CodeBuddySession, proxiedFetch, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
-        }
-        case 'zed': {
-          const tokens = accountTokens.get('zed')
-          return tokens === undefined ? undefined : async () =>
-            fetchZedUsage(await tokens.session(account) as ZedSession, proxiedFetch, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
-        }
-      }
+      const fetcher = usageFetchers[provider]
+      if (fetcher === undefined) return undefined
+      return () => fetcher(account, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
     }
     poolHealth = new PoolHealthRegistry()
     poolUsage = new PoolUsageTracker(fetcherFor)
@@ -1502,6 +1468,14 @@ export function apply(ctx: Context, config: Config): void {
       const pinned = await clinePins.allPins()
       const known = new Set<string>(Object.keys(pinned))
       for (const meta of clinePins.allMeta()) known.add(meta.id)
+      const adapter = adapters.get('cline') as ClineAdapter | undefined
+      if (adapter !== undefined) {
+        try {
+          const models = await adapter.listOwnModels('cline')
+          for (const m of models) known.add(m.id)
+        } catch { /* fallback to catalog */ }
+      }
+      for (const m of CLINE_MODEL_CATALOG) known.add(m.id)
       return [...known].map((model) => {
         const meta = clinePins.metaOf(model)
         const pin = pinned[model]

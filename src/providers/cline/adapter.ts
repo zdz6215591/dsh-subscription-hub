@@ -406,7 +406,9 @@ export class ClineAdapter extends LlmAdapter {
           ...options.temperature === undefined ? {} : { temperature: options.temperature },
           ...options.maxTokens === undefined ? {} : { max_tokens: options.maxTokens },
           ...options.stop === undefined ? {} : { stop: options.stop },
-          ...options.reasoningEffort === undefined ? {} : { reasoning_effort: String(options.reasoningEffort) },
+          ...options.reasoningEffort === undefined || String(options.reasoningEffort) === 'off'
+            ? {}
+            : { reasoning_effort: String(options.reasoningEffort) },
         }, meta, attempt)
 
         let response: Response
@@ -557,7 +559,8 @@ export class ClineAdapter extends LlmAdapter {
 
         // A stream that already delivered content is the answer: its failure is
         // the caller's, not a reason to silently ask another channel.
-        if (yielded) {
+        const hasDeliveredContent = yielded || sawToolCalls || toolCalls.size > 0
+        if (hasDeliveredContent) {
           const closing = closeOpen()
           if (closing !== undefined) yield closing
           for (const [callIndex, call] of [...toolCalls.entries()].sort((a, b) => a[0] - b[0])) {
@@ -578,7 +581,7 @@ export class ClineAdapter extends LlmAdapter {
           yield { type: 'usage', usage: usage ?? { inputTokens: 0, outputTokens: 0 } }
           yield {
             type: 'finish',
-            reason: sawToolCalls ? { kind: 'tool-calls' } : finishReasonToKind(finishReason),
+            reason: (sawToolCalls || toolCalls.size > 0) ? { kind: 'tool-calls' } : finishReasonToKind(finishReason),
           }
           return
         }
@@ -591,6 +594,7 @@ export class ClineAdapter extends LlmAdapter {
         }
         // A healthy 200 that produced nothing is still a failure, so the next
         // pinned channel gets its turn.
+        this.options.pins.learnUpstream(options.model, attempt.upstream, 'bad', 'empty stream', Date.now() - startedAt)
         lastError = new LlmError('cline returned an empty stream', 'EMPTY_RESPONSE')
         continue
       } finally {
