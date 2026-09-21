@@ -33,18 +33,37 @@ function numberValue(value: unknown): number | undefined {
   return undefined
 }
 
+export function parseResetsAt(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value < 10_000_000_000 ? value * 1000 : value
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    const num = Number(value)
+    if (Number.isFinite(num)) {
+      return num < 10_000_000_000 ? num * 1000 : num
+    }
+    const parsedDate = Date.parse(value)
+    if (Number.isFinite(parsedDate)) {
+      return parsedDate
+    }
+  }
+  return undefined
+}
+
 /** Map the wire window type onto the harness's window kinds. */
 function windowKind(type: string): UsageWindow['kind'] {
-  if (type === '5-hour') return 'session'
-  if (type === 'weekly') return 'weekly'
+  const norm = type.toLowerCase().replace(/[-_]/g, '')
+  if (norm === '5hour' || norm === 'fivehour') return 'session'
+  if (norm === 'weekly' || norm === 'week') return 'weekly'
   return 'other'
 }
 
 /** Human scope label for one window type. */
 function windowScope(type: string): string {
-  if (type === '5-hour') return '5小时'
-  if (type === 'weekly') return '每周'
-  if (type === 'monthly') return '每月'
+  const norm = type.toLowerCase().replace(/[-_]/g, '')
+  if (norm === '5hour' || norm === 'fivehour') return '5小时'
+  if (norm === 'weekly' || norm === 'week') return '每周'
+  if (norm === 'monthly' || norm === 'month') return '每月'
   return type
 }
 
@@ -63,7 +82,7 @@ export function parseClineUsage(payload: unknown, plan?: string): ProviderUsage 
     if (type === '') continue
     const used = numberValue(entry.percentUsed)
     if (used === undefined) continue
-    const reset = numberValue(entry.resetsAt)
+    const reset = parseResetsAt(entry.resetsAt ?? entry.resetAt ?? entry.resets_at)
     windows.push({
       kind: windowKind(type),
       scope: windowScope(type),
@@ -125,5 +144,16 @@ export async function fetchClineUsage(
     getJson(baseUrl, CLINE_PLAN_PATH, apiKey, signal, fetchFn).catch(() => undefined),
   ])
   if (limits === undefined) return { supported: false }
-  return parseClineUsage(limits, parseClinePlan(plan))
+  const usage = parseClineUsage(limits, parseClinePlan(plan))
+  if (isRecord(plan) && usage.windows !== undefined) {
+    const data = isRecord(plan.data) ? plan.data : plan
+    const periodEnd = parseResetsAt(data.currentPeriodEnd ?? data.current_period_end)
+    if (periodEnd !== undefined) {
+      const monthly = usage.windows.find(w => w.scope === '每月')
+      if (monthly !== undefined && monthly.resetsAt === undefined) {
+        monthly.resetsAt = periodEnd
+      }
+    }
+  }
+  return usage
 }

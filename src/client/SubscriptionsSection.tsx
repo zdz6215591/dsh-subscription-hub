@@ -2067,6 +2067,12 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                               {usage.limit !== undefined
                                 ? t('usageRemaining', { remaining: formatAmount(usage.remaining), limit: formatAmount(usage.limit) })
                                 : t('usageRemainingOnly', { remaining: formatAmount(usage.remaining) })}
+                              {(() => {
+                                const primaryWindow = usage.windows?.find(w => w.kind === 'session') ?? usage.windows?.[0]
+                                return primaryWindow?.resetsAt !== undefined
+                                  ? ` · ${t('usageResets', { date: new Date(primaryWindow.resetsAt).toLocaleString() })}`
+                                  : ''
+                              })()}
                             </span>
                           </div>
                           {usage.limit !== undefined && usage.limit > 0 && (

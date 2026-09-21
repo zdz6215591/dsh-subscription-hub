@@ -37,6 +37,7 @@ import {
 } from '../src/providers/cline/catalog.js'
 import { parseClinePlan, parseClineUsage } from '../src/providers/cline/usage.js'
 import { MessageId } from '@deepseek-ai/dsh-llm'
+import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { assertUsableClineKey, maskClineKey, sessionFromClineKey, ClineAdapter } from '../src/providers/cline/index.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
 import type { ClineSession } from '../src/auth/store.js'
@@ -298,7 +299,7 @@ test('parseClineUsage maps the four window types onto harness kinds', () => {
   const usage = parseClineUsage({
     data: {
       limits: [
-        { type: '5-hour', percentUsed: 47.2, resetsAt: 1_800_000_000_000 },
+        { type: 'five_hour', percentUsed: 47.2, resetsAt: '2026-09-21T09:44:34.539Z' },
         { type: 'weekly', percentUsed: 69, resetsAt: 1_800_500_000_000 },
         { type: 'monthly', percentUsed: 12 },
       ],
@@ -307,6 +308,8 @@ test('parseClineUsage maps the four window types onto harness kinds', () => {
   assert.equal(usage.supported, true)
   assert.equal(usage.windows?.length, 3)
   assert.equal(usage.windows?.[0]?.kind, 'session')
+  assert.equal(usage.windows?.[0]?.scope, '5小时')
+  assert.equal(usage.windows?.[0]?.resetsAt, Date.parse('2026-09-21T09:44:34.539Z'))
   assert.equal(usage.windows?.[1]?.kind, 'weekly')
   assert.equal(usage.windows?.[2]?.kind, 'other')
   // Quota is reported as consumption, so the pill shows the complement.
@@ -511,4 +514,81 @@ test('ClineAdapter correctly yields tool calls without conversational text', asy
   const finishChunk = chunks.find(c => c.type === 'finish')
   assert.ok(finishChunk !== undefined)
   assert.equal(finishChunk?.type === 'finish' ? finishChunk.reason.kind : '', 'tool-calls')
+})
+
+test('ClineAdapter yields reasoning and text with distinct sequential indices', async () => {
+  const store = new ClinePinStore()
+  const fakeSession: ClineSession = {
+    accessToken: 'sk_test12345678',
+    refreshToken: 'sk_test12345678',
+    expiresAt: Date.now() + 100000,
+    account: 'test-user',
+  }
+  const tokens = new AccountTokenManager<ClineSession>({
+    provider: 'cline',
+    displayName: 'Cline',
+    makeOptions: () => ({ preemptMs: 0, refresh: async s => s, isPermanent: () => false }),
+    io: {
+      list: async () => [{ key: 'default', session: fakeSession }],
+      get: async () => fakeSession,
+      save: async () => {},
+      remove: async () => {},
+    },
+  })
+
+  // Mock fetchFn that returns streaming reasoning followed by text
+  const mockFetch = async () => {
+    const sseChunks = [
+      'data: {"id":"1","choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n',
+      'data: {"id":"1","choices":[{"index":0,"delta":{"reasoning":"I am thinking"}}]}\n\n',
+      'data: {"id":"1","choices":[{"index":0,"delta":{"content":"Here is the conclusion"}}]}\n\n',
+      'data: {"id":"1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":10}}\n\n',
+      'data: [DONE]\n\n',
+    ]
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of sseChunks) controller.enqueue(new TextEncoder().encode(chunk))
+        controller.close()
+      },
+    })
+    return new Response(stream, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    })
+  }
+
+  const adapter = new ClineAdapter({
+    models: [],
+    streamIdleTimeoutMs: 10000,
+    tokens,
+    pins: store,
+    discovery: false,
+    fetchFn: mockFetch as never,
+  })
+
+  const chunks = []
+  for await (const chunk of adapter.stream({
+    provider: 'cline',
+    model: 'cline-pass/deepseek-v4.1-flash',
+    messages: [{ id: MessageId('u1'), role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'tell me' }] }],
+  })) {
+    chunks.push(chunk)
+  }
+
+  const reasoningStart = chunks.find((c): c is Extract<StreamChunk, { type: 'block-start' }> => c.type === 'block-start' && c.blockType === 'reasoning')
+  const reasoningEnd = chunks.find((c): c is Extract<StreamChunk, { type: 'block-end' }> => c.type === 'block-end' && c.block.type === 'reasoning')
+  const textStart = chunks.find((c): c is Extract<StreamChunk, { type: 'block-start' }> => c.type === 'block-start' && c.blockType === 'text')
+  const textEnd = chunks.find((c): c is Extract<StreamChunk, { type: 'block-end' }> => c.type === 'block-end' && c.block.type === 'text')
+
+  assert.ok(reasoningStart !== undefined && reasoningEnd !== undefined)
+  assert.ok(textStart !== undefined && textEnd !== undefined)
+
+  assert.equal(reasoningStart.index, 0)
+  assert.equal(reasoningEnd.index, 0)
+  assert.equal(reasoningEnd.block.type === 'reasoning' ? reasoningEnd.block.text : '', 'I am thinking')
+
+  // Text MUST have index 1, NOT index 0, so BlockAssembler preserves both blocks
+  assert.equal(textStart.index, 1)
+  assert.equal(textEnd.index, 1)
+  assert.equal(textEnd.block.type === 'text' ? textEnd.block.text : '', 'Here is the conclusion')
 })

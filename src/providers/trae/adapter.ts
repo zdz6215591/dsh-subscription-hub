@@ -357,7 +357,7 @@ export class TraeAdapter extends LlmAdapter {
 
       const decoder = new TextDecoder()
       const sse = new TraeSseDecoder()
-      let index = 0
+      let nextIndex = 0
       let sawToolCalls = false
       let finished = false
       let upstreamError: LlmError | undefined
@@ -369,16 +369,13 @@ export class TraeAdapter extends LlmAdapter {
       // the harness contract the official translators implement. Emitting an
       // empty payload here drops the block's content for assemblies that read
       // the block off `block-end` rather than replaying deltas.
-      let openKind: 'text' | 'reasoning' | null = null
-      let openText = ''
+      let openBlock: { index: number; kind: 'text' | 'reasoning'; text: string } | null = null
 
       const closeOpen = (): StreamChunk | undefined => {
-        if (openKind === null) return undefined
-        const kind = openKind
-        const text = openText
-        openKind = null
-        openText = ''
-        return { type: 'block-end', index, block: { type: kind, text } }
+        if (openBlock === null) return undefined
+        const { index: blockIndex, kind, text } = openBlock
+        openBlock = null
+        return { type: 'block-end', index: blockIndex, block: { type: kind, text } }
       }
 
       const emit = (event: ReturnType<typeof decodeTraeEvent>): StreamChunk[] => {
@@ -411,24 +408,24 @@ export class TraeAdapter extends LlmAdapter {
             })
           }
           if (event.reasoning !== undefined && event.reasoning !== '') {
-            if (openKind !== 'reasoning') {
+            if (openBlock === null || openBlock.kind !== 'reasoning') {
               const closing = closeOpen()
               if (closing !== undefined) chunks.push(closing)
-              openKind = 'reasoning'
-              chunks.push({ type: 'block-start', index, blockType: 'reasoning' })
+              openBlock = { index: nextIndex++, kind: 'reasoning', text: '' }
+              chunks.push({ type: 'block-start', index: openBlock.index, blockType: 'reasoning' })
             }
-            openText += event.reasoning
-            chunks.push({ type: 'reasoning-delta', index, text: event.reasoning })
+            openBlock.text += event.reasoning
+            chunks.push({ type: 'reasoning-delta', index: openBlock.index, text: event.reasoning })
           }
           if (event.text !== '') {
-            if (openKind !== 'text') {
+            if (openBlock === null || openBlock.kind !== 'text') {
               const closing = closeOpen()
               if (closing !== undefined) chunks.push(closing)
-              openKind = 'text'
-              chunks.push({ type: 'block-start', index, blockType: 'text' })
+              openBlock = { index: nextIndex++, kind: 'text', text: '' }
+              chunks.push({ type: 'block-start', index: openBlock.index, blockType: 'text' })
             }
-            openText += event.text
-            chunks.push({ type: 'text-delta', index, text: event.text })
+            openBlock.text += event.text
+            chunks.push({ type: 'text-delta', index: openBlock.index, text: event.text })
           }
           return chunks
         }
@@ -467,7 +464,7 @@ export class TraeAdapter extends LlmAdapter {
         // Skip tool calls with empty names or ids: never emit unknown tool ""!
         if (!call.name || call.name.trim() === '') continue
         const callId = call.id && call.id.trim() !== '' ? call.id : `call_${randomUUID().replace(/-/g, '').slice(0, 12)}`
-        const callIndex = index + 1
+        const callIndex = nextIndex++
         yield { type: 'block-start', index: callIndex, blockType: 'tool-call' }
         yield {
           type: 'block-end',
@@ -479,7 +476,6 @@ export class TraeAdapter extends LlmAdapter {
             arguments: call.arguments === '' ? '{}' : call.arguments,
           },
         }
-        index = callIndex
       }
 
       yield {

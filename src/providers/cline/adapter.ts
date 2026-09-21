@@ -466,8 +466,8 @@ export class ClineAdapter extends LlmAdapter {
 
         let yielded = false
         const toolCalls = new Map<number, ToolCallAccumulator>()
-        let index = 0
-        let openBlock: 'text' | 'reasoning' | null = null
+        let nextIndex = 0
+        let openBlock: { index: number; type: 'text' | 'reasoning'; text: string } | null = null
         let sawToolCalls = false
         let usage: TokenUsage | undefined
         let finishReason = 'stop'
@@ -478,14 +478,11 @@ export class ClineAdapter extends LlmAdapter {
         // the harness contract the official translators implement. Emitting an
         // empty payload here drops the block's content for assemblies that read
         // the block off `block-end` rather than replaying deltas.
-        let openText = ''
         const closeOpen = (): StreamChunk | undefined => {
           if (openBlock === null) return undefined
-          const closed = openBlock
-          const text = openText
+          const { index: blockIndex, type, text } = openBlock
           openBlock = null
-          openText = ''
-          return { type: 'block-end', index, block: { type: closed, text } }
+          return { type: 'block-end', index: blockIndex, block: { type, text } }
         }
 
         const chunks: StreamChunk[] = []
@@ -522,25 +519,25 @@ export class ClineAdapter extends LlmAdapter {
             if (accumulateToolCalls(delta, toolCalls)) sawToolCalls = true
             const reasoning = deltaReasoning(delta)
             if (reasoning !== '') {
-              if (openBlock !== 'reasoning') {
+              if (openBlock === null || openBlock.type !== 'reasoning') {
                 const closing = closeOpen()
                 if (closing !== undefined) chunks.push(closing)
-                openBlock = 'reasoning'
-                chunks.push({ type: 'block-start', index, blockType: 'reasoning' })
+                openBlock = { index: nextIndex++, type: 'reasoning', text: '' }
+                chunks.push({ type: 'block-start', index: openBlock.index, blockType: 'reasoning' })
               }
-              openText += reasoning
-              chunks.push({ type: 'reasoning-delta', index, text: reasoning })
+              openBlock.text += reasoning
+              chunks.push({ type: 'reasoning-delta', index: openBlock.index, text: reasoning })
             }
             const text = deltaText(delta)
             if (text !== '') {
-              if (openBlock !== 'text') {
+              if (openBlock === null || openBlock.type !== 'text') {
                 const closing = closeOpen()
                 if (closing !== undefined) chunks.push(closing)
-                openBlock = 'text'
-                chunks.push({ type: 'block-start', index, blockType: 'text' })
+                openBlock = { index: nextIndex++, type: 'text', text: '' }
+                chunks.push({ type: 'block-start', index: openBlock.index, blockType: 'text' })
               }
-              openText += text
-              chunks.push({ type: 'text-delta', index, text })
+              openBlock.text += text
+              chunks.push({ type: 'text-delta', index: openBlock.index, text })
             }
             // Flush what this frame produced so the caller sees it immediately.
             for (const chunk of chunks) {
@@ -563,9 +560,9 @@ export class ClineAdapter extends LlmAdapter {
         if (hasDeliveredContent) {
           const closing = closeOpen()
           if (closing !== undefined) yield closing
-          for (const [callIndex, call] of [...toolCalls.entries()].sort((a, b) => a[0] - b[0])) {
+          for (const [, call] of [...toolCalls.entries()].sort((a, b) => a[0] - b[0])) {
             if (call.name === '') continue
-            const blockIndex = index + callIndex + 1
+            const blockIndex = nextIndex++
             yield { type: 'block-start', index: blockIndex, blockType: 'tool-call' }
             yield {
               type: 'block-end',
