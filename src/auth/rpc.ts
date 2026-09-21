@@ -136,10 +136,12 @@ export interface ModelDefaultsCatalog {
   models: ModelDefaultView[]
 }
 
-/** Model visibility + CodeBuddy check-in extras. */
+/** Model visibility + CodeBuddy/Trae check-in extras. */
 export interface ExtraOps {
+  /** Claim the daily check-in for a provider that offers one. */
   checkin(provider: ProviderId, account: string): Promise<{ ok: boolean; message: string }>
-  checkinStatus?(): Promise<CodeBuddyCheckinStatusView>
+  /** Today's check-in state for one provider (CodeBuddy and Trae both have one). */
+  checkinStatus?(provider?: ProviderId): Promise<CodeBuddyCheckinStatusView>
   visibility(provider: ProviderId): Promise<{ id: string; name: string; visible: boolean; unread?: boolean }[]>
   setVisible(provider: ProviderId, model: string, visible: boolean): Promise<void>
   refreshModels?(provider?: ProviderId): Promise<{ ok: boolean }>
@@ -634,10 +636,15 @@ async function dispatch(
       if (extras === undefined) throw new BadRequest('check-in is unavailable')
       const provider = readProvider(payload)
       return ok(await extras.checkin(provider, readString(payload, 'account')))
-    }
-    case 'checkinStatus': {
+    }    case 'checkinStatus': {
       if (extras?.checkinStatus === undefined) throw new BadRequest('check-in status is unavailable')
-      return ok(await extras.checkinStatus())
+      // The provider is optional so an older client asking for the CodeBuddy
+      // status keeps working unchanged.
+      const raw = (payload as Record<string, unknown> | null)?.provider
+      const provider = typeof raw === 'string' && PROVIDER_IDS.includes(raw as ProviderId)
+        ? raw as ProviderId
+        : undefined
+      return ok(await extras.checkinStatus(provider))
     }
     case 'visibility': {
       if (extras === undefined) throw new BadRequest('visibility is unavailable')

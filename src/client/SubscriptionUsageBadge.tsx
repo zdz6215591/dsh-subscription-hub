@@ -64,11 +64,12 @@ const PROVIDER_NAMES: Record<SubscriptionProvider, string> = {
   agy: 'Antigravity',
   commandcode: 'Command Code',
   codebuddy: 'CodeBuddy',
+  trae: 'Trae',
   zed: 'Zed',
 }
 
 /** Providers whose quota is a credit pool rather than a percentage. */
-const CREDIT_PROVIDERS = new Set<SubscriptionProvider>(['codebuddy'])
+const CREDIT_PROVIDERS = new Set<SubscriptionProvider>(['codebuddy', 'trae'])
 
 /** Compact reset countdown from a window's `resetsAt` timestamp. */
 function resetLabel(window: UsageWindow): string {

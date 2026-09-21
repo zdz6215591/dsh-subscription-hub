@@ -1,0 +1,364 @@
+/**
+ * Trae provider tests: credential discovery/decryption, the wire protocol
+ * (headers, body, SSE decoding, tool-call normalization), the model catalog
+ * merge, and the usage/check-in parsing.
+ *
+ * The decryption fixture is generated in-test with the same KDF the Trae
+ * client uses, so the test proves the implementation round-trips the real
+ * container format rather than asserting against a captured ciphertext.
+ */
+
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { createCipheriv, createHash, randomBytes } from 'node:crypto'
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import {
+  TRAE_AUTH_STORAGE_KEY,
+  decryptTraeStorageValue,
+  parseTraeAuthValue,
+  parseTraeCliToken,
+  parseTraeStorageDocument,
+  traeCandidates,
+  discoverTraeCredentials,
+} from '../src/providers/trae/credentials.js'
+import {
+  TRAE_WIRE_EFFORTS,
+  TraeSseDecoder,
+  buildTraeChatBody,
+  decodeTraeEvent,
+  normalizeTraeToolCalls,
+  traeEndpoint,
+  traeHeaders,
+} from '../src/providers/trae/protocol.js'
+import { mergeTraeModels, TRAE_FALLBACK_MODELS } from '../src/providers/trae/catalog.js'
+import {
+  generateMorningTargetTime,
+  localDateString,
+  parseTraeUsage,
+  traeUsageToProviderUsage,
+} from '../src/providers/trae/usage.js'
+
+// ---------------------------------------------------------------------------
+// The four salt tables, reproduced here so the fixture is built exactly the way
+// the Trae client builds its container (a mismatch fails the integrity check).
+// ---------------------------------------------------------------------------
+
+const SALT_A = Uint8Array.from([
+  82, 9, 106, 213, 48, 54, 165, 56, 191, 64, 163, 158, 129, 243, 215, 251,
+  124, 227, 57, 130, 155, 47, 255, 135, 52, 142, 67, 68, 196, 222, 233, 203,
+  84, 123, 148, 50, 166, 194, 35, 61, 238, 76, 149, 11, 66, 250, 195, 78,
+  8, 46, 161, 102, 40, 217, 36, 178, 118, 91, 162, 73, 109, 139, 209, 37,
+])
+const SALT_B = Uint8Array.from([
+  31, 221, 168, 51, 136, 7, 199, 49, 177, 18, 16, 89, 39, 128, 236, 95,
+  96, 81, 127, 169, 25, 181, 74, 13, 45, 229, 122, 159, 147, 201, 156, 239,
+  160, 224, 59, 77, 174, 42, 245, 176, 200, 235, 187, 60, 131, 83, 153, 97,
+  23, 43, 4, 126, 186, 119, 214, 38, 225, 105, 20, 99, 85, 33, 12, 125,
+])
+
+/** Encrypt a JSON document into the Trae `tc` container (magic `aes`). */
+function encryptTraeStorageValue(plaintext: string): string {
+  const random = randomBytes(32)
+  const salt = Buffer.from(SALT_A.map((value, index) => value ^ (SALT_B[index] ?? 0)))
+  const first = createHash('sha512').update(random).digest()
+  const derived = createHash('sha512').update(Buffer.concat([first, salt])).digest()
+  const body = Buffer.from(plaintext, 'utf8')
+  const digest = createHash('sha512').update(body).digest()
+  const cipher = createCipheriv('aes-128-cbc', derived.subarray(0, 16), derived.subarray(16, 32))
+  const encrypted = Buffer.concat([cipher.update(Buffer.concat([digest, body])), cipher.final()])
+  return Buffer.concat([Buffer.from([0x74, 0x63, 0x05, 0x10, 0x00, 0x00]), random, encrypted]).toString('base64')
+}
+
+test('decryptTraeStorageValue round-trips the real tc container', () => {
+  const document = JSON.stringify({
+    token: 'access-token-value',
+    refreshToken: 'refresh-token-value',
+    expiredAt: 1_800_000_000_000,
+    userId: 'user-123',
+    host: 'https://api.trae.cn',
+    userRegion: { region: 'CN' },
+    account: { username: 'tester' },
+  })
+  const encoded = encryptTraeStorageValue(document)
+  assert.equal(decryptTraeStorageValue(encoded), document)
+  assert.deepEqual(parseTraeAuthValue(encoded), JSON.parse(document))
+})
+
+test('decryptTraeStorageValue rejects a bad header and a corrupted payload', () => {
+  // Unknown magic.
+  const wrongMagic = Buffer.concat([Buffer.from([1, 2, 3, 4, 5, 6]), randomBytes(200)]).toString('base64')
+  assert.throws(() => decryptTraeStorageValue(wrongMagic), /unsupported Trae auth encryption header/)
+  // Too short to hold a header + random + ciphertext.
+  assert.throws(() => decryptTraeStorageValue(Buffer.alloc(50).toString('base64')), /too short/)
+  // A flipped ciphertext byte must never yield the original plaintext: AES-CBC
+  // padding or the SHA-512 integrity check rejects it.
+  const valid = Buffer.from(encryptTraeStorageValue('{"token":"t"}'), 'base64')
+  valid[valid.length - 1] ^= 0xff
+  assert.throws(() => decryptTraeStorageValue(valid.toString('base64')), /integrity check failed|bad decrypt/)
+})
+
+test('parseTraeAuthValue accepts the SG plaintext form', () => {
+  const plaintext = '{"token":"sg-token","userId":"u"}'
+  assert.deepEqual(parseTraeAuthValue(plaintext), { token: 'sg-token', userId: 'u' })
+})
+
+test('parseTraeStorageDocument reads the iCubeAuthInfo key', () => {
+  const inner = '{"token":"inner-token","userId":"u-1"}'
+  const storage = JSON.stringify({ [TRAE_AUTH_STORAGE_KEY]: inner, 'other.key': 'ignored' })
+  assert.deepEqual(parseTraeStorageDocument(storage), { token: 'inner-token', userId: 'u-1' })
+  assert.throws(
+    () => parseTraeStorageDocument(JSON.stringify({ nope: 1 })),
+    /has no iCubeAuthInfo/,
+  )
+})
+
+test('parseTraeCliToken reads data.user_id and exp from a bare JWT', () => {
+  const payload = Buffer.from(JSON.stringify({ data: { user_id: 'cli-user' }, exp: 1_900_000_000 })).toString('base64url')
+  const token = `header.${payload}.signature`
+  assert.deepEqual(parseTraeCliToken(token), {
+    accessToken: token,
+    userId: 'cli-user',
+    expiresAtMs: 1_900_000_000_000,
+  })
+  // A JSON envelope carrying the token is accepted too.
+  assert.equal(parseTraeCliToken(JSON.stringify({ token })).userId, 'cli-user')
+  assert.throws(() => parseTraeCliToken('not-a-jwt'), /three-part JWT/)
+})
+
+test('traeCandidates enumerates the CN channels on Windows and carries no SG paths', () => {
+  const candidates = traeCandidates('win32', 'C:\\Users\\tester', { APPDATA: 'C:\\Users\\tester\\AppData\\Roaming' })
+  const desktop = candidates.filter(candidate => candidate.source === 'desktop')
+  const paths = desktop.map(candidate => candidate.path)
+  assert.equal(paths.some(p => p.includes('TRAE SOLO CN')), true, 'TRAE SOLO CN must be probed')
+  assert.equal(paths.some(p => p.includes('Trae CN')), true, 'Trae CN IDE must be probed')
+  // The international installs route through gateways this plugin does not
+  // support, so they must not be discovered at all.
+  assert.equal(paths.some(p => /[\\/]Trae[\\/]User/.test(p)), false, 'Trae (intl) must not be probed')
+  assert.equal(paths.some(p => p.includes('TRAE SOLO\\User')), false, 'TRAE SOLO (intl) must not be probed')
+  // Channels are labeled for the account key.
+  assert.deepEqual([...new Set(desktop.map(c => c.channel))].sort(), ['ide', 'solo'])
+})
+
+test('discoverTraeCredentials imports both channels and reports misses', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'trae-'))
+  try {
+    const soloUser = join(home, 'AppData', 'Roaming', 'TRAE SOLO CN', 'User', 'globalStorage')
+    const ideUser = join(home, 'AppData', 'Roaming', 'Trae CN', 'User', 'globalStorage')
+    mkdirSync(soloUser, { recursive: true })
+    mkdirSync(ideUser, { recursive: true })
+    const soloAuth = JSON.stringify({ token: 'solo-token', refreshToken: 'solo-refresh', expiredAt: 1_900_000_000_000, userId: 'same-user', host: 'https://api.trae.cn', account: { username: 'solo@example.com' } })
+    const ideAuth = JSON.stringify({ token: 'ide-token', refreshToken: 'ide-refresh', expiredAt: 1_900_000_000_000, userId: 'same-user', host: 'https://api.trae.cn', account: { username: 'ide@example.com' } })
+    writeFileSync(join(soloUser, 'storage.json'), JSON.stringify({ [TRAE_AUTH_STORAGE_KEY]: encryptTraeStorageValue(soloAuth) }), 'utf8')
+    writeFileSync(join(ideUser, 'storage.json'), JSON.stringify({ [TRAE_AUTH_STORAGE_KEY]: ideAuth }), 'utf8')
+
+    const candidates = traeCandidates('win32', home, { APPDATA: join(home, 'AppData', 'Roaming') })
+    const { credentials, failures } = await discoverTraeCredentials(candidates)
+    assert.equal(credentials.length, 2, 'both channels must be discovered')
+    const solo = credentials.find(c => c.channel === 'solo')
+    const ide = credentials.find(c => c.channel === 'ide')
+    assert.equal(solo?.accessToken, 'solo-token')
+    assert.equal(ide?.accessToken, 'ide-token', 'the IDE channel reads the plaintext form')
+    // Absent paths are reported as `missing`, never as hard failures.
+    assert.equal(failures.every(failure => failure.reason === 'missing' || failure.reason === 'invalid'), true)
+    assert.equal(failures.some(failure => failure.path.includes('TRAE SOLO CN')), false)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Wire protocol
+// ---------------------------------------------------------------------------
+
+test('traeHeaders carries the identity, version and trace contract', () => {
+  const headers = traeHeaders('token-abc', 'user-9')
+  assert.equal(headers.Authorization, 'Cloud-IDE-JWT token-abc')
+  assert.equal(headers['X-Ide-Token'], 'token-abc')
+  assert.equal(headers['X-Cloudide-Token'], 'token-abc')
+  assert.equal(headers['x-uid'], 'user-9')
+  assert.equal(headers['x-app-id'], '6eefa01c-1036-4c7e-9ca5-d891f63bfcd8')
+  assert.equal(headers['x-plugin-channel'], 'icube-ai')
+  // The upstream binds these as numbers; a dotted build string is rejected.
+  assert.match(headers['x-app-version-code'], /^\d+$/)
+  assert.match(headers['x-ide-version-code'], /^\d+$/)
+  assert.match(headers['x-flow-traceparent'], /^04-[0-9a-f]{32}-[0-9a-f]{16}-01$/)
+  assert.equal(headers['request-traffic-type'], 'prod')
+})
+
+test('buildTraeChatBody emits only the fields the upstream binds', () => {
+  const body = buildTraeChatBody({
+    model: 'glm-5.2',
+    functionName: 'solo_work_remote',
+    messages: [
+      { role: 'system', text: 'be brief' },
+      { role: 'user', text: 'hi' },
+      { role: 'assistant', text: '', toolCalls: [{ id: 'call-1', name: 'pwsh', arguments: '{"a":1}' }] },
+      { role: 'tool', text: 'output', toolCallId: 'call-1' },
+    ],
+    tools: [{ name: 'pwsh', description: 'run', parameters: { type: 'object', properties: {} } }],
+    reasoningEffort: 'low',
+  })
+  assert.equal(body.model, 'glm-5.2')
+  assert.equal(body.config_name, 'glm-5.2')
+  assert.equal(body.function, 'solo_work_remote')
+  assert.equal(body.stream, true)
+  // `light` is the wire spelling of the low level.
+  assert.equal(body.reasoning_effort, TRAE_WIRE_EFFORTS.low)
+  const messages = body.messages as Array<Record<string, unknown>>
+  assert.equal(messages.length, 4)
+  assert.deepEqual(messages[0], { role: 'system', content: [{ type: 'text', text: 'be brief' }] })
+  // Tool calls use `function_call`, not OpenAI's `function`.
+  const assistant = messages[2] as { tool_calls: Array<Record<string, unknown>> }
+  assert.deepEqual(assistant.tool_calls[0], {
+    id: 'call-1',
+    type: 'function',
+    function_call: { name: 'pwsh', arguments: '{"a":1}' },
+  })
+  assert.equal((messages[3] as Record<string, unknown>).tool_call_id, 'call-1')
+  // Tool parameters travel as a JSON STRING.
+  const tools = body.tools as Array<Record<string, Record<string, unknown>>>
+  assert.equal(typeof tools[0]!.function!.parameters, 'string')
+  // Optional OpenAI fields must never be emitted.
+  for (const forbidden of ['temperature', 'top_p', 'tool_choice', 'response_format', 'max_tokens']) {
+    assert.equal(forbidden in body, false, `${forbidden} must not be sent`)
+  }
+})
+
+test('buildTraeChatBody omits reasoning_effort when no level is selected', () => {
+  const body = buildTraeChatBody({ model: 'x', functionName: 'f', messages: [{ role: 'user', text: 'hi' }] })
+  assert.equal('reasoning_effort' in body, false)
+  assert.equal('tools' in body, false)
+})
+
+test('TraeSseDecoder handles CRLF, split chunks and multi-line data', () => {
+  const decoder = new TraeSseDecoder()
+  const events = [
+    ...decoder.push('event: output\r\ndata: {"response":"he'),
+    ...decoder.push('llo"}\n\n'),
+    ...decoder.push('data: line1\ndata: line2\n\n'),
+  ]
+  assert.equal(events.length, 2)
+  assert.deepEqual(events[0], { event: 'output', data: '{"response":"hello"}' })
+  assert.equal(events[1]!.data, 'line1\nline2')
+})
+
+test('decodeTraeEvent maps Trae named events', () => {
+  assert.deepEqual(decodeTraeEvent({ data: '[DONE]' }), { type: 'done', finishReason: 'stop' })
+  const delta = decodeTraeEvent({ event: 'output', data: '{"response":"hi","reasoning_content":"why"}' })
+  assert.equal(delta.type, 'delta')
+  assert.equal(delta.type === 'delta' ? delta.text : '', 'hi')
+  assert.equal(delta.type === 'delta' ? delta.reasoning : '', 'why')
+  const usage = decodeTraeEvent({ event: 'token_usage', data: '{"prompt_tokens":10,"completion_tokens":5}' })
+  assert.deepEqual(usage, { type: 'usage', inputTokens: 10, outputTokens: 5 })
+  // A 4001 in-body error is a real failure, not a silent success.
+  const error = decodeTraeEvent({ event: 'error', data: '{"code":4001,"message":"the param is invalid"}' })
+  assert.equal(error.type, 'error')
+  assert.equal(error.type === 'error' ? error.code : undefined, 4001)
+  // Bookkeeping events carry no model output.
+  assert.deepEqual(decodeTraeEvent({ event: 'progress_notice', data: '{}' }), { type: 'ignore' })
+  assert.deepEqual(decodeTraeEvent({ event: 'timing_cost', data: '{}' }), { type: 'ignore' })
+})
+
+test('normalizeTraeToolCalls reads function_call and tolerates function', () => {
+  const calls = normalizeTraeToolCalls([
+    { index: 0, id: 'c1', function_call: { name: 'pwsh', arguments: '{"a"' } },
+    { index: 1, id: 'c2', function: { name: 'read', arguments: '{}' } },
+  ])
+  assert.deepEqual(calls, [
+    { index: 0, id: 'c1', name: 'pwsh', arguments: '{"a"' },
+    { index: 1, id: 'c2', name: 'read', arguments: '{}' },
+  ])
+  assert.deepEqual(normalizeTraeToolCalls(undefined), [])
+})
+
+test('traeEndpoint joins a base and path without doubling the slash', () => {
+  assert.equal(traeEndpoint('https://x.test/', '/api/v3'), 'https://x.test/api/v3')
+  assert.equal(traeEndpoint('https://x.test', 'api/v3'), 'https://x.test/api/v3')
+})
+
+// ---------------------------------------------------------------------------
+// Catalog + usage
+// ---------------------------------------------------------------------------
+
+test('mergeTraeModels falls back to a sized roster when discovery is empty', () => {
+  assert.deepEqual(mergeTraeModels([]), [...TRAE_FALLBACK_MODELS])
+  const discovered = [{ id: 'glm-5.3', name: 'GLM-5.3', functionName: 'solo_work_remote' }]
+  assert.deepEqual(mergeTraeModels(discovered), discovered)
+  // Every fallback row needs a positive window or the catalog is rejected.
+  for (const model of TRAE_FALLBACK_MODELS) {
+    assert.equal(typeof model.contextWindow, 'number')
+    assert.ok(model.contextWindow! > 0)
+  }
+})
+
+test('parseTraeUsage derives available/consumed and per-pack remainders', () => {
+  const snapshot = parseTraeUsage({
+    usage_summary: { total_amount: 7500, consumed_amount: 5879.63, consumption_ratio: 0.78 },
+    user_entitlement_pack_list: [
+      {
+        display_desc: '老用户福利',
+        entitlement_base_info: {
+          available_endpoint: 1,
+          product_extra: { package_extra: { quota: { credits_limit: 2000 } } },
+        },
+        usage: { credits_amount: 1820.37 },
+      },
+      {
+        display_desc: '签到奖励',
+        entitlement_base_info: {
+          available_endpoint: 0,
+          product_extra: { package_extra: { quota: { credits_limit: 200 } } },
+        },
+        usage: { credits_amount: 20.37 },
+      },
+    ],
+  })
+  assert.ok(snapshot !== undefined)
+  assert.equal(snapshot.total, 7500)
+  assert.equal(snapshot.consumed, 5879.63)
+  assert.equal(snapshot.available, 1620.37)
+  assert.equal(snapshot.packs.length, 2)
+  // `available_endpoint: 1` marks the Work pool.
+  assert.equal(snapshot.workAvailable, 2000 - 1820.37)
+  assert.equal(snapshot.generalAvailable, 200 - 20.37)
+})
+
+test('parseTraeUsage returns undefined for an unusable payload', () => {
+  assert.equal(parseTraeUsage(null), undefined)
+  assert.equal(parseTraeUsage({}), undefined)
+  assert.equal(parseTraeUsage({ usage_summary: { total_amount: 0 }, user_entitlement_pack_list: [] }), undefined)
+})
+
+test('traeUsageToProviderUsage renders a credit pool plus one window per pack', () => {
+  const snapshot = parseTraeUsage({
+    usage_summary: { total_amount: 100, consumed_amount: 25 },
+    user_entitlement_pack_list: [
+      {
+        display_desc: '免费',
+        entitlement_base_info: { available_endpoint: 0, product_extra: { package_extra: { quota: { credits_limit: 100 } } } },
+        usage: { credits_amount: 25 },
+      },
+    ],
+  })!
+  const usage = traeUsageToProviderUsage(snapshot)
+  assert.equal(usage.supported, true)
+  assert.equal(usage.remaining, 75)
+  assert.equal(usage.limit, 100)
+  assert.equal(usage.windows?.[0]?.scope, 'credits')
+  assert.equal(usage.windows?.[0]?.usedPercent, 25)
+  assert.equal(usage.windows?.[1]?.scope, '免费')
+})
+
+test('the Trae check-in schedules a morning target on the same day', () => {
+  const now = new Date(2026, 8, 20, 12, 0, 0)
+  assert.equal(localDateString(now), '2026-09-20')
+  const target = generateMorningTargetTime(now)
+  const at = new Date(target)
+  assert.equal(at.getFullYear(), 2026)
+  assert.equal(at.getMonth(), 8)
+  assert.equal(at.getDate(), 20)
+  // The window is 06:00:00–07:54:59.
+  assert.ok(at.getHours() >= 6 && at.getHours() < 8, `target hour was ${String(at.getHours())}`)
+})

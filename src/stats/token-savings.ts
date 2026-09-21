@@ -43,6 +43,7 @@ const SUBSCRIPTION_PROVIDERS = new Set([
   'agy',
   'commandcode',
   'codebuddy',
+  'trae',
   'zed',
 ])
 
@@ -76,6 +77,11 @@ const PRICING_RULES: Record<string, { input: number; output: number; cache: numb
   // Tencent / CodeBuddy
   'hy4': { input: 0.4, output: 1.5, cache: 0.05 },
   'codebuddy': { input: 0.4, output: 1.5, cache: 0.05 },
+  // Trae (ByteDance) serves third-party models through its own gateway; the
+  // per-model family rules above already price them, and this entry covers the
+  // Trae-branded names (Doubao / Seed).
+  'doubao': { input: 0.4, output: 1.5, cache: 0.05 },
+  'seed': { input: 0.4, output: 1.5, cache: 0.05 },
 }
 
 export const USD_TO_CNY_RATE = 7.23

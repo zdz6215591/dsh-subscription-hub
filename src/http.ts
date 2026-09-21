@@ -160,6 +160,7 @@ export const PROVIDER_PROBE_TARGETS: Readonly<Record<ProviderId, { url: string; 
   agy: { url: 'https://daily-cloudcode-pa.googleapis.com', method: 'GET' },
   commandcode: { url: 'https://api.commandcode.ai', method: 'GET' },
   codebuddy: { url: 'https://copilot.tencent.com', method: 'GET' },
+  trae: { url: 'https://api.trae.cn', method: 'GET' },
   zed: { url: 'https://cloud.zed.dev', method: 'GET' },
 })
 
@@ -306,6 +307,10 @@ const PROVIDER_HOST_SUFFIXES: ReadonlyArray<readonly [string, ProviderId]> = [
   ['codebuddy.cn', 'codebuddy'],
   ['workbuddy.ai', 'codebuddy'],
   ['commandcode.ai', 'commandcode'],
+  ['api.trae.cn', 'trae'],
+  ['trae.cn', 'trae'],
+  ['trae-api-cn.mchost.guru', 'trae'],
+  ['solo.trae.cn', 'trae'],
   ['cloud.zed.dev', 'zed'],
   ['zed.dev', 'zed'],
   ['chatgpt.com', 'codex'],

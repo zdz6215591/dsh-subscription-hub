@@ -65,6 +65,7 @@ import type {
   GrokSession,
   ProviderId,
   StoredSession,
+  TraeSession,
   ZedSession,
 } from './auth/store.js'
 import { DISCOVERY_TIMEOUT_MS, validateModels, withTimeout } from './providers/common.js'
@@ -150,6 +151,21 @@ import {
   recordManualCheckin,
 } from './providers/codebuddy.js'
 import {
+  TraeAdapter,
+  TRAE_PREEMPT_MS,
+  claimTraeCheckin,
+  fetchTraeUsage,
+  getTraeCheckinStatusView,
+  autoCheckinTrae,
+  importTraeAccounts,
+  isTraePermanentRefreshError,
+  recordTraeCheckin,
+  refreshTrae,
+  traeImportFailureMessage,
+  traeNotSignedInError,
+} from './providers/trae/index.js'
+import type { TraeImportFailure } from './providers/trae/index.js'
+import {
   ZedAdapter,
   ZED_PREEMPT_MS,
   fetchZedUsage,
@@ -206,6 +222,7 @@ export interface Config {
     agy?: ModelEntry[]
     commandcode?: ModelEntry[]
     codebuddy?: ModelEntry[]
+    trae?: ModelEntry[]
     zed?: ModelEntry[]
   }
   /** Same-subscription account pools (and optional extra tier models). */
@@ -227,7 +244,7 @@ export interface Config {
   }
 }
 
-const providerIdSchema = z.union(['codex', 'claude', 'grok', 'copilot', 'agy', 'commandcode', 'codebuddy', 'zed'])
+const providerIdSchema = z.union(['codex', 'claude', 'grok', 'copilot', 'agy', 'commandcode', 'codebuddy', 'trae', 'zed'])
 const modelEntrySchema: z<ModelEntry> = z.object({
   id: z.string().required(),
   name: z.string(),
@@ -244,7 +261,7 @@ const poolMemberSchema: z<PoolMemberRef> = z.object({
 })
 
 export const Config: z<Config> = z.object({
-  providers: z.array(providerIdSchema).default(['codex', 'claude', 'grok', 'copilot', 'agy', 'commandcode', 'codebuddy', 'zed']),
+  providers: z.array(providerIdSchema).default(['codex', 'claude', 'grok', 'agy', 'commandcode', 'codebuddy', 'trae', 'copilot', 'zed']),
   streamIdleTimeoutMs: z.number().min(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   rateLimit: z.object({
     wait: z.boolean().default(true),
@@ -258,6 +275,7 @@ export const Config: z<Config> = z.object({
     agy: z.array(modelEntrySchema),
     commandcode: z.array(modelEntrySchema),
     codebuddy: z.array(modelEntrySchema),
+    trae: z.array(modelEntrySchema),
     zed: z.array(modelEntrySchema),
   }),
   pool: z.object({
@@ -308,6 +326,15 @@ const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
   codebuddy: [
     { id: 'auto', name: 'CodeBuddy Auto' },
   ],
+  // Static fallback only: the live get_detail_param roster wins whenever
+  // discovery succeeds. Every entry needs a positive contextWindow or the
+  // whole provider catalog is rejected as INVALID_MODEL_CONTEXT.
+  trae: [
+    { id: 'DeepSeek-V4-Flash-Official', name: 'DeepSeek V4 Flash', contextWindow: 200_000 },
+    { id: 'DeepSeek-V4-Pro-Official', name: 'DeepSeek V4 Pro', contextWindow: 200_000 },
+    { id: 'glm-5.2', name: 'GLM-5.2', contextWindow: 200_000 },
+    { id: 'kimi-k2.6', name: 'Kimi K2.6', contextWindow: 200_000 },
+  ],
   zed: [
     { id: 'claude-sonnet-4', name: 'Claude Sonnet 4' },
   ],
@@ -329,6 +356,7 @@ function resolveCatalog(models: Config['models']): Record<ProviderId, ModelEntry
     agy: resolve('agy'),
     commandcode: resolve('commandcode'),
     codebuddy: resolve('codebuddy'),
+    trae: resolve('trae'),
     zed: resolve('zed'),
   }
 }
@@ -349,6 +377,7 @@ function accountOf(provider: ProviderId, session: StoredSession | undefined): st
     case 'agy': return (session as AgySession).account
     case 'commandcode': return (session as CommandCodeSession).account
     case 'codebuddy': return (session as CodeBuddySession).account
+    case 'trae': return (session as TraeSession).account ?? (session as TraeSession).userId
     case 'zed': return (session as ZedSession).account ?? (session as ZedSession).userId
   }
 }
@@ -363,6 +392,9 @@ function planOf(provider: ProviderId, session: StoredSession): string | undefine
     case 'agy': return undefined
     case 'commandcode': return undefined
     case 'codebuddy': return undefined
+    // The channel IS the plan distinction for Trae: the two CN surfaces are
+    // separate products with their own rosters.
+    case 'trae': return (session as TraeSession).channel === 'solo' ? 'TRAE SOLO CN' : 'Trae CN IDE'
     case 'zed': return undefined
   }
 }
@@ -545,6 +577,22 @@ export class SubscriptionsAuthController implements AuthController {
       this.onAuthChanged('zed', accountKeyOf('zed', session))
       return { authorizeUrl: '' }
     }
+    if (provider === 'trae') {
+      // Trae accounts are imported from the local Trae installs (TRAE SOLO CN
+      // and the Trae CN IDE), not an OAuth flow this plugin drives. Import every
+      // channel found in one pass so one button connects both.
+      const { imported, failures } = await importTraeAccounts()
+      if (imported.length === 0) {
+        this.lastError.set('trae', traeImportFailureMessage(failures))
+        throw traeNotSignedInError()
+      }
+      for (const entry of imported) {
+        await this.persist('trae', entry.session)
+        this.onAuthChanged('trae', accountKeyOf('trae', entry.session))
+      }
+      this.lastError.delete('trae')
+      return { authorizeUrl: '' }
+    }
     const spec = provider === 'grok' ? await grokFlow() : provider === 'agy' ? agyFlow : codexFlow
     const attempt = await this.flows.start(provider, spec)
     // Claimed only once the attempt exists: a rejected `start()` (one attempt
@@ -666,6 +714,7 @@ export class SubscriptionsAuthController implements AuthController {
         return exchangeAgyCode(code, attempt.pkce.verifier, attempt.redirectUri)
       case 'commandcode':
       case 'codebuddy':
+      case 'trae':
       case 'zed':
         return Promise.reject(new Error(`${provider} does not use the authorization-code exchange`))
     }
@@ -1044,6 +1093,42 @@ export function apply(ctx: Context, config: Config): void {
         registerTrackedAdapter('codebuddy', adapter)
         break
       }
+      case 'trae': {
+        // Trae is a multi-channel provider: credentials come from the local
+        // Trae installs (TRAE SOLO CN and the Trae CN IDE) rather than an OAuth
+        // flow, and the two channels expose different model rosters on the same
+        // gateway. The adapter is channel-aware; `refreshTrae` is a no-op
+        // because a desktop credential is re-read from disk on demand.
+        const tokens = new AccountTokenManager<TraeSession>({
+          provider: 'trae',
+          displayName: 'Trae',
+          makeOptions: () => ({
+            preemptMs: TRAE_PREEMPT_MS,
+            refresh: refreshTrae,
+            isPermanent: isTraePermanentRefreshError,
+          }),
+          onAccountRemoved: account => { authChanged('trae', account) },
+        })
+        accountTokens.set('trae', tokens as unknown as AccountTokenManager<StoredSession>)
+        usageFetchers.trae = async (account, signal) => {
+          const session = await tokens.session(account)
+          return fetchTraeUsage(session.accessToken, session.userId ?? '', signal, proxiedFetch)
+        }
+        const adapter = new TraeAdapter({
+          models: catalog.trae,
+          streamIdleTimeoutMs,
+          rateLimit,
+          tokens,
+          channel: 'solo',
+          discovery: !overridden.has('trae'),
+          onWarn,
+          resolveAttachments,
+          defaultEffortOf: (model: string) => defaultEffortOf('trae', model),
+          pool: () => poolAdapter,
+        })
+        registerTrackedAdapter('trae', adapter)
+        break
+      }
       case 'zed': {
         const tokens = new AccountTokenManager<ZedSession>({
           provider: 'zed',
@@ -1288,14 +1373,25 @@ export function apply(ctx: Context, config: Config): void {
     test: payload => proxyTestConnection(payload.url, payload.proxy, payload.providers),
   }, modelDefaults, {
     async checkin(provider, account) {
-      if (provider !== 'codebuddy') return { ok: false, message: 'Check-in is only available for CodeBuddy' }
-      const tokens = accountTokens.get('codebuddy')
-      if (tokens === undefined) return { ok: false, message: 'CodeBuddy is not registered' }
-      const res = await checkinCodeBuddy(await tokens.session(account) as CodeBuddySession)
-      if (res.ok) await recordManualCheckin(res.message).catch(() => undefined)
-      return res
+      if (provider === 'codebuddy') {
+        const tokens = accountTokens.get('codebuddy')
+        if (tokens === undefined) return { ok: false, message: 'CodeBuddy is not registered' }
+        const res = await checkinCodeBuddy(await tokens.session(account) as CodeBuddySession)
+        if (res.ok) await recordManualCheckin(res.message).catch(() => undefined)
+        return res
+      }
+      if (provider === 'trae') {
+        const tokens = accountTokens.get('trae')
+        if (tokens === undefined) return { ok: false, message: 'Trae is not registered' }
+        const session = await tokens.session(account) as TraeSession
+        const res = await claimTraeCheckin(session.accessToken, session.userId ?? '')
+        if (res.ok) await recordTraeCheckin(res.message).catch(() => undefined)
+        return { ok: res.ok, message: res.message }
+      }
+      return { ok: false, message: 'Check-in is only available for CodeBuddy and Trae' }
     },
-    async checkinStatus() {
+    async checkinStatus(provider) {
+      if (provider === 'trae') return getTraeCheckinStatusView()
       return getCodeBuddyCheckinStatus()
     },
     async visibility(provider) {
@@ -1352,6 +1448,28 @@ export function apply(ctx: Context, config: Config): void {
     // Check every minute so the morning check-in fires within 60s of the randomly chosen time before 8:00 AM
     const checkinTimer = setInterval(runCheckin, 60_000)
     ctx.effect(() => () => { clearInterval(checkinTimer) }, 'dsh-subscription-hub: codebuddy auto check-in')
+  }
+
+  // Trae's daily check-in follows the same CodeBuddy cadence: a random time
+  // before 08:00, catching up on the next start if DSH was not running.
+  const traeTokens = accountTokens.get('trae') as AccountTokenManager<TraeSession> | undefined
+  if (traeTokens !== undefined) {
+    const tokens = traeTokens
+    const runTraeCheckin = (): void => {
+      void tokens.list().then(async accounts => {
+        const sessions: { accessToken: string; userId: string }[] = []
+        for (const { key } of accounts) {
+          try {
+            const session = await tokens.session(key)
+            sessions.push({ accessToken: session.accessToken, userId: session.userId ?? '' })
+          } catch { /* skip dead accounts */ }
+        }
+        await autoCheckinTrae(sessions)
+      }).catch(() => undefined)
+    }
+    runTraeCheckin()
+    const traeCheckinTimer = setInterval(runTraeCheckin, 60_000)
+    ctx.effect(() => () => { clearInterval(traeCheckinTimer) }, 'dsh-subscription-hub: trae auto check-in')
   }
 
   // Proactively keep keychain-bound Claude accounts synced with Claude Code's

@@ -37,7 +37,7 @@ const MODEL_FILTER_THRESHOLD = 8
 const MODEL_LIST_MAX_HEIGHT = 260
 
 /** Subscription provider ids, fixed by the node half's OAuth adapters. */
-export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'agy' | 'commandcode' | 'codebuddy' | 'zed'
+export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'agy' | 'commandcode' | 'codebuddy' | 'trae' | 'zed'
 
 /** One logged-in account as answered by the `status` endpoint. */
 export interface AccountStatus {
@@ -214,16 +214,19 @@ export interface SubscriptionsSectionInjected {
 export type SubscriptionsSectionProps = Partial<SubscriptionsSectionInjected>
 
 /** Card display metadata, in page order (names are brand names, not translated). */
-const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [
-  { id: 'codex', name: 'Codex (ChatGPT)' },
+const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [  { id: 'codex', name: 'Codex (ChatGPT)' },
   { id: 'claude', name: 'Claude' },
   { id: 'grok', name: 'Grok (X Premium / SuperGrok)' },
-  { id: 'copilot', name: 'GitHub Copilot' },
   { id: 'agy', name: 'Antigravity' },
   { id: 'commandcode', name: 'Command Code Go' },
   { id: 'codebuddy', name: 'CodeBuddy' },
+  { id: 'trae', name: 'Trae' },
+  { id: 'copilot', name: 'GitHub Copilot' },
   { id: 'zed', name: 'Zed Pro' },
 ]
+
+/** Providers that offer a daily check-in (each keeps its own schedule). */
+const CHECKIN_PROVIDERS: ReadonlySet<SubscriptionProvider> = new Set<SubscriptionProvider>(['codebuddy', 'trae'])
 
 /** Human text of an action failure, SubscriptionsAuthError or not. */
 function messageOf(error: unknown): string {
@@ -865,7 +868,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [statuses, setStatuses] = useState<Partial<Record<SubscriptionProvider, ProviderStatus>>>({})
   const [errors, setErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
-    codex: '', claude: '', grok: '', copilot: '', agy: '', commandcode: '', codebuddy: '', zed: '',
+    codex: '', claude: '', grok: '', copilot: '', agy: '', commandcode: '', codebuddy: '', trae: '', zed: '',
   })
   /** Pending device-flow codes (copilot), shown while the attempt polls. */
   const [deviceCodes, setDeviceCodes] = useState<Partial<Record<SubscriptionProvider, { userCode: string; verificationUrl: string }>>>({})
@@ -895,7 +898,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [proxyBypass, setProxyBypass] = useState('')
   const [proxyProviders, setProxyProviders] = useState<Record<SubscriptionProvider, boolean>>({
     codex: true, claude: true, grok: true, copilot: true,
-    agy: true, commandcode: true, codebuddy: true, zed: true,
+    agy: true, commandcode: true, codebuddy: true, trae: true, zed: true,
   })
   const [proxySaving, setProxySaving] = useState(false)
   const [proxyTesting, setProxyTesting] = useState(false)
@@ -905,7 +908,6 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [poolMode, setPoolMode] = useState<PoolModeView | undefined>(undefined)
   const [poolModeError, setPoolModeError] = useState<string | undefined>(undefined)
   const [poolModeSaving, setPoolModeSaving] = useState(false)
-  const [checkinStatus, setCheckinStatus] = useState<CheckinStatusView | undefined>(undefined)
   /** Lifetime subscription token totals + estimated pay-as-you-go savings. */
   const [savings, setSavings] = useState<TokenSavingsView | undefined>(undefined)
   const [savingsLoading, setSavingsLoading] = useState(false)
@@ -1395,16 +1397,22 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     return () => { alive = false }
   }, [rpc])
 
-  const loadCheckinStatus = useCallback(async (): Promise<void> => {
+  // Check-in state per check-in-capable provider (CodeBuddy and Trae each keep
+  // their own daily schedule, so one shared slot would show the wrong account's
+  // state).
+  const [checkinStatuses, setCheckinStatuses] = useState<Partial<Record<SubscriptionProvider, CheckinStatusView>>>({})
+
+  const loadCheckinStatus = useCallback(async (provider: SubscriptionProvider = 'codebuddy'): Promise<void> => {
     if (rpc === undefined) return
     try {
-      const res = await callSubscriptionsAuth<CheckinStatusView>(rpc, 'checkinStatus', {})
-      if (mountedRef.current) setCheckinStatus(res)
+      const res = await callSubscriptionsAuth<CheckinStatusView>(rpc, 'checkinStatus', { provider })
+      if (mountedRef.current) setCheckinStatuses(prev => ({ ...prev, [provider]: res }))
     } catch { /* best effort */ }
   }, [rpc])
 
   useEffect(() => {
-    void loadCheckinStatus()
+    void loadCheckinStatus('codebuddy')
+    void loadCheckinStatus('trae')
   }, [loadCheckinStatus])
 
   const loadSavings = useCallback(async (showSpinner = false): Promise<void> => {
@@ -1465,6 +1473,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       agy: proxy.providers.agy !== false,
       commandcode: proxy.providers.commandcode !== false,
       codebuddy: proxy.providers.codebuddy !== false,
+      trae: proxy.providers.trae !== false,
       zed: proxy.providers.zed !== false,
     })
     setProxyMessage(undefined)
@@ -1816,19 +1825,20 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                     >
                       {t('logout')}
                     </button>
-                    {id === 'codebuddy' && rpc !== undefined && (
+                    {CHECKIN_PROVIDERS.has(id) && rpc !== undefined && (
                       (() => {
-                        const isDone = checkinStatus?.checkedInToday === true
+                        const status = checkinStatuses[id]
+                        const isDone = status?.checkedInToday === true
                         const buttonText = isDone
                           ? `✓ ${t('checkinDone')}`
                           : t('checkin')
                         const buttonTooltip = isDone
-                          ? (checkinStatus?.lastMessage
-                              ? `${t('checkinTodayDone')} · ${checkinStatus.lastMessage}`
+                          ? (status?.lastMessage
+                              ? `${t('checkinTodayDone')} · ${status.lastMessage}`
                               : t('checkinTodayDone'))
-                          : (checkinStatus?.scheduledTime
+                          : (status?.scheduledTime
                               ? t('checkinNextScheduled', {
-                                  time: new Date(checkinStatus.scheduledTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                                  time: new Date(status.scheduledTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
                                 })
                               : t('checkinAutoSchedule'))
                         return (
@@ -1840,7 +1850,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                               void callSubscriptionsAuth<{ ok: boolean; message: string }>(rpc, 'checkin', { provider: id, account: account.key })
                                 .then(result => {
                                   setProviderError(id, result.ok ? t('checkinOk', { message: result.message }) : t('checkinFail', { message: result.message }))
-                                  void loadCheckinStatus()
+                                  void loadCheckinStatus(id)
                                 })
                                 .catch(error => { setProviderError(id, t('checkinFail', { message: messageOf(error) })) })
                             }}
@@ -2236,6 +2246,11 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                           </button>
                         </>
                       )}
+                      {id === 'trae' && (
+                        <button type="button" style={styles.buttonSmall} onClick={() => { void login(id, 'import') }}>
+                          {t('importTrae')}
+                        </button>
+                      )}
                       {id === 'claude' && (
                         <>
                           <button type="button" style={styles.buttonSmall} onClick={() => { void login(id, 'oauth') }}>
@@ -2246,7 +2261,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                           </button>
                         </>
                       )}
-                      {id !== 'claude' && id !== 'commandcode' && id !== 'zed' && (
+                      {id !== 'claude' && id !== 'commandcode' && id !== 'zed' && id !== 'trae' && (
                         <button type="button" style={styles.buttonSmall} onClick={() => { void login(id) }}>
                           {t('loginAccount')}
                         </button>

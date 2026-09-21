@@ -27,6 +27,7 @@ export type ProviderId =
   | 'agy'
   | 'commandcode'
   | 'codebuddy'
+  | 'trae'
   | 'zed'
 
 /** Every provider route, in display order. */
@@ -34,10 +35,11 @@ export const PROVIDER_IDS: readonly ProviderId[] = [
   'codex',
   'claude',
   'grok',
-  'copilot',
   'agy',
   'commandcode',
   'codebuddy',
+  'trae',
+  'copilot',
   'zed',
 ]
 
@@ -146,6 +148,31 @@ export interface ZedSession {
   llmExpiresAt?: number
 }
 
+/**
+ * Trae (ByteDance) session, read from a locally signed-in Trae install rather
+ * than an OAuth flow this plugin drives. Two CN channels share one credential
+ * shape; `channel` records which product surface the account came from:
+ *   - `solo` — TRAE SOLO CN; models come from the SOLO roster and are called
+ *     through `/api/agent/v3/llm_utils_chat`.
+ *   - `ide`  — the Trae CN IDE; models come from the IDE roster.
+ * `region` is the routing bucket (`cn` for both CN channels).
+ */
+export interface TraeSession {
+  accessToken: string
+  refreshToken: string
+  expiresAt: number
+  account?: string
+  userId?: string
+  /** Which Trae product surface this credential came from. */
+  channel: 'solo' | 'ide'
+  /** Routing bucket; this plugin supports the CN region only. */
+  region: 'cn'
+  /** Credential host, e.g. `https://api.trae.cn` (falls back to the CN gateway). */
+  host: string
+  /** Edition label the credential was discovered under, for diagnostics. */
+  edition: 'cn' | 'solo'
+}
+
 /** One provider's accounts: account key → session, plus the default account. */
 export interface ProviderAccounts<S> {
   /** Key of the account direct (non-pool) routes serve; the first login wins. */
@@ -162,6 +189,7 @@ export interface SessionMap {
   agy?: ProviderAccounts<AgySession>
   commandcode?: ProviderAccounts<CommandCodeSession>
   codebuddy?: ProviderAccounts<CodeBuddySession>
+  trae?: ProviderAccounts<TraeSession>
   zed?: ProviderAccounts<ZedSession>
 }
 
@@ -174,6 +202,7 @@ export type StoredSession =
   | AgySession
   | CommandCodeSession
   | CodeBuddySession
+  | TraeSession
   | ZedSession
 
 /** The session type one provider stores. */
@@ -216,6 +245,14 @@ export function accountKeyOf(provider: ProviderId, session: StoredSession): stri
         ?? tokenHash(session.refreshToken)
     case 'codebuddy':
       return (session as CodeBuddySession).uid
+    case 'trae': {
+      // Channel is part of the identity: the CN IDE and TRAE SOLO CN installs
+      // are separate sign-ins on the same ByteDance account, so they must not
+      // collapse onto one account key.
+      const trae = session as TraeSession
+      const identity = trae.account ?? trae.userId ?? tokenHash(trae.refreshToken)
+      return `${trae.channel ?? 'solo'}:${identity}`
+    }
     case 'zed':
       return (session as ZedSession).userId
   }
@@ -248,6 +285,15 @@ function assertSessionShape(provider: ProviderId, account: string, value: unknow
   if (typeof entry.accessToken !== 'string' || entry.accessToken.length === 0
     || typeof entry.refreshToken !== 'string' || entry.refreshToken.length === 0
     || typeof entry.expiresAt !== 'number' || !Number.isFinite(entry.expiresAt)) {
+    // Trae credentials are read from a local Trae install: the CLI token file
+    // is a bare JWT with no refresh token and no expiry claim, so an empty
+    // refreshToken / zero expiry is a legitimate shape for that route only.
+    if (provider === 'trae'
+      && typeof entry.accessToken === 'string' && entry.accessToken.length > 0
+      && typeof entry.refreshToken === 'string'
+      && typeof entry.expiresAt === 'number' && Number.isFinite(entry.expiresAt)) {
+      return
+    }
     throw new Error(
       `subscriptions auth store: entry "${provider}/${account}" is missing accessToken/refreshToken/expiresAt; fix or delete the store file`,
     )
