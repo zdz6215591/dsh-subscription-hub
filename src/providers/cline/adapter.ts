@@ -617,6 +617,25 @@ export class ClineAdapter extends LlmAdapter {
     const resolved = await resolveImages(options.messages, attachments, options.signal)
     const messages: Record<string, unknown>[] = []
     if (options.system !== undefined) messages.push({ role: 'system', content: options.system })
+
+    // Find valid paired tool calls so neither orphaned nor empty tool calls/results are emitted
+    const paired = new Set<string>()
+    const callIds = new Set<string>()
+    const resultIds = new Set<string>()
+    for (const message of resolved) {
+      for (const block of message.content) {
+        if (message.role === 'assistant' && block.type === 'tool-call' && block.name && block.name.trim() !== '' && block.id && block.id.trim() !== '') {
+          callIds.add(block.id)
+        }
+        if (block.type === 'tool-result' && block.toolCallId && block.toolCallId.trim() !== '') {
+          resultIds.add(block.toolCallId)
+        }
+      }
+    }
+    for (const id of callIds) {
+      if (resultIds.has(id)) paired.add(id)
+    }
+
     for (const message of withToolResultImages(resolved) as readonly TranslatableMessage[]) {
       if (message.role === 'system') continue
       if (message.role === 'assistant') {
@@ -629,7 +648,8 @@ export class ClineAdapter extends LlmAdapter {
           .map(block => block.text)
           .join('')
         const toolCalls = message.content
-          .filter((block): block is Extract<TranslatableBlock, { type: 'tool-call' }> => block.type === 'tool-call')
+          .filter((block): block is Extract<TranslatableBlock, { type: 'tool-call' }> =>
+            block.type === 'tool-call' && typeof block.name === 'string' && block.name.trim() !== '' && typeof block.id === 'string' && block.id.trim() !== '' && paired.has(block.id))
           .map(block => ({
             id: block.id,
             type: 'function' as const,
@@ -652,6 +672,7 @@ export class ClineAdapter extends LlmAdapter {
         else if (block.type === 'image' && 'dataBase64' in block) {
           parts.push({ type: 'image_url', image_url: { url: `data:${block.mediaType};base64,${block.dataBase64}` } })
         } else if (block.type === 'tool-result') {
+          if (!block.toolCallId || block.toolCallId.trim() === '' || !paired.has(block.toolCallId)) continue
           const text = block.content
             .map(part => (part.type === 'text' ? part.text : ''))
             .filter(Boolean)

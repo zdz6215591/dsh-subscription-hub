@@ -147,9 +147,9 @@ export function buildTraeChatBody(options: TraeChatBodyOptions): Record<string, 
     return { role: message.role, content: [{ type: 'text', text: message.text }] }
   })
 
-  const wireEffort = options.reasoningEffort === undefined
+  const wireEffort = (options.reasoningEffort === undefined || options.reasoningEffort === 'none' || options.reasoningEffort === 'off')
     ? undefined
-    : TRAE_WIRE_EFFORTS[options.reasoningEffort]
+    : TRAE_WIRE_EFFORTS[options.reasoningEffort] ?? options.reasoningEffort
 
   return {
     messages,
@@ -317,11 +317,14 @@ export function normalizeTraeToolCalls(value: unknown): TraeToolCallDelta[] {
       : typeof record.function === 'object' && record.function !== null
         ? record.function as Record<string, unknown>
         : {}
+    const id = typeof record.id === 'string' && record.id.trim() !== '' ? record.id : undefined
+    const name = typeof rawFunction.name === 'string' && rawFunction.name.trim() !== '' ? rawFunction.name : undefined
+    const args = typeof rawFunction.arguments === 'string' ? rawFunction.arguments : undefined
     calls.push({
       index: typeof record.index === 'number' ? record.index : calls.length,
-      ...typeof record.id === 'string' ? { id: record.id } : {},
-      ...typeof rawFunction.name === 'string' ? { name: rawFunction.name } : {},
-      ...typeof rawFunction.arguments === 'string' ? { arguments: rawFunction.arguments } : {},
+      ...id === undefined ? {} : { id },
+      ...name === undefined ? {} : { name },
+      ...args === undefined ? {} : { arguments: args },
     })
   }
   return calls

@@ -176,6 +176,7 @@ function blockToParts(
     case 'reasoning':
       return [{ thought: true, text: block.text }]
     case 'tool-call': {
+      if (!block.name || block.name.trim() === '') return []
       // Upstream parses functionCall.args as google.protobuf.Struct and
       // rejects a raw string with 400. Guarantee an object: parse the string
       // form, fall back to {} when it is truncated/malformed (the failure
@@ -208,6 +209,7 @@ function blockToParts(
     }
     case 'tool-result': {
       const name = toolNames.get(block.toolCallId) ?? block.toolCallId
+      if (!name || name.trim() === '') return []
       const text = block.content
         .filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')
         .map((b) => b.text)

@@ -159,6 +159,7 @@ import {
   ClinePinStore,
   assertUsableClineKey,
   extractAvailableProviders,
+  parseRouting,
   fetchClineUsage,
   isClinePermanentRefreshError,
   maskClineKey,
@@ -1500,55 +1501,80 @@ export function apply(ctx: Context, config: Config): void {
       })
     },
     async probeClineChannels(model) {
-      // The gateway names every provider it could have used when it is handed
-      // an impossible `only` value, and it fails BEFORE spending a token — so a
-      // probe is free and does not consume the user's quota.
+      // Discover the available upstream channels for one model.
+      // 1. Send a lightweight probe request to discover routing facts (pipeline type,
+      //    final serving provider, and fallbacks list).
+      // 2. Harvest all available providers using an impossible-pin probe with the
+      //    matching pipeline spelling.
       const sessions = accountTokens.get('cline')
       if (sessions === undefined) return { channels: [] }
       const accounts = await sessions.list()
       if (accounts.length === 0) return { channels: [] }
       const session = await sessions.session(accounts[0]!.key) as ClineSession
       const base = (session.baseUrl ?? CLINE_BASE_URL).replace(/\/+$/, '')
-      const probeBody = {
-        model,
-        messages: [{ role: 'user', content: 'ping' }],
-        max_tokens: 1,
-        stream: false,
-        provider: { only: ['__probe__'] },
-        providerOptions: { gateway: { only: ['__probe__'] } },
+      const headers = {
+        authorization: `Bearer ${session.accessToken}`,
+        'content-type': 'application/json',
+        accept: 'application/json',
       }
+      let pipeline = clinePins.metaOf(model).pipeline ?? null
+      let finalProvider: string | null = null
+      let fallbacks: string[] = []
       try {
-        const response = await proxiedFetch(`${base}/chat/completions`, {
+        const pingResponse = await proxiedFetch(`${base}/chat/completions`, {
           method: 'POST',
-          headers: {
-            authorization: `Bearer ${session.accessToken}`,
-            'content-type': 'application/json',
-            accept: 'application/json',
-          },
-          body: JSON.stringify(probeBody),
+          headers,
+          body: JSON.stringify({
+            model,
+            messages: [{ role: 'user', content: 'Reply with OK' }],
+            max_tokens: 256,
+          }),
           signal: AbortSignal.timeout(30_000),
         })
-        const text = await response.text().catch(() => '')
-        const observed = clinePins.metaOf(model)
-        const planner = extractAvailableProviders(text, 'planner')
-        const direct = extractAvailableProviders(text, 'direct')
-        const channels = mergeUpstreams(planner ?? undefined, direct ?? undefined, observed.upstreams)
-        const pipeline = planner !== null ? 'planner' as const : direct !== null ? 'direct' as const : undefined
-        if (channels.length > 0) {
-          clinePins.learn(model, {
-            upstreams: channels,
-            ...pipeline === undefined ? {} : { pipeline },
-          })
+        const pingJson = await pingResponse.json().catch(() => null)
+        if (pingJson !== null) {
+          const r = parseRouting(pingJson)
+          if (r.pipeline !== null) pipeline = r.pipeline
+          if (r.finalProvider !== null) finalProvider = r.finalProvider
+          if (r.fallbacks.length > 0) fallbacks = r.fallbacks
         }
-        return { channels, ...pipeline === undefined ? {} : { pipeline } }
-      } catch {
-        // A failed probe leaves whatever discovery already learned in place.
-        const observed = clinePins.metaOf(model)
-        return {
-          channels: observed.upstreams ?? [],
-          ...observed.pipeline === undefined ? {} : { pipeline: observed.pipeline },
+      } catch { /* ping failed or timed out; fall back to harvest */ }
+
+      let harvest: string[] | null = null
+      try {
+        const harvestBody = {
+          model,
+          messages: [{ role: 'user', content: 'hi' }],
+          max_tokens: 16,
+          stream: false,
+          ...(pipeline === 'planner' || pipeline === null
+            ? { providerOptions: { gateway: { only: ['__probe__'] } } }
+            : { provider: { only: ['__probe__'] } }),
         }
+        const harvestResponse = await proxiedFetch(`${base}/chat/completions`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(harvestBody),
+          signal: AbortSignal.timeout(30_000),
+        })
+        const text = await harvestResponse.text().catch(() => '')
+        harvest = extractAvailableProviders(text, pipeline)
+      } catch { /* harvest failed */ }
+
+      const observed = clinePins.metaOf(model)
+      const channels = mergeUpstreams(
+        harvest ?? undefined,
+        fallbacks.length > 0 ? fallbacks : undefined,
+        finalProvider !== null ? [finalProvider] : undefined,
+        observed.upstreams,
+      )
+      if (channels.length > 0) {
+        clinePins.learn(model, {
+          upstreams: channels,
+          ...pipeline === null ? {} : { pipeline },
+        })
       }
+      return { channels, ...pipeline === null ? {} : { pipeline } }
     },
     async validateClineChannels(model) {
       const sessions = accountTokens.get('cline')

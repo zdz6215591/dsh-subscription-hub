@@ -33,6 +33,7 @@ import {
   traeHeaders,
 } from '../src/providers/trae/protocol.js'
 import { mergeTraeModels, TRAE_FALLBACK_MODELS } from '../src/providers/trae/catalog.js'
+import { toTraeMessages } from '../src/providers/trae/adapter.js'
 import {
   generateMorningTargetTime,
   localDateString,
@@ -265,12 +266,49 @@ test('normalizeTraeToolCalls reads function_call and tolerates function', () => 
   const calls = normalizeTraeToolCalls([
     { index: 0, id: 'c1', function_call: { name: 'pwsh', arguments: '{"a"' } },
     { index: 1, id: 'c2', function: { name: 'read', arguments: '{}' } },
+    { index: 2, id: '', function_call: { name: '', arguments: '{"b"' } },
   ])
   assert.deepEqual(calls, [
     { index: 0, id: 'c1', name: 'pwsh', arguments: '{"a"' },
     { index: 1, id: 'c2', name: 'read', arguments: '{}' },
+    { index: 2, arguments: '{"b"' },
   ])
   assert.deepEqual(normalizeTraeToolCalls(undefined), [])
+})
+
+test('toTraeMessages filters empty and unpaired tool calls', () => {
+  const messages = [
+    {
+      id: 'm1',
+      role: 'assistant' as const,
+      source: { kind: 'model' as const },
+      content: [
+        { type: 'tool-call' as const, id: '', name: '', arguments: '{}' },
+        { type: 'tool-call' as const, id: 'c1', name: 'read', arguments: '{}' },
+      ],
+    },
+    {
+      id: 'm2',
+      role: 'user' as const,
+      source: { kind: 'tool' as const, callId: 'c1' },
+      content: [
+        { type: 'tool-result' as const, toolCallId: '', content: [{ type: 'text' as const, text: 'err' }] },
+        { type: 'tool-result' as const, toolCallId: 'c1', content: [{ type: 'text' as const, text: 'ok' }] },
+      ],
+    },
+  ]
+  const out = toTraeMessages(messages as any)
+  assert.equal(out.length, 2)
+  assert.deepEqual(out[0], {
+    role: 'assistant',
+    text: '',
+    toolCalls: [{ id: 'c1', name: 'read', arguments: '{}' }],
+  })
+  assert.deepEqual(out[1], {
+    role: 'tool',
+    text: 'ok',
+    toolCallId: 'c1',
+  })
 })
 
 test('traeEndpoint joins a base and path without doubling the slash', () => {

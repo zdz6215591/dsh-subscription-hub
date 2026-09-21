@@ -2330,66 +2330,71 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                                 </button>
                               </div>
                               {/* Channel chips: click pins (in click order), ⊘ excludes. */}
-                              <div style={styles.pinChips}>
-                                {row.channels.length === 0 && (
-                                  <span style={styles.statusLine}>{t('clinePinNoChannels')}</span>
-                                )}
-                                {row.channels.map((channel) => {
-                                  const pinnedIndex = row.upstreams.indexOf(channel)
-                                  const excluded = row.exclude.includes(channel)
-                                  const verdict = row.verdicts[channel]
-                                  return (
-                                    <span key={channel} style={styles.pinChipGroup}>
-                                      <button
-                                        type="button"
-                                        title={verdict === undefined ? channel : `${channel}: ${verdict.status}${verdict.note === '' ? '' : ` · ${verdict.note}`}`}
-                                        style={{
-                                          ...styles.pinChip,
-                                          ...pinnedIndex >= 0 ? styles.pinChipActive : {},
-                                          ...excluded ? styles.pinChipExcluded : {},
-                                        }}
-                                        onClick={() => {
-                                          // Clicking appends to the pin order; clicking a pinned
-                                          // chip removes it again.
-                                          const upstreams = pinnedIndex >= 0
-                                            ? row.upstreams.filter(name => name !== channel)
-                                            : [...row.upstreams, channel]
-                                          void saveClinePin(row.model, {
-                                            upstreams,
-                                            exclude: row.exclude.filter(name => name !== channel),
-                                            pinMode: row.pinMode,
-                                            sort: row.sort,
-                                          })
-                                        }}
-                                      >
-                                        {pinnedIndex >= 0 && <span style={styles.pinOrder}>{pinnedIndex + 1}</span>}
-                                        {verdict !== undefined && (
-                                          <span style={{ ...styles.pinDot, background: verdictColor(verdict.status) }} />
-                                        )}
-                                        <span style={styles.pinChipLabel}>{channel}</span>
-                                      </button>
-                                      <button
-                                        type="button"
-                                        title={t('clinePinExclude')}
-                                        style={{ ...styles.pinExclude, ...excluded ? styles.pinExcludeActive : {} }}
-                                        onClick={() => {
-                                          const next = excluded
-                                            ? row.exclude.filter(name => name !== channel)
-                                            : [...row.exclude, channel]
-                                          void saveClinePin(row.model, {
-                                            upstreams: row.upstreams.filter(name => name !== channel),
-                                            exclude: next,
-                                            pinMode: row.pinMode,
-                                            sort: row.sort,
-                                          })
-                                        }}
-                                      >
-                                        ⊘
-                                      </button>
-                                    </span>
-                                  )
-                                })}
-                              </div>
+                              {(() => {
+                                const displayChannels = [...new Set([...row.channels, ...row.upstreams])]
+                                return (
+                                  <div style={styles.pinChips}>
+                                    {displayChannels.length === 0 && (
+                                      <span style={styles.statusLine}>{t('clinePinNoChannels')}</span>
+                                    )}
+                                    {displayChannels.map((channel) => {
+                                      const pinnedIndex = row.upstreams.indexOf(channel)
+                                      const excluded = row.exclude.includes(channel)
+                                      const verdict = row.verdicts[channel]
+                                      return (
+                                        <span key={channel} style={styles.pinChipGroup}>
+                                          <button
+                                            type="button"
+                                            title={verdict === undefined ? channel : `${channel}: ${verdict.status}${verdict.note === '' ? '' : ` · ${verdict.note}`}`}
+                                            style={{
+                                              ...styles.pinChip,
+                                              ...pinnedIndex >= 0 ? styles.pinChipActive : {},
+                                              ...excluded ? styles.pinChipExcluded : {},
+                                            }}
+                                            onClick={() => {
+                                              // Clicking appends to the pin order; clicking a pinned
+                                              // chip removes it again.
+                                              const upstreams = pinnedIndex >= 0
+                                                ? row.upstreams.filter(name => name !== channel)
+                                                : [...row.upstreams, channel]
+                                              void saveClinePin(row.model, {
+                                                upstreams,
+                                                exclude: row.exclude.filter(name => name !== channel),
+                                                pinMode: row.pinMode,
+                                                sort: row.sort,
+                                              })
+                                            }}
+                                          >
+                                            {pinnedIndex >= 0 && <span style={styles.pinOrder}>{pinnedIndex + 1}</span>}
+                                            {verdict !== undefined && (
+                                              <span style={{ ...styles.pinDot, background: verdictColor(verdict.status) }} />
+                                            )}
+                                            <span style={styles.pinChipLabel}>{channel}</span>
+                                          </button>
+                                          <button
+                                            type="button"
+                                            title={t('clinePinExclude')}
+                                            style={{ ...styles.pinExclude, ...excluded ? styles.pinExcludeActive : {} }}
+                                            onClick={() => {
+                                              const next = excluded
+                                                ? row.exclude.filter(name => name !== channel)
+                                                : [...row.exclude, channel]
+                                              void saveClinePin(row.model, {
+                                                upstreams: row.upstreams.filter(name => name !== channel),
+                                                exclude: next,
+                                                pinMode: row.pinMode,
+                                                sort: row.sort,
+                                              })
+                                            }}
+                                          >
+                                            ⊘
+                                          </button>
+                                        </span>
+                                      )
+                                    })}
+                                  </div>
+                                )
+                              })()}
                               <div style={styles.pinControls}>
                                 <select
                                   style={styles.defaultEffortSelect}

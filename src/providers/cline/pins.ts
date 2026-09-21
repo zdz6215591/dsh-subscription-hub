@@ -314,7 +314,8 @@ export function extractAvailableProviders(message: string, pipeline: ClinePipeli
   if (pipeline === 'planner' || pipeline === null) {
     const match = /Available providers are:\s*([^.]+)/.exec(text)
     if (match?.[1] !== undefined) {
-      const tokens = match[1].split(/,\s*/).map(token => token.trim()).filter(token => /^[a-z0-9][a-z0-9-]*$/.test(token))
+      const clean = match[1].split(/["\\{}<>\r\n]/)[0] ?? ''
+      const tokens = clean.split(/,\s*/).map(token => token.trim().toLowerCase()).filter(token => /^[a-z0-9][a-z0-9-]*$/.test(token))
       if (tokens.length > 0) return tokens
     }
   }
@@ -325,6 +326,14 @@ export function extractAvailableProviders(message: string, pipeline: ClinePipeli
         const parsed = JSON.parse(text.slice(start)) as Record<string, unknown>
         const list = nested(parsed, ['error', 'metadata'])?.available_providers
         if (Array.isArray(list) && list.length > 0) return list.map(String)
+        if (typeof parsed?.error === 'string') {
+          const innerStart = parsed.error.indexOf('{')
+          if (innerStart >= 0) {
+            const inner = JSON.parse(parsed.error.slice(innerStart)) as Record<string, unknown>
+            const innerList = nested(inner, ['error', 'metadata'])?.available_providers
+            if (Array.isArray(innerList) && innerList.length > 0) return innerList.map(String)
+          }
+        }
       } catch { /* not JSON */ }
     }
   }

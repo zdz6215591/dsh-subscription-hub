@@ -209,6 +209,12 @@ test('extractAvailableProviders reads the gateway list out of an error', () => {
   // The planner names providers in prose.
   const planner = extractAvailableProviders('routing failed. Available providers are: alibaba, baseten, deepinfra.', 'planner')
   assert.deepEqual(planner, ['alibaba', 'baseten', 'deepinfra'])
+  // Planner with trailing JSON quotes
+  const plannerWithQuotes = extractAvailableProviders(
+    '{"error":"inference request failed: request failed with status 400: {\\"error\\":{\\"message\\":\\"No available providers match the \'only\' filter: __probe__. Available providers are: alibaba, baseten\\",\\"type\\":\\"invalid_request_error\\"}}"}',
+    'planner',
+  )
+  assert.deepEqual(plannerWithQuotes, ['alibaba', 'baseten'])
   // The direct pipeline returns them as JSON metadata.
   const direct = extractAvailableProviders(
     'error: {"error":{"metadata":{"available_providers":["alibaba","baseten"]}}}',

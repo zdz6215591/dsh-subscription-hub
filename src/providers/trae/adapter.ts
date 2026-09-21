@@ -55,6 +55,7 @@ const CATALOG_TTL_MS = 5 * 60_000
 
 /** Per-model reasoning-effort display names. */
 const EFFORT_NAMES: Readonly<Record<string, string>> = Object.freeze({
+  none: 'None',
   minimal: 'Minimal',
   low: 'Low',
   medium: 'Medium',
@@ -96,8 +97,12 @@ function pairedToolCalls(messages: readonly Message[]): Set<string> {
   const resultIds = new Set<string>()
   for (const message of messages) {
     for (const block of message.content) {
-      if (message.role === 'assistant' && block.type === 'tool-call') callIds.add(block.id)
-      if (block.type === 'tool-result') resultIds.add(block.toolCallId)
+      if (message.role === 'assistant' && block.type === 'tool-call' && block.name && block.name.trim() !== '' && block.id && block.id.trim() !== '') {
+        callIds.add(block.id)
+      }
+      if (block.type === 'tool-result' && block.toolCallId && block.toolCallId.trim() !== '') {
+        resultIds.add(block.toolCallId)
+      }
     }
   }
   return new Set([...callIds].filter(id => resultIds.has(id)))
@@ -139,7 +144,7 @@ export function toTraeMessages(messages: readonly Message[], system?: string): T
         .join('')
       const toolCalls = message.content
         .filter((block): block is Extract<ContentBlock, { type: 'tool-call' }> =>
-          block.type === 'tool-call' && paired.has(block.id))
+          block.type === 'tool-call' && typeof block.name === 'string' && block.name.trim() !== '' && typeof block.id === 'string' && block.id.trim() !== '' && paired.has(block.id))
         .map(block => ({ id: block.id, name: block.name, arguments: block.arguments }))
       if (text === '' && toolCalls.length === 0) continue
       out.push({
@@ -150,17 +155,18 @@ export function toTraeMessages(messages: readonly Message[], system?: string): T
       continue
     }
     if (isToolResultMessage(message)) {
-      const block = message.content[0]
-      if (block === undefined || block.type !== 'tool-result' || !paired.has(block.toolCallId)) continue
-      const text = block.content
-        .map(part => (part.type === 'text' ? part.text : ''))
-        .filter(Boolean)
-        .join('\n')
-      out.push({
-        role: 'tool',
-        text: text === '' ? '(no output)' : text,
-        toolCallId: String(block.toolCallId),
-      })
+      for (const block of message.content) {
+        if (block.type !== 'tool-result' || !block.toolCallId || block.toolCallId.trim() === '' || !paired.has(block.toolCallId)) continue
+        const text = block.content
+          .map(part => (part.type === 'text' ? part.text : ''))
+          .filter(Boolean)
+          .join('\n')
+        out.push({
+          role: 'tool',
+          text: text === '' ? '(no output)' : text,
+          toolCallId: String(block.toolCallId),
+        })
+      }
     }
   }
   return out
@@ -320,9 +326,10 @@ export class TraeAdapter extends LlmAdapter {
         } catch { /* best-effort warm */ }
       }
       const entry = this.catalogFor(options.model)
+      const wireModel = entry?.wireConfigName ?? entry?.id ?? options.model
       const body = buildTraeChatBody({
-        model: options.model,
-        functionName: entry?.functionName ?? 'solo_work_lite',
+        model: wireModel,
+        functionName: entry?.functionName ?? 'solo_work_remote',
         messages: toTraeMessages(options.messages, options.system),
         ...options.tools === undefined ? {} : {
           tools: options.tools.map(tool => ({
@@ -395,9 +402,11 @@ export class TraeAdapter extends LlmAdapter {
           for (const call of normalizeTraeToolCalls(event.toolCalls)) {
             sawToolCalls = true
             const current = toolCalls.get(call.index) ?? { id: '', name: '', arguments: '' }
+            const callId = (call.id && call.id.trim() !== '') ? call.id : current.id
+            const callName = (call.name && call.name.trim() !== '') ? call.name : current.name
             toolCalls.set(call.index, {
-              id: call.id ?? (current.id === '' ? `call_${randomUUID().replace(/-/g, '').slice(0, 12)}` : current.id),
-              name: call.name ?? current.name,
+              id: callId,
+              name: callName,
               arguments: current.arguments + (call.arguments ?? ''),
             })
           }
@@ -455,6 +464,9 @@ export class TraeAdapter extends LlmAdapter {
 
       // Tool calls each become their own block, after any text/reasoning.
       for (const [, call] of [...toolCalls.entries()].sort((a, b) => a[0] - b[0])) {
+        // Skip tool calls with empty names or ids: never emit unknown tool ""!
+        if (!call.name || call.name.trim() === '') continue
+        const callId = call.id && call.id.trim() !== '' ? call.id : `call_${randomUUID().replace(/-/g, '').slice(0, 12)}`
         const callIndex = index + 1
         yield { type: 'block-start', index: callIndex, blockType: 'tool-call' }
         yield {
@@ -462,8 +474,8 @@ export class TraeAdapter extends LlmAdapter {
           index: callIndex,
           block: {
             type: 'tool-call',
-            id: ToolCallId(call.id),
-            name: call.name,
+            id: ToolCallId(callId),
+            name: call.name.trim(),
             arguments: call.arguments === '' ? '{}' : call.arguments,
           },
         }
@@ -478,9 +490,10 @@ export class TraeAdapter extends LlmAdapter {
           ...usage?.reasoningTokens === undefined ? {} : { reasoningTokens: usage.reasoningTokens },
         },
       }
+      const yieldedToolCalls = [...toolCalls.values()].some(c => c.name && c.name.trim() !== '')
       yield {
         type: 'finish',
-        reason: sawToolCalls ? { kind: 'tool-calls' } : { kind: 'stop' },
+        reason: yieldedToolCalls ? { kind: 'tool-calls' } : { kind: 'stop' },
       }
     } finally {
       watchdog.stop()

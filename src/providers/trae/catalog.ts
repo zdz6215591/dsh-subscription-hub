@@ -40,14 +40,21 @@ export interface TraeModel {
   functionName: string
   /** Selectable reasoning effort ids, when the model advertises them. */
   efforts?: readonly string[]
+  /** When different from id, the config_name llm_utils_chat accepts */
+  wireConfigName?: string
 }
 
 /** Models served when discovery is unavailable, so the picker is never empty. */
 export const TRAE_FALLBACK_MODELS: readonly TraeModel[] = [
-  { id: 'DeepSeek-V4-Flash-Official', name: 'DeepSeek V4 Flash', contextWindow: 200_000, functionName: 'solo_work_lite' },
-  { id: 'DeepSeek-V4-Pro-Official', name: 'DeepSeek V4 Pro', contextWindow: 200_000, functionName: 'solo_work_lite' },
-  { id: 'glm-5.2', name: 'GLM-5.2', contextWindow: 200_000, functionName: 'solo_work_lite' },
-  { id: 'kimi-k2.6', name: 'Kimi K2.6', contextWindow: 200_000, functionName: 'solo_work_lite' },
+  { id: 'DeepSeek-V4-Flash-Official', name: 'DeepSeek V4 Flash', contextWindow: 200_000, functionName: 'solo_work_remote', efforts: ['none', 'low', 'high', 'xhigh'] },
+  { id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', contextWindow: 200_000, functionName: 'solo_work_remote', wireConfigName: 'DeepSeek-V4-Flash-Official', efforts: ['none', 'low', 'high', 'xhigh'] },
+  { id: 'DeepSeek-V4-Pro-Official', name: 'DeepSeek V4 Pro', contextWindow: 200_000, functionName: 'solo_work_remote', efforts: ['none', 'low', 'high', 'xhigh'] },
+  { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 200_000, functionName: 'solo_work_remote', efforts: ['none', 'low', 'high', 'xhigh'] },
+  { id: 'glm-5.2', name: 'GLM-5.2', contextWindow: 200_000, functionName: 'solo_work_remote', efforts: ['none', 'high', 'xhigh'] },
+  { id: 'kimi-k3', name: 'Kimi K3', contextWindow: 200_000, functionName: 'solo_work_remote', efforts: ['none', 'low', 'high', 'xhigh'] },
+  { id: 'kimi-k2.6', name: 'Kimi K2.6', contextWindow: 200_000, functionName: 'solo_work_remote' },
+  { id: 'qwen3.8-max', name: 'Qwen3.8 Max', contextWindow: 200_000, functionName: 'solo_work_remote', efforts: ['none', 'low', 'high', 'xhigh'] },
+  { id: 'Doubao-Seed-2.1-Pro', name: 'Doubao Seed 2.1 Pro', contextWindow: 256_000, functionName: 'solo_work_remote', efforts: ['none', 'low', 'high'] },
 ]
 
 /** Discovery timeout. */
@@ -144,6 +151,87 @@ function effortsOf(config: Record<string, unknown>): string[] | undefined {
 }
 
 /**
+ * Fetch the official remote models directory from solo.trae.cn.
+ * Supplies authoritative models, display names, context windows, and reasoning efforts.
+ */
+async function fetchRemoteModels(
+  accessToken: string,
+  signal: AbortSignal | undefined,
+  fetchFn: FetchFn,
+): Promise<TraeModel[] | undefined> {
+  try {
+    const url = 'https://solo.trae.cn/api/remote/v1/models?functions=solo_agent_remote,solo_work_remote'
+    const headers = {
+      Authorization: `Cloud-IDE-JWT ${accessToken}`,
+      'Content-Type': 'application/json',
+      'x-trae-client-type': 'web',
+      'x-trae-user-timezone': 'Asia/Shanghai',
+      'x-preferenced-language': 'zh-cn',
+      Referer: 'https://solo.trae.cn/',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    }
+    const response = await fetchFn(url, { headers, signal: signal ?? AbortSignal.timeout(DISCOVERY_TIMEOUT_MS) })
+    if (!response.ok) return undefined
+    const json = await response.json() as { data?: { list?: { function?: string; models?: Record<string, unknown>[] }[] } }
+    const groups = json.data?.list ?? []
+    const group = groups.find(g => g.function === 'solo_agent_remote') ?? groups[0]
+    if (!group || !Array.isArray(group.models) || group.models.length === 0) return undefined
+
+    const models: TraeModel[] = []
+    const effortMap: Record<string, string> = { light: 'low', high: 'high', extra_high: 'xhigh' }
+
+    for (const raw of group.models) {
+      if (typeof raw !== 'object' || raw === null) continue
+      const id = typeof raw.name === 'string' ? raw.name : ''
+      if (id === '') continue
+      const name = typeof raw.display_name === 'string' && raw.display_name !== '' ? raw.display_name : id
+      const contextTokens = typeof raw.context_window_tokens === 'object' && raw.context_window_tokens !== null
+        ? raw.context_window_tokens as Record<string, unknown>
+        : {}
+      const dev = finitePositive(contextTokens.dev)
+      const contextWindow = dev ?? 200_000
+
+      const reasoningConfig = typeof raw.reasoning_effort_config === 'object' && raw.reasoning_effort_config !== null
+        ? raw.reasoning_effort_config as Record<string, unknown>
+        : undefined
+      const rawOptions = Array.isArray(reasoningConfig?.options) ? reasoningConfig.options : []
+      const mapped = rawOptions.flatMap((opt): string[] => {
+        if (typeof opt !== 'string') return []
+        const m = effortMap[opt] ?? opt
+        return m ? [m] : []
+      })
+      const efforts = mapped.length > 0 ? ['none', ...mapped] : undefined
+
+      models.push({
+        id,
+        name,
+        contextWindow,
+        maxTokens: 32_000,
+        functionName: 'solo_work_remote',
+        ...efforts === undefined ? {} : { efforts },
+      })
+    }
+
+    if (models.some(m => m.id === 'DeepSeek-V4-Flash-Official') && !models.some(m => m.id === 'deepseek-v4.1-flash')) {
+      const flash = models.find(m => m.id === 'DeepSeek-V4-Flash-Official')!
+      models.push({
+        id: 'deepseek-v4.1-flash',
+        name: 'DeepSeek V4.1 Flash',
+        contextWindow: flash.contextWindow ?? 200_000,
+        maxTokens: flash.maxTokens ?? 32_000,
+        functionName: 'solo_work_remote',
+        wireConfigName: 'DeepSeek-V4-Flash-Official',
+        efforts: flash.efforts ?? ['none', 'low', 'high', 'xhigh'],
+      })
+    }
+
+    return models.length > 0 ? models : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Read the callable roster for one credential: every directory function is
  * asked and the answers unioned, with the first function to list a config
  * owning it. A model is only callable through the function that lists it, so
@@ -156,6 +244,9 @@ export async function fetchTraeModels(
   signal?: AbortSignal,
   fetchFn: FetchFn = proxiedFetch,
 ): Promise<TraeModel[]> {
+  const remote = await fetchRemoteModels(accessToken, signal, fetchFn)
+  if (remote !== undefined && remote.length > 0) return remote
+
   const byId = new Map<string, TraeModel>()
   for (const functionName of directoryFunctions(channel)) {
     const list = await fetchConfigList(accessToken, userId, functionName, signal, fetchFn)
@@ -175,7 +266,19 @@ export async function fetchTraeModels(
       })
     }
   }
-  return [...byId.values()]
+  if (byId.has('DeepSeek-V4-Flash-Official') && !byId.has('deepseek-v4.1-flash')) {
+    const flash = byId.get('DeepSeek-V4-Flash-Official')!
+    byId.set('deepseek-v4.1-flash', {
+      id: 'deepseek-v4.1-flash',
+      name: 'DeepSeek V4.1 Flash',
+      contextWindow: flash.contextWindow ?? 200_000,
+      maxTokens: flash.maxTokens ?? 32_000,
+      functionName: flash.functionName,
+      wireConfigName: 'DeepSeek-V4-Flash-Official',
+      efforts: flash.efforts ?? ['none', 'low', 'high', 'xhigh'],
+    })
+  }
+  return byId.size > 0 ? [...byId.values()] : [...TRAE_FALLBACK_MODELS]
 }
 
 /** Project one Trae model into the harness model-info shape. */

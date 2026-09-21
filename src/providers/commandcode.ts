@@ -225,11 +225,11 @@ function pairedToolCalls(messages: readonly Message[]): {
   const resultIds = new Set<string>()
   for (const message of messages) {
     for (const block of message.content) {
-      if (message.role === 'assistant' && block.type === 'tool-call') {
+      if (message.role === 'assistant' && block.type === 'tool-call' && block.name && block.name.trim() !== '' && block.id && block.id.trim() !== '') {
         callIds.add(block.id)
         names.set(block.id, block.name)
       }
-      if (block.type === 'tool-result') resultIds.add(block.toolCallId)
+      if (block.type === 'tool-result' && block.toolCallId && block.toolCallId.trim() !== '') resultIds.add(block.toolCallId)
     }
   }
   return { ids: new Set([...callIds].filter((id) => resultIds.has(id))), names }

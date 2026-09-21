@@ -43,7 +43,8 @@ function serializeAssistant(message: Message): WireMessage {
     .map(block => block.text)
     .join('')
   const toolCalls = message.content
-    .filter(block => block.type === 'tool-call')
+    .filter((block): block is Extract<ContentBlock, { type: 'tool-call' }> =>
+      block.type === 'tool-call' && typeof block.name === 'string' && block.name.trim() !== '' && typeof block.id === 'string' && block.id.trim() !== '')
     .map(block => ({
       id: block.id as unknown as string,
       type: 'function' as const,
@@ -84,7 +85,9 @@ export function serializeMessages(
       wire.push(serializeAssistant(message))
       continue
     }
-    const toolResults = message.content.filter(block => block.type === 'tool-result')
+    const toolResults = message.content.filter((block): block is Extract<ContentBlock, { type: 'tool-result' }> =>
+      block.type === 'tool-result' && typeof block.toolCallId === 'string' && block.toolCallId.trim() !== ''
+    )
     const text = flattenText(message.content)
     if (text.length > 0 || toolResults.length === 0) {
       wire.push({ role: 'user', content: text })
