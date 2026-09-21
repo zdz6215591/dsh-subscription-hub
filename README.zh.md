@@ -4,17 +4,18 @@
 
 [English](README.md) | 中文
 
-一个 **设置 → 订阅** 页面覆盖八个订阅路由：
+一个 **设置 → 订阅** 页面覆盖九个订阅路由：
 
 | 路由 | 订阅 | 说明 |
 | --- | --- | --- |
 | `codex` | ChatGPT Plus/Pro | 实时目录、用量、Fast 通道 |
 | `claude` | Claude Pro/Max | OAuth，或从 Claude Code 导入 |
 | `grok` | SuperGrok / X Premium | 实时目录、用量、Imagine 生图生视频 |
-| `copilot` | GitHub Copilot | 设备码登录 |
 | `agy` | Google Antigravity | **纯 HTTP OAuth**，不调用 `agy` CLI，不闪 `cmd.exe` |
 | `commandcode` | Command Code Go | 导入 `~/.commandcode/auth.json` 或粘贴 key（Studio 可选） |
 | `codebuddy` | 腾讯 CodeBuddy | 浏览器 OAuth，每日自动签到 |
+| `trae` | Trae（国内版） | 导入本机已登录的 **TRAE SOLO CN** 与 **Trae CN IDE**；实时目录、积分、每日自动签到 |
+| `copilot` | GitHub Copilot | 设备码登录 |
 | `zed` | Zed Pro | Windows 从凭据管理器导入，或粘贴 userId + token |
 
 此外还包含：
@@ -130,6 +131,8 @@ bundle，并在其上继续自研。以下项目均已致谢。
 | [nickhelion/dsh-plugins](https://github.com/nickhelion/dsh-plugins)（`qwen-token-plan-cn-responses`） | Responses 协议的 tool_call_id 处理方式，以及第三方模型的一手思考探测技巧。 |
 | [lninghaha/dsh-coding-subscription-oauth](https://github.com/lninghaha/dsh-coding-subscription-oauth) | Grok CLI v2 多账号凭据仓解析与过期 token 刷新，以及区域受限模型的错误映射。 |
 | [igormel81/dsh-chat-cost](https://github.com/igormel81/dsh-chat-cost) | 本仓库省钱看板背后的多服务商价格表与按百万 Token 计价模型。 |
+| [dingminhua/dsh-connect-trae](https://github.com/dingminhua/dsh-connect-trae) | Trae 路由的主参考：本机凭据发现（`storage.json` 与 `iCubeAuthInfo://icube.cloudide` 解密）、`llm_utils_chat` 请求信封、命名 SSE 事件集、工具调用处理，以及只读的积分/签到接口。 |
+| [Wang-JQ77/dsh-trae-api](https://github.com/Wang-JQ77/dsh-trae-api) | Trae 次参考：四版本布局（Trae CN / TRAE SOLO CN / Trae / TRAE SOLO）、`tc` 容器格式与端点回退形态。 |
 
 ### 「查看参考项目并更新本仓库」的输出约定
 

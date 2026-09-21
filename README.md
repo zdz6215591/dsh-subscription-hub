@@ -4,17 +4,18 @@ Unified subscription plugin for [DeepSeek Harness](https://github.com/deepseek-a
 
 English | [中文](README.zh.md)
 
-One Settings → **Subscriptions** page for eight subscription routes:
+One Settings → **Subscriptions** page for nine subscription routes:
 
 | Route | Subscription | Notes |
 | --- | --- | --- |
 | `codex` | ChatGPT Plus/Pro | live catalog, usage, Fast tier |
 | `claude` | Claude Pro/Max | OAuth or import Claude Code |
 | `grok` | SuperGrok / X Premium | live catalog, usage, Imagine tools |
-| `copilot` | GitHub Copilot | device-code login |
 | `agy` | Google Antigravity | **HTTP OAuth only** — no `agy` CLI, no flashing `cmd.exe` windows |
 | `commandcode` | Command Code Go | Import `~/.commandcode/auth.json` or paste API key (Studio optional) |
 | `codebuddy` | Tencent CodeBuddy | browser OAuth, daily auto check-in |
+| `trae` | Trae (CN) | imports the local sign-in from **TRAE SOLO CN** and the **Trae CN IDE**; live catalog, credits, daily auto check-in |
+| `copilot` | GitHub Copilot | device-code login |
 | `zed` | Zed Pro | Windows import from Credential Manager, or paste userId + token; usage from `cloud.zed.dev/client/users/me` |
 
 Also included:
@@ -164,6 +165,8 @@ work on top. Credit and thanks to every project below.
 | [nickhelion/dsh-plugins](https://github.com/nickhelion/dsh-plugins) (`qwen-token-plan-cn-responses`) | The Responses-wire tool-call-id handling patterns and the first-party reasoning-probe technique for third-party models. |
 | [lninghaha/dsh-coding-subscription-oauth](https://github.com/lninghaha/dsh-coding-subscription-oauth) | Grok CLI v2 multi-account credential-store parsing and expired-token refresh, plus region-error mapping for region-gated models. |
 | [igormel81/dsh-chat-cost](https://github.com/igormel81/dsh-chat-cost) | The multi-provider price catalog and per-million-token costing model behind this hub's savings banner. |
+| [dingminhua/dsh-connect-trae](https://github.com/dingminhua/dsh-connect-trae) | Primary reference for the Trae route: local credential discovery (`storage.json` + the `iCubeAuthInfo://icube.cloudide` decryption), the `llm_utils_chat` request envelope, the named-SSE vocabulary, tool-call handling, and the read-only credit/check-in endpoints. |
+| [Wang-JQ77/dsh-trae-api](https://github.com/Wang-JQ77/dsh-trae-api) | Secondary Trae reference: the four-edition layout (Trae CN / TRAE SOLO CN / Trae / TRAE SOLO), the `tc` container format, and the endpoint-fallback shape. |
 
 ### Where a project's own update flow goes
 
