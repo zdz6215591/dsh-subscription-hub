@@ -1537,6 +1537,12 @@ export function apply(ctx: Context, config: Config): void {
           if (r.pipeline !== null) pipeline = r.pipeline
           if (r.finalProvider !== null) finalProvider = r.finalProvider
           if (r.fallbacks.length > 0) fallbacks = r.fallbacks
+          // The provider that actually served this request is proof it exists.
+          // Some models are served only by a private upstream the gateway
+          // rejects an impossible `only` filter for (`openai-compatible-private`,
+          // the Xiaomi/InferenceNet direct pipelines), so the real response is
+          // the only place those channels are named at all.
+          clinePins.learnRouting(model, r)
         }
       } catch { /* ping failed or timed out; fall back to harvest */ }
 

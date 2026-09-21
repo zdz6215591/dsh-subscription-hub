@@ -32,8 +32,9 @@ import {
   traeEndpoint,
   traeHeaders,
 } from '../src/providers/trae/protocol.js'
-import { mergeTraeModels, TRAE_FALLBACK_MODELS } from '../src/providers/trae/catalog.js'
+import { mergeTraeModels, TRAE_FALLBACK_MODELS, fetchRemoteModels } from '../src/providers/trae/catalog.js'
 import { toTraeMessages } from '../src/providers/trae/adapter.js'
+import type { FetchFn } from '../src/providers/common.js'
 import {
   generateMorningTargetTime,
   localDateString,
@@ -329,6 +330,64 @@ test('mergeTraeModels falls back to a sized roster when discovery is empty', () 
     assert.equal(typeof model.contextWindow, 'number')
     assert.ok(model.contextWindow! > 0)
   }
+})
+
+test('fetchRemoteModels unions every directory function and drops uncallable configs', async () => {
+  const payload = {
+    data: {
+      list: [
+        {
+          function: 'solo_work_remote',
+          models: [
+            { name: 'glm-5.3', display_name: 'GLM-5.3', max_mode: true, context_window_tokens: { dev: 200_000, max: 1_000_000 } },
+            // IDE-only: the SOLO chat endpoint rejects it with 4001, so it must not be listed.
+            { name: 'deepseek-v4.1-flash', display_name: 'DeepSeek-V4.1-Flash' },
+          ],
+        },
+        {
+          function: 'solo_agent',
+          models: [
+            {
+              name: 'glm-5.3',
+              display_name: 'GLM-5.3',
+              max_mode: true,
+              context_window_tokens: { dev: 200_000, max: 1_000_000 },
+              reasoning_effort_config: { support_thinking: true, options: ['light', 'high', 'extra_high'], default_level: 'high' },
+            },
+            { name: 'Doubao-Seed-Code', display_name: 'Seed-Code', context_window_tokens: { dev: 184_000, max: 0 } },
+          ],
+        },
+        {
+          function: 'solo_coder',
+          models: [{ name: 'glm-5', display_name: 'GLM-5', context_window_tokens: { dev: 200_000, max: 0 } }],
+        },
+      ],
+    },
+  }
+  const fetchFn = (async () => new Response(JSON.stringify(payload), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })) as unknown as FetchFn
+
+  const models = await fetchRemoteModels('token', undefined, fetchFn)
+  assert.ok(models !== undefined)
+  const byId = new Map(models.map(model => [model.id, model]))
+
+  // The uncallable IDE-only config never reaches the picker.
+  assert.equal(byId.has('deepseek-v4.1-flash'), false)
+  // A model only the coder directory lists is present, with its own function.
+  assert.equal(byId.get('glm-5')?.functionName, 'solo_coder')
+  // A model only the agent directory lists is present.
+  assert.equal(byId.get('Doubao-Seed-Code')?.functionName, 'solo_agent')
+
+  // The richer agent row supplies the effort levels the work row omits, while
+  // the first-seen function owner is kept.
+  const glm53 = byId.get('glm-5.3')
+  assert.equal(glm53?.functionName, 'solo_work_remote')
+  assert.deepEqual(glm53?.efforts, ['none', 'low', 'high', 'xhigh'])
+  assert.equal(glm53?.maxContextWindow, 1_000_000)
+  // A row whose max window merely repeats dev exposes no budget switch.
+  assert.equal(byId.get('glm-5')?.maxContextWindow, undefined)
 })
 
 test('parseTraeUsage derives available/consumed and per-pack remainders', () => {

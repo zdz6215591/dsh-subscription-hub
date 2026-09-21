@@ -275,7 +275,7 @@ export class TraeAdapter extends LlmAdapter {
         id: model.id,
         name: model.name ?? model.id,
         ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
-        functionName: 'solo_work_lite',
+        functionName: 'solo_work_remote',
       }, provider))
     }
     const cached = this.catalogs.get(account)

@@ -85,8 +85,13 @@ Cline 的网关在同一个地址后面藏着两套不同的后端 —— 一套
 
 在 **设置 → 订阅 → Cline → 上游渠道** 中：
 
-- **探测渠道**：探测该模型可用的渠道列表。探测会故意下发一个不可能的渠道，
-  让路由在**消耗任何 Token 之前**就失败，再从错误信息里读出渠道清单 —— 一次零消耗的发现调用。
+- **探测渠道**：分两步探测该模型可用的渠道列表。先发一次真实 ping，读取返回里的
+  `provider_metadata.gateway.routing`，它同时给出流水线、**实际服务本次请求的渠道**，以及完整的
+  `fallbacksAvailable` 候选顺序；再按已确定的流水线拼写下发不可能的渠道（`only: ['__probe__']`），
+  让路由在**消耗任何 Token 之前**失败并报出自己的渠道清单。最后取两者的并集。
+  第一阶段的真实 ping 很关键：有些模型只由单一上游服务，而网关对它们根本没有 `only` 过滤清单
+  （Vercel 的 `openai-compatible-private`，以及直连管道下的 `InferenceNet` / `Xiaomi`），
+  真实响应是唯一能拿到这些渠道名的地方。
 - **点击渠道**即可钉住；点击顺序就是尝试顺序（渠道上的数字即序号）。再点一次取消钉住。
 - **⊘** 排除渠道。排除项会被编译成 `only` 白名单，因为网关会静默忽略 exclude/ignore 字段。
 - **严格**只发钉住的渠道；**优先**按顺序尝试，并在**首个 token 之前**失败时自动切换。
@@ -98,6 +103,25 @@ Cline 的网关在同一个地址后面藏着两套不同的后端 —— 一套
 
 渠道发现是**内存态**（属于任何一次探测都能重建的派生数据），而钉住配置会**持久化**到
 `~/.dsh/plugins/subscriptions/cline-pins.json`。
+
+## Trae 模型清单
+
+CN 目录读取自官方 remote 目录（`solo.trae.cn/api/remote/v1/models`），并对**所有**目录 function
+取并集 —— `solo_agent_remote`、`solo_work_remote`、`solo_work_lite`、`solo_agent`、`solo_coder`。
+原因是每个 function 只列自己的那份清单：agent 目录才带 `Doubao-Seed-Code`、`glm-5.1`、
+`glm-5v-turbo`、`qwen-3.5`、`qwen-3.6-plus`；coder 目录才带遗留的 `glm-5`、`kimi-k2.5`、
+`minimax-m2.7`、`DeepSeek-V4-Flash/Pro`、`Doubao-Seed-2.0-Code`。只读单个目录会把这些全部静默隐藏。
+
+另外两条规则保证清单诚实：
+
+- **只列可调用的 config。** 目录还会广告 `deepseek-v4.1-flash`、`glm-5.3-flash`、`glm-5.3-flashx`、
+  `qwen3.8-flash`、`kimi-k2.8-preview`，但它们经**任何** SOLO function 调用都返回
+  `4001 param is invalid`（它们属于 IDE 的 agent task 通道）。列出来只会给选择器一个必然失败的模型，
+  因此一律丢弃。而用户熟悉的 `deepseek-v4.1-flash` 仍然保留，映射到已验证可用的
+  `DeepSeek-V4-Flash-Official` 线名。
+- **元数据取最丰富的那一行。** 只有 agent 目录带 `reasoning_effort_config`（思考等级选择器）和更大的
+  Max 上下文窗口，所以先在 work 清单出现的模型保留其归属 function，同时把思考等级与 Max 窗口折进来。
+  `max` 只是重复 `dev` 的行不会暴露额外的预算开关。
 
 ## 安装
 

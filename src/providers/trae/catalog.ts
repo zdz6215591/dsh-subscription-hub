@@ -35,6 +35,8 @@ export interface TraeModel {
   /** Display name, including the credit multiplier when advertised. */
   name: string
   contextWindow?: number
+  /** Native Max window Trae advertises, when the directory discloses one. */
+  maxContextWindow?: number
   maxTokens?: number
   /** The directory function that listed this model (replayed on the call). */
   functionName: string
@@ -46,15 +48,14 @@ export interface TraeModel {
 
 /** Models served when discovery is unavailable, so the picker is never empty. */
 export const TRAE_FALLBACK_MODELS: readonly TraeModel[] = [
-  { id: 'DeepSeek-V4-Flash-Official', name: 'DeepSeek V4 Flash', contextWindow: 200_000, functionName: 'solo_work_remote', efforts: ['none', 'low', 'high', 'xhigh'] },
-  { id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', contextWindow: 200_000, functionName: 'solo_work_remote', wireConfigName: 'DeepSeek-V4-Flash-Official', efforts: ['none', 'low', 'high', 'xhigh'] },
-  { id: 'DeepSeek-V4-Pro-Official', name: 'DeepSeek V4 Pro', contextWindow: 200_000, functionName: 'solo_work_remote', efforts: ['none', 'low', 'high', 'xhigh'] },
+  { id: 'DeepSeek-V4-Flash-Official', name: 'DeepSeek-V4-Flash', contextWindow: 200_000, functionName: 'solo_work_remote', efforts: ['none', 'low', 'high', 'xhigh'] },
+  { id: 'DeepSeek-V4-Pro-Official', name: 'DeepSeek-V4-Pro', contextWindow: 200_000, functionName: 'solo_work_remote', efforts: ['none', 'low', 'high', 'xhigh'] },
   { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 200_000, functionName: 'solo_work_remote', efforts: ['none', 'low', 'high', 'xhigh'] },
   { id: 'glm-5.2', name: 'GLM-5.2', contextWindow: 200_000, functionName: 'solo_work_remote', efforts: ['none', 'high', 'xhigh'] },
-  { id: 'kimi-k3', name: 'Kimi K3', contextWindow: 200_000, functionName: 'solo_work_remote', efforts: ['none', 'low', 'high', 'xhigh'] },
-  { id: 'kimi-k2.6', name: 'Kimi K2.6', contextWindow: 200_000, functionName: 'solo_work_remote' },
-  { id: 'qwen3.8-max', name: 'Qwen3.8 Max', contextWindow: 200_000, functionName: 'solo_work_remote', efforts: ['none', 'low', 'high', 'xhigh'] },
-  { id: 'Doubao-Seed-2.1-Pro', name: 'Doubao Seed 2.1 Pro', contextWindow: 256_000, functionName: 'solo_work_remote', efforts: ['none', 'low', 'high'] },
+  { id: 'kimi-k3', name: 'Kimi-K3', contextWindow: 200_000, functionName: 'solo_work_remote', efforts: ['none', 'low', 'high', 'xhigh'] },
+  { id: 'kimi-k2.6', name: 'Kimi-K2.6', contextWindow: 200_000, functionName: 'solo_work_remote' },
+  { id: 'qwen3.8-max', name: 'Qwen3.8-Max', contextWindow: 200_000, functionName: 'solo_work_remote', efforts: ['none', 'low', 'high', 'xhigh'] },
+  { id: 'Doubao-Seed-2.1-Pro', name: 'Seed-2.1-Pro-0915', contextWindow: 256_000, functionName: 'solo_work_remote', efforts: ['none', 'low', 'high'] },
 ]
 
 /** Discovery timeout. */
@@ -151,46 +152,99 @@ function effortsOf(config: Record<string, unknown>): string[] | undefined {
 }
 
 /**
- * Fetch the official remote models directory from solo.trae.cn.
- * Supplies authoritative models, display names, context windows, and reasoning efforts.
+ * The directory function each config_name is actually callable through.
+ *
+ * The remote directory advertises models the SOLO `llm_utils_chat` endpoint
+ * cannot serve: `deepseek-v4.1-flash`, `glm-5.3-flash`, `glm-5.3-flashx`,
+ * `qwen3.8-flash`, and `kimi-k2.8-preview` answer `4001 param is invalid`
+ * through every SOLO function (they belong to the IDE agent-task channel),
+ * so listing them would hand the picker a model that always fails. Conversely
+ * `Doubao-Seed-Code`, `glm-5.1`, `glm-5v-turbo`, `qwen-3.5`, and
+ * `qwen-3.6-plus` are callable but are listed only by the `solo_agent` /
+ * `solo_coder` directories, so the previous single-directory read hid them.
+ *
+ * Verified against the live CN endpoint on 2026-09-21 by calling every
+ * advertised config through `solo_work_remote`, `solo_work_lite`,
+ * `solo_agent`, and `solo_coder`. The first callable function wins.
  */
-async function fetchRemoteModels(
+const TRAE_CALLABILITY: Readonly<Record<string, string>> = Object.freeze({
+  // Callable through the SOLO work/agent directories (the default route).
+  'DeepSeek-V4-Flash-Official': 'solo_work_remote',
+  'DeepSeek-V4-Pro-Official': 'solo_work_remote',
+  'Doubao-Seed-Evolving': 'solo_work_remote',
+  'Doubao-Seed-2.1-Pro': 'solo_work_remote',
+  'Doubao-Seed-2.1-Turbo': 'solo_work_remote',
+  'glm-5.2': 'solo_work_remote',
+  'glm-5.3': 'solo_work_remote',
+  'kimi-k2.6': 'solo_work_remote',
+  'kimi-k2.7-code': 'solo_work_remote',
+  'kimi-k3': 'solo_work_remote',
+  'minimax-m3': 'solo_work_remote',
+  'qwen-3.7-plus': 'solo_work_remote',
+  'qwen3.8-max': 'solo_work_remote',
+  // Listed only by the agent/coder directories.
+  'Doubao-Seed-Code': 'solo_agent',
+  'glm-5.1': 'solo_agent',
+  'glm-5v-turbo': 'solo_agent',
+  'qwen-3.5': 'solo_agent',
+  'qwen-3.6-plus': 'solo_agent',
+  // Legacy configs the coder directory still serves.
+  'DeepSeek-V4-Flash': 'solo_coder',
+  'DeepSeek-V4-Pro': 'solo_coder',
+  'Doubao-Seed-2.0-Code': 'solo_coder',
+  'glm-5': 'solo_coder',
+  'kimi-k2.5': 'solo_coder',
+  'minimax-m2.7': 'solo_coder',
+})
+
+/** Display-name overrides for the wire ids that spell out a marketing name. */
+const TRAE_DISPLAY_OVERRIDES: Readonly<Record<string, string>> = Object.freeze({
+  'DeepSeek-V4-Flash': 'DeepSeek-V4-Flash (Legacy)',
+  'DeepSeek-V4-Pro': 'DeepSeek-V4-Pro (Legacy)',
+})
+
+/** Directory functions whose rosters are unioned for the remote catalog read. */
+const TRAE_REMOTE_DIRECTORY_FUNCTIONS: readonly string[] = [
+  'solo_agent_remote',
+  'solo_work_remote',
+  'solo_work_lite',
+  'solo_agent',
+  'solo_coder',
+]
+
+/**
+ * Fetch the official remote models directory from solo.trae.cn.
+ *
+ * Every directory function is asked and the group listings are unioned, so a
+ * model only one function advertises (the agent-only and coder-only rosters)
+ * is not silently hidden. A config the callability table proves uncallable is
+ * dropped rather than listed.
+ */
+export async function fetchRemoteModels(
   accessToken: string,
   signal: AbortSignal | undefined,
   fetchFn: FetchFn,
 ): Promise<TraeModel[] | undefined> {
+  const headers = {
+    Authorization: `Cloud-IDE-JWT ${accessToken}`,
+    'Content-Type': 'application/json',
+    'x-trae-client-type': 'web',
+    'x-trae-user-timezone': 'Asia/Shanghai',
+    'x-preferenced-language': 'zh-cn',
+    Referer: 'https://solo.trae.cn/',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+  }
+  const url = `https://solo.trae.cn/api/remote/v1/models?functions=${TRAE_REMOTE_DIRECTORY_FUNCTIONS.join(',')}`
   try {
-    const url = 'https://solo.trae.cn/api/remote/v1/models?functions=solo_agent_remote,solo_work_remote'
-    const headers = {
-      Authorization: `Cloud-IDE-JWT ${accessToken}`,
-      'Content-Type': 'application/json',
-      'x-trae-client-type': 'web',
-      'x-trae-user-timezone': 'Asia/Shanghai',
-      'x-preferenced-language': 'zh-cn',
-      Referer: 'https://solo.trae.cn/',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    }
     const response = await fetchFn(url, { headers, signal: signal ?? AbortSignal.timeout(DISCOVERY_TIMEOUT_MS) })
     if (!response.ok) return undefined
     const json = await response.json() as { data?: { list?: { function?: string; models?: Record<string, unknown>[] }[] } }
     const groups = json.data?.list ?? []
-    const group = groups.find(g => g.function === 'solo_agent_remote') ?? groups[0]
-    if (!group || !Array.isArray(group.models) || group.models.length === 0) return undefined
-
-    const models: TraeModel[] = []
+    const byId = new Map<string, TraeModel>()
     const effortMap: Record<string, string> = { light: 'low', high: 'high', extra_high: 'xhigh' }
 
-    for (const raw of group.models) {
-      if (typeof raw !== 'object' || raw === null) continue
-      const id = typeof raw.name === 'string' ? raw.name : ''
-      if (id === '') continue
-      const name = typeof raw.display_name === 'string' && raw.display_name !== '' ? raw.display_name : id
-      const contextTokens = typeof raw.context_window_tokens === 'object' && raw.context_window_tokens !== null
-        ? raw.context_window_tokens as Record<string, unknown>
-        : {}
-      const dev = finitePositive(contextTokens.dev)
-      const contextWindow = dev ?? 200_000
-
+    /** Read the advertised effort levels out of one directory row. */
+    const effortsOf = (raw: Record<string, unknown>): string[] | undefined => {
       const reasoningConfig = typeof raw.reasoning_effort_config === 'object' && raw.reasoning_effort_config !== null
         ? raw.reasoning_effort_config as Record<string, unknown>
         : undefined
@@ -200,32 +254,79 @@ async function fetchRemoteModels(
         const m = effortMap[opt] ?? opt
         return m ? [m] : []
       })
-      const efforts = mapped.length > 0 ? ['none', ...mapped] : undefined
-
-      models.push({
-        id,
-        name,
-        contextWindow,
-        maxTokens: 32_000,
-        functionName: 'solo_work_remote',
-        ...efforts === undefined ? {} : { efforts },
-      })
+      return mapped.length > 0 ? ['none', ...mapped] : undefined
     }
 
-    if (models.some(m => m.id === 'DeepSeek-V4-Flash-Official') && !models.some(m => m.id === 'deepseek-v4.1-flash')) {
-      const flash = models.find(m => m.id === 'DeepSeek-V4-Flash-Official')!
-      models.push({
+    /** Read both advertised windows out of one directory row. */
+    const windowsOf = (raw: Record<string, unknown>): { contextWindow?: number; maxContextWindow?: number } => {
+      const tokens = typeof raw.context_window_tokens === 'object' && raw.context_window_tokens !== null
+        ? raw.context_window_tokens as Record<string, unknown>
+        : {}
+      const dev = finitePositive(tokens.dev)
+      const max = raw.max_mode === true ? finitePositive(tokens.max) : undefined
+      return {
+        ...dev === undefined ? {} : { contextWindow: dev },
+        // A "Max" window only exists when the directory advertises a larger
+        // one; the legacy rows repeat `dev` in the `max` slot, which must not
+        // surface as a selectable budget.
+        ...max === undefined || (dev !== undefined && max <= dev) ? {} : { maxContextWindow: max },
+      }
+    }
+
+    for (const group of groups) {
+      if (!Array.isArray(group.models)) continue
+      for (const raw of group.models) {
+        if (typeof raw !== 'object' || raw === null) continue
+        const id = typeof raw.name === 'string' ? raw.name : ''
+        if (id === '') continue
+        const functionName = TRAE_CALLABILITY[id]
+        // The directory advertises IDE-only models the SOLO chat endpoint
+        // rejects with 4001; never list a model that cannot be called.
+        if (functionName === undefined) continue
+        const display = typeof raw.display_name === 'string' && raw.display_name !== '' ? raw.display_name : id
+        const name = TRAE_DISPLAY_OVERRIDES[id] ?? display
+        const windows = windowsOf(raw)
+        const efforts = effortsOf(raw)
+
+        const existing = byId.get(id)
+        if (existing === undefined) {
+          byId.set(id, {
+            id,
+            name,
+            ...windows,
+            maxTokens: 32_000,
+            functionName,
+            ...efforts === undefined ? {} : { efforts },
+          })
+          continue
+        }
+        // Only the agent directories carry `reasoning_effort_config` and the
+        // Max window; a row first seen in the work/coder roster keeps its
+        // owner function while the richer metadata is folded in.
+        if (existing.efforts === undefined && efforts !== undefined) existing.efforts = efforts
+        if (existing.contextWindow === undefined && windows.contextWindow !== undefined) existing.contextWindow = windows.contextWindow
+        if (existing.maxContextWindow === undefined && windows.maxContextWindow !== undefined) existing.maxContextWindow = windows.maxContextWindow
+      }
+    }
+
+    // The Trae client advertises this model under its own spelling; SOLO
+    // accepts it only through the Flash Official wire config, so expose the
+    // familiar id while calling the proven config_name.
+    const flash = byId.get('DeepSeek-V4-Flash-Official')
+    if (flash !== undefined && !byId.has('deepseek-v4.1-flash')) {
+      byId.set('deepseek-v4.1-flash', {
         id: 'deepseek-v4.1-flash',
-        name: 'DeepSeek V4.1 Flash',
-        contextWindow: flash.contextWindow ?? 200_000,
+        name: 'DeepSeek-V4.1-Flash',
+        ...flash.contextWindow === undefined ? {} : { contextWindow: flash.contextWindow },
+        ...flash.maxContextWindow === undefined ? {} : { maxContextWindow: flash.maxContextWindow },
         maxTokens: flash.maxTokens ?? 32_000,
-        functionName: 'solo_work_remote',
-        wireConfigName: 'DeepSeek-V4-Flash-Official',
+        functionName: flash.functionName,
+        wireConfigName: flash.id,
         efforts: flash.efforts ?? ['none', 'low', 'high', 'xhigh'],
       })
     }
 
-    return models.length > 0 ? models : undefined
+    return byId.size > 0 ? [...byId.values()] : undefined
   } catch {
     return undefined
   }
@@ -266,16 +367,17 @@ export async function fetchTraeModels(
       })
     }
   }
-  if (byId.has('DeepSeek-V4-Flash-Official') && !byId.has('deepseek-v4.1-flash')) {
-    const flash = byId.get('DeepSeek-V4-Flash-Official')!
+  const flashFallback = byId.get('DeepSeek-V4-Flash-Official')
+  if (flashFallback !== undefined && !byId.has('deepseek-v4.1-flash')) {
     byId.set('deepseek-v4.1-flash', {
       id: 'deepseek-v4.1-flash',
-      name: 'DeepSeek V4.1 Flash',
-      contextWindow: flash.contextWindow ?? 200_000,
-      maxTokens: flash.maxTokens ?? 32_000,
-      functionName: flash.functionName,
-      wireConfigName: 'DeepSeek-V4-Flash-Official',
-      efforts: flash.efforts ?? ['none', 'low', 'high', 'xhigh'],
+      name: 'DeepSeek-V4.1-Flash',
+      ...flashFallback.contextWindow === undefined ? {} : { contextWindow: flashFallback.contextWindow },
+      ...flashFallback.maxContextWindow === undefined ? {} : { maxContextWindow: flashFallback.maxContextWindow },
+      maxTokens: flashFallback.maxTokens ?? 32_000,
+      functionName: flashFallback.functionName,
+      wireConfigName: flashFallback.id,
+      efforts: flashFallback.efforts ?? ['none', 'low', 'high', 'xhigh'],
     })
   }
   return byId.size > 0 ? [...byId.values()] : [...TRAE_FALLBACK_MODELS]

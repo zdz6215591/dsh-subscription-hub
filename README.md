@@ -98,9 +98,16 @@ pipeline ignores the other's fields.
 
 In **Settings → Subscriptions → Cline → Upstream channels**:
 
-- **Detect channels** probes the model's channel list. The probe channels an
-  impossible provider so the router fails *before* spending a token, then reads
-  the provider list out of the error — a free discovery call.
+- **Detect channels** probes the model's channel list in two steps. First a real
+  ping is sent and its `provider_metadata.gateway.routing` is read, which names
+  the pipeline, the provider that actually served the request, and the whole
+  `fallbacksAvailable` order. Then an impossible provider (`only: ['__probe__']`)
+  is sent with the matching pipeline spelling so the router fails *before*
+  spending a token and names its own list. The result is the union of both.
+  The ping matters because some models are served by exactly one upstream the
+  gateway has no `only`-filter list for — Vercel's `openai-compatible-private`,
+  and the direct-pipeline rows behind `InferenceNet` / `Xiaomi` — so the real
+  response is the only place those channels are named at all.
 - **Click a channel** to pin it; the click order is the try order (the number on
   the chip shows it). Click again to unpin.
 - **⊘** excludes a channel. Excludes are compiled into an `only` allow-list,
@@ -118,6 +125,33 @@ fail identically, so rotating channels would only hide the real problem.
 
 Channel discovery is **in-memory** (it is derived data any probe can rebuild),
 while pins are **persisted** to `~/.dsh/plugins/subscriptions/cline-pins.json`.
+
+## Trae model list
+
+The CN catalog is read from the official remote directory
+(`solo.trae.cn/api/remote/v1/models`) with **every** directory function
+unionned — `solo_agent_remote`, `solo_work_remote`, `solo_work_lite`,
+`solo_agent`, `solo_coder` — because each function only advertises its own
+roster: the agent directory carries `Doubao-Seed-Code`, `glm-5.1`,
+`glm-5v-turbo`, `qwen-3.5` and `qwen-3.6-plus`, and the coder directory carries
+the legacy `glm-5`, `kimi-k2.5`, `minimax-m2.7`, `DeepSeek-V4-Flash/Pro` and
+`Doubao-Seed-2.0-Code` configs. Reading a single directory silently hid all of
+them.
+
+Two other rules keep the picker honest:
+
+- **Only callable configs are listed.** The directory also advertises
+  `deepseek-v4.1-flash`, `glm-5.3-flash`, `glm-5.3-flashx`, `qwen3.8-flash` and
+  `kimi-k2.8-preview`, but every SOLO function answers `4001 param is invalid`
+  for them (they belong to the IDE agent-task channel). Listing them would hand
+  the picker a model that always fails, so they are dropped. The familiar
+  `deepseek-v4.1-flash` id is still served, mapped onto the proven
+  `DeepSeek-V4-Flash-Official` wire config.
+- **Metadata comes from the richest row.** Only the agent directories carry
+  `reasoning_effort_config` (the thinking-level selector) and the larger Max
+  context window, so a row first seen in the work roster keeps its owner
+  function while the effort levels and the Max window are folded in. A row whose
+  `max` window merely repeats `dev` exposes no budget switch.
 
 ## Why this exists
 
