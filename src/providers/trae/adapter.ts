@@ -351,7 +351,6 @@ export class TraeAdapter extends LlmAdapter {
       const decoder = new TextDecoder()
       const sse = new TraeSseDecoder()
       let index = 0
-      let open: 'text' | 'reasoning' | null = null
       let sawToolCalls = false
       let finished = false
       let upstreamError: LlmError | undefined
@@ -359,10 +358,20 @@ export class TraeAdapter extends LlmAdapter {
       /** Accumulated tool calls by index, emitted as one block each on finish. */
       const toolCalls = new Map<number, { id: string; name: string; arguments: string }>()
 
+      // Accumulate each open block's text so `block-end` can carry it, which is
+      // the harness contract the official translators implement. Emitting an
+      // empty payload here drops the block's content for assemblies that read
+      // the block off `block-end` rather than replaying deltas.
+      let openKind: 'text' | 'reasoning' | null = null
+      let openText = ''
+
       const closeOpen = (): StreamChunk | undefined => {
-        if (open === null) return undefined
-        open = null
-        return { type: 'block-end', index, block: { type: 'text', text: '' } }
+        if (openKind === null) return undefined
+        const kind = openKind
+        const text = openText
+        openKind = null
+        openText = ''
+        return { type: 'block-end', index, block: { type: kind, text } }
       }
 
       const emit = (event: ReturnType<typeof decodeTraeEvent>): StreamChunk[] => {
@@ -393,21 +402,23 @@ export class TraeAdapter extends LlmAdapter {
             })
           }
           if (event.reasoning !== undefined && event.reasoning !== '') {
-            if (open !== 'reasoning') {
+            if (openKind !== 'reasoning') {
               const closing = closeOpen()
               if (closing !== undefined) chunks.push(closing)
-              open = 'reasoning'
+              openKind = 'reasoning'
               chunks.push({ type: 'block-start', index, blockType: 'reasoning' })
             }
+            openText += event.reasoning
             chunks.push({ type: 'reasoning-delta', index, text: event.reasoning })
           }
           if (event.text !== '') {
-            if (open !== 'text') {
+            if (openKind !== 'text') {
               const closing = closeOpen()
               if (closing !== undefined) chunks.push(closing)
-              open = 'text'
+              openKind = 'text'
               chunks.push({ type: 'block-start', index, blockType: 'text' })
             }
+            openText += event.text
             chunks.push({ type: 'text-delta', index, text: event.text })
           }
           return chunks

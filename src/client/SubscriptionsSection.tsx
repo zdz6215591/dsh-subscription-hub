@@ -1027,6 +1027,8 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [clinePinsError, setClinePinsError] = useState<string | undefined>(undefined)
   /** Model whose channels are being probed (undefined = idle). */
   const [clineProbing, setClineProbing] = useState<string | undefined>(undefined)
+  /** Model whose channels are being validated (undefined = idle). */
+  const [clineValidating, setClineValidating] = useState<string | undefined>(undefined)
 
   const setProviderError = useCallback((provider: SubscriptionProvider, message: string | undefined): void => {
     if (!mountedRef.current) return
@@ -1365,6 +1367,25 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       if (mountedRef.current) setClineProbing(undefined)
     }
   }, [rpc, clineProbing])
+
+  /** Validate each channel for one model with a minimal real request to test availability. */
+  const validateClineChannels = useCallback(async (model: string): Promise<void> => {
+    if (rpc === undefined || clineValidating !== undefined) return
+    setClineValidating(model)
+    try {
+      const result = await callSubscriptionsAuth<{ verdicts: Record<string, { status: string; note: string; ms: number; checkedAt: number }> }>(
+        rpc, 'validateClineChannels', { model },
+      )
+      if (!mountedRef.current) return
+      setClinePins(prev => (prev ?? []).map(row => (row.model === model
+        ? { ...row, verdicts: { ...row.verdicts, ...result.verdicts } }
+        : row)))
+    } catch (error) {
+      if (mountedRef.current) setClinePinsError(messageOf(error))
+    } finally {
+      if (mountedRef.current) setClineValidating(undefined)
+    }
+  }, [rpc, clineValidating])
 
   const toggleClineSection = useCallback((): void => {
     setClinePinsOpen((prev) => {
@@ -2289,10 +2310,19 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                                 <button
                                   type="button"
                                   style={{ ...styles.buttonSmall, marginLeft: 'auto', ...clineProbing === probeKey ? { opacity: 0.5, cursor: 'default' } : {} }}
-                                  disabled={clineProbing !== undefined}
+                                  disabled={clineProbing !== undefined || clineValidating !== undefined}
                                   onClick={() => { void probeClineChannels(probeKey) }}
                                 >
                                   {clineProbing === probeKey ? t('refreshModelsRunning') : t('clinePinProbe')}
+                                </button>
+                                <button
+                                  type="button"
+                                  style={{ ...styles.buttonSmall, ...clineValidating === probeKey ? { opacity: 0.5, cursor: 'default' } : {} }}
+                                  disabled={clineProbing !== undefined || clineValidating !== undefined}
+                                  title={t('clinePinValidateHint')}
+                                  onClick={() => { void validateClineChannels(probeKey) }}
+                                >
+                                  {clineValidating === probeKey ? t('clinePinValidating') : t('clinePinValidate')}
                                 </button>
                               </div>
                               {/* Channel chips: click pins (in click order), ⊘ excludes. */}

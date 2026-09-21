@@ -48,6 +48,7 @@ export {
   parseRouting,
   parseTier0,
   slugify,
+  validateChannelBody,
 } from './pins.js'
 export type {
   ClineAttempt,

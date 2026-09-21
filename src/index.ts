@@ -164,7 +164,10 @@ import {
   mergeUpstreams,
   refreshCline,
   sessionFromClineKey,
+  validateChannelBody,
+  classifyUpstreamError,
 } from './providers/cline/index.js'
+import type { ClineUpstreamStatus, ClineUpstreamVerdict } from './providers/cline/index.js'
 import {
   TraeAdapter,
   TRAE_PREEMPT_MS,
@@ -1572,6 +1575,72 @@ export function apply(ctx: Context, config: Config): void {
           ...observed.pipeline === undefined ? {} : { pipeline: observed.pipeline },
         }
       }
+    },
+    async validateClineChannels(model) {
+      const sessions = accountTokens.get('cline')
+      if (sessions === undefined) return { verdicts: {} }
+      const accounts = await sessions.list()
+      if (accounts.length === 0) return { verdicts: {} }
+      const session = await sessions.session(accounts[0]!.key) as ClineSession
+      const base = (session.baseUrl ?? CLINE_BASE_URL).replace(/\/+$/, '')
+      let meta = clinePins.metaOf(model)
+      // If no channels are known yet, run a zero-cost probe first to populate the list
+      if (!meta.upstreams || meta.upstreams.length === 0) {
+        await this.probeClineChannels?.(model)
+        meta = clinePins.metaOf(model)
+      }
+      const list = meta.upstreams ?? []
+      const pipeline = meta.pipeline ?? null
+      const verdicts: Record<string, ClineUpstreamVerdict> = {}
+      const batchSize = 5
+      for (let i = 0; i < list.length; i += batchSize) {
+        const batch = list.slice(i, i + batchSize)
+        await Promise.all(batch.map(async (slug) => {
+          const t0 = Date.now()
+          const body = validateChannelBody(model, slug, pipeline)
+          try {
+            const response = await proxiedFetch(`${base}/chat/completions`, {
+              method: 'POST',
+              headers: {
+                authorization: `Bearer ${session.accessToken}`,
+                'content-type': 'application/json',
+                accept: 'application/json',
+              },
+              body: JSON.stringify(body),
+              signal: AbortSignal.timeout(60_000),
+            })
+            const raw = await response.text().catch(() => '')
+            let status: ClineUpstreamStatus = 'unknown'
+            let note = ''
+            if (!response.ok) {
+              status = classifyUpstreamError(raw)
+              note = raw.slice(0, 160)
+            } else {
+              try {
+                const parsed = JSON.parse(raw) as Record<string, unknown>
+                if (parsed.error && !parsed.data) {
+                  const msg = typeof parsed.error === 'string' ? parsed.error : JSON.stringify(parsed.error)
+                  status = classifyUpstreamError(msg)
+                  note = msg.slice(0, 160)
+                } else if ((parsed.data as Record<string, unknown> | undefined)?.choices || parsed.choices) {
+                  status = 'ok'
+                }
+              } catch {
+                status = 'ok'
+              }
+            }
+            const verdict: ClineUpstreamVerdict = { status, note, ms: Date.now() - t0, checkedAt: Date.now() }
+            verdicts[slug] = verdict
+            clinePins.learnUpstream(model, slug, status, note, Date.now() - t0)
+          } catch (e) {
+            const note = e instanceof Error ? e.message : String(e)
+            const verdict: ClineUpstreamVerdict = { status: 'unknown', note, ms: Date.now() - t0, checkedAt: Date.now() }
+            verdicts[slug] = verdict
+            clinePins.learnUpstream(model, slug, 'unknown', note, Date.now() - t0)
+          }
+        }))
+      }
+      return { verdicts }
     },
     async setVisible(provider, model, visible) {
       await setModelVisible(provider, model, visible)

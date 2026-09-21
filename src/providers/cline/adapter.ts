@@ -78,8 +78,13 @@ interface ClineFrame {
  * Split an SSE byte stream into decoded JSON frames.
  * Cline is line-oriented (`data: {json}\n\n`) and uses `[DONE]` as the terminal
  * marker; `event:` fields are not used, and unparseable frames are skipped.
+ * When the server answers a 200 with raw JSON error lines (missing `data:`),
+ * those are yielded as error frames to trigger clean failover.
  */
-async function *clineFrames(body: ReadableStream<Uint8Array>): AsyncIterable<ClineFrame> {
+async function *clineFrames(
+  body: ReadableStream<Uint8Array>,
+  onChunk?: () => void,
+): AsyncIterable<ClineFrame> {
   const reader = body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
@@ -87,13 +92,23 @@ async function *clineFrames(body: ReadableStream<Uint8Array>): AsyncIterable<Cli
     for (;;) {
       const next = await reader.read()
       if (next.done) break
+      onChunk?.()
       buffer += decoder.decode(next.value, { stream: true })
       for (;;) {
         const match = /\r?\n/.exec(buffer)
         if (match === null || match.index === undefined) break
         const line = buffer.slice(0, match.index).trim()
         buffer = buffer.slice(match.index + match[0].length)
-        if (!line.startsWith('data:')) continue
+        if (!line.startsWith('data:')) {
+          // Detect bare JSON error objects sent on text/event-stream connections
+          if (line.startsWith('{"error') || line.startsWith('{"message')) {
+            try {
+              yield { done: false, payload: JSON.parse(line) as Record<string, unknown> }
+              return
+            } catch { /* not JSON */ }
+          }
+          continue
+        }
         const data = line.slice(5).trim()
         if (data === '') continue
         if (data === '[DONE]') {
@@ -114,6 +129,10 @@ async function *clineFrames(body: ReadableStream<Uint8Array>): AsyncIterable<Cli
           yield { done: false, payload: JSON.parse(data) as Record<string, unknown> }
         } catch { /* ignore */ }
       }
+    } else if (tail.startsWith('{"error') || tail.startsWith('{"message')) {
+      try {
+        yield { done: false, payload: JSON.parse(tail) as Record<string, unknown> }
+      } catch { /* ignore */ }
     }
   } finally {
     reader.releaseLock()
@@ -358,14 +377,20 @@ export class ClineAdapter extends LlmAdapter {
    * content. Failover happens only before the first yielded chunk.
    */
   private async *streamCore(options: GenerateOptions, account?: string): AsyncIterable<StreamChunk> {
-    const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
-    try {
-      const pin = await this.options.pins.pin(options.model)
-      const meta = this.options.pins.metaOf(options.model)
-      const attempts = buildAttempts(pin)
-      const messages = await this.toWireMessages(options)
-      let lastError: unknown
-      for (const attempt of attempts) {
+    const pin = await this.options.pins.pin(options.model)
+    const meta = this.options.pins.metaOf(options.model)
+    const attempts = buildAttempts(pin)
+    const messages = await this.toWireMessages(options)
+    let lastError: unknown
+
+    for (const attempt of attempts) {
+      if (options.signal?.aborted) {
+        throw new LlmError('cline request aborted by caller', 'ABORTED', { cause: options.signal.reason })
+      }
+      // Each attempt gets its own watchdog with the full streamIdleTimeoutMs,
+      // so a timeout on candidate A does not abort candidate B or inherit elapsed time.
+      const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
+      try {
         const session = await this.options.tokens.session(account)
         const body = injectPrefs({
           model: options.model,
@@ -398,12 +423,16 @@ export class ClineAdapter extends LlmAdapter {
           })
         } catch (error) {
           lastError = mapFetchFailure('cline', error, watchdog, options.signal)
+          if (options.signal?.aborted) throw lastError
           continue
         }
         if (!response.ok) {
           const raw = await response.text().catch(() => '')
           const detail = raw.slice(0, 400)
           this.options.pins.learnUpstream(options.model, attempt.upstream, classifyUpstreamError(detail), detail, 0)
+          // An unpinned attempt that fails carries the gateway's own latest
+          // provider list; merging it repairs a stale allow-list without a probe.
+          if (attempt.upstream === null) this.options.pins.learnAvailableProviders(options.model, detail)
           lastError = await httpLlmError(new Response(raw, { status: response.status, headers: response.headers }), 'cline')
           const code = (lastError as LlmError).code
           // An auth or quota failure is not a pinning problem: every candidate
@@ -413,6 +442,23 @@ export class ClineAdapter extends LlmAdapter {
         }
         if (response.body === null) {
           lastError = new LlmError('cline returned no response body', 'EMPTY_RESPONSE')
+          continue
+        }
+        // The gateway answers some streaming failures with HTTP 200 plus a
+        // non-SSE body (a plain JSON error, or an HTML page), which would
+        // otherwise be parsed as an empty stream and lose the failover. Peek at
+        // the content type and reject anything that is not an event stream so
+        // the next pinned channel gets its turn.
+        const contentType = response.headers.get('content-type') ?? ''
+        if (!contentType.toLowerCase().includes('event-stream')) {
+          const raw = await response.text().catch(() => '')
+          const detail = raw.slice(0, 400)
+          this.options.pins.learnUpstream(options.model, attempt.upstream, classifyUpstreamError(detail), detail, 0)
+          if (attempt.upstream === null) this.options.pins.learnAvailableProviders(options.model, detail)
+          lastError = new LlmError(
+            detail === '' ? `cline answered HTTP 200 with ${contentType || 'no content type'}` : detail,
+            'PROVIDER_HTTP_ERROR',
+          )
           continue
         }
 
@@ -426,22 +472,37 @@ export class ClineAdapter extends LlmAdapter {
         let streamFailure: LlmError | undefined
         const startedAt = Date.now()
 
+        // Accumulate each open block's text so `block-end` can carry it, which is
+        // the harness contract the official translators implement. Emitting an
+        // empty payload here drops the block's content for assemblies that read
+        // the block off `block-end` rather than replaying deltas.
+        let openText = ''
         const closeOpen = (): StreamChunk | undefined => {
           if (openBlock === null) return undefined
           const closed = openBlock
+          const text = openText
           openBlock = null
-          // The accumulated text is re-emitted as the block's payload, matching
-          // the official openai-completions translator.
-          return { type: 'block-end', index, block: { type: closed, text: '' } }
+          openText = ''
+          return { type: 'block-end', index, block: { type: closed, text } }
         }
 
         const chunks: StreamChunk[] = []
         try {
-          for await (const frame of clineFrames(response.body)) {
+          for await (const frame of clineFrames(response.body, () => watchdog.pulse())) {
+            watchdog.pulse()
             if (frame.done) break
             const payload = frame.payload ?? {}
             const error = frameError(payload)
-            if (error !== undefined) throw new LlmError(error, 'PROVIDER_HTTP_ERROR')
+            if (error !== undefined) {
+              // An error frame BEFORE any content is still a routing failure, so
+              // it must fail over rather than end the turn. Once content has been
+              // yielded the stream is the answer and the error is fatal.
+              if (!yielded) {
+                this.options.pins.learnUpstream(options.model, attempt.upstream, classifyUpstreamError(error), error, 0)
+                if (attempt.upstream === null) this.options.pins.learnAvailableProviders(options.model, error)
+              }
+              throw new LlmError(error, 'PROVIDER_HTTP_ERROR')
+            }
             const routing = parseRouting(payload)
             this.options.pins.learnRouting(options.model, routing)
             const observed = usageOf(payload)
@@ -465,6 +526,7 @@ export class ClineAdapter extends LlmAdapter {
                 openBlock = 'reasoning'
                 chunks.push({ type: 'block-start', index, blockType: 'reasoning' })
               }
+              openText += reasoning
               chunks.push({ type: 'reasoning-delta', index, text: reasoning })
             }
             const text = deltaText(delta)
@@ -475,6 +537,7 @@ export class ClineAdapter extends LlmAdapter {
                 openBlock = 'text'
                 chunks.push({ type: 'block-start', index, blockType: 'text' })
               }
+              openText += text
               chunks.push({ type: 'text-delta', index, text })
             }
             // Flush what this frame produced so the caller sees it immediately.
@@ -530,18 +593,18 @@ export class ClineAdapter extends LlmAdapter {
         // pinned channel gets its turn.
         lastError = new LlmError('cline returned an empty stream', 'EMPTY_RESPONSE')
         continue
+      } finally {
+        watchdog.stop()
       }
-      throw lastError instanceof LlmError
-        ? lastError
-        : new LlmError(
-            lastError === undefined
-              ? 'no pinned upstream could serve the request'
-              : `cline: ${String(lastError)}`,
-            'UPSTREAM',
-          )
-    } finally {
-      watchdog.stop()
     }
+    throw lastError instanceof LlmError
+      ? lastError
+      : new LlmError(
+          lastError === undefined
+            ? 'no pinned upstream could serve the request'
+            : `cline: ${String(lastError)}`,
+          'UPSTREAM',
+        )
   }
 
   /** Convert harness messages to the OpenAI-shaped wire history. */

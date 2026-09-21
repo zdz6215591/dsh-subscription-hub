@@ -36,7 +36,7 @@ export const SUBSCRIPTIONS_AUTH_ENDPOINTS = [
   'modelDefaults', 'setModelDefault',
   'checkin', 'checkinStatus', 'visibility', 'setVisible', 'refreshModels', 'markModelsRead',
   'poolGet', 'poolSet',
-  'clinePins', 'setClinePin', 'probeClineChannels',
+  'clinePins', 'setClinePin', 'probeClineChannels', 'validateClineChannels',
   'tokenStats',
 ] as const
 
@@ -178,6 +178,12 @@ export interface ExtraOps {
   }): Promise<void>
   /** Discover the upstream channels available to one Cline model. */
   probeClineChannels?(model: string): Promise<{ channels: string[]; pipeline?: 'direct' | 'planner' }>
+  /**
+   * Pin each of one model's channels in turn with a minimal REAL request and
+   * record whether it can serve the model. Unlike the probe this spends a tiny
+   * amount of quota, so it is user-initiated only.
+   */
+  validateClineChannels?(model: string): Promise<{ verdicts: Record<string, { status: string; note: string; ms: number; checkedAt: number }> }>
 }
 
 /** Default-effort picker operations behind the `modelDefaults/setModelDefault` endpoints. */
@@ -726,6 +732,10 @@ async function dispatch(
     case 'probeClineChannels': {
       if (extras?.probeClineChannels === undefined) throw new BadRequest('Cline pinning is unavailable')
       return ok(await extras.probeClineChannels(readString(payload, 'model')))
+    }
+    case 'validateClineChannels': {
+      if (extras?.validateClineChannels === undefined) throw new BadRequest('Cline pinning is unavailable')
+      return ok(await extras.validateClineChannels(readString(payload, 'model')))
     }
     case 'tokenStats': {
       return ok(await getTokenSavingsSummary())

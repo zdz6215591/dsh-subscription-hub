@@ -164,6 +164,7 @@ bundle，并在其上继续自研。以下项目均已致谢。
 | [dingminhua/dsh-connect-trae](https://github.com/dingminhua/dsh-connect-trae) | Trae 路由的主参考：本机凭据发现（`storage.json` 与 `iCubeAuthInfo://icube.cloudide` 解密）、`llm_utils_chat` 请求信封、命名 SSE 事件集、工具调用处理，以及只读的积分/签到接口。 |
 | [Wang-JQ77/dsh-trae-api](https://github.com/Wang-JQ77/dsh-trae-api) | Trae 次参考：四版本布局（Trae CN / TRAE SOLO CN / Trae / TRAE SOLO）、`tc` 容器格式与端点回退形态。 |
 | [yhshzh/dsh-cline-pass](https://github.com/yhshzh/dsh-cline-pass) | Cline 路由的主参考：OpenAI 兼容线协议、SSE → harness 翻译、工具调用与思考处理（`reasoning` / `reasoning_content` / `reasoning_details`），以及最重要的 **分模型上游渠道钉住**：`PinProfile` 结构、两套流水线的不同拼写、排除项转白名单规则、按流水线翻译的排序指标，和零消耗的「不可能渠道」探测法。 |
+| [munmunjaklin458-afk/cline-pass-switcher](https://github.com/munmunjaklin458-afk/cline-pass-switcher) | Cline Pass 路由控制器的开山之作：多候选顺序故障转移、单次尝试超时隔离、首块非 SSE / 裸 JSON 错误流探测、真实批量上游可用性校验（`validateUpstreams` 最小请求实测验证），以及错误触发的可用渠道自学习（`learnAvailableProviders`）。 |
 | [GooDAnDReaDY/dsh-clinebot](https://github.com/GooDAnDReaDY/dsh-clinebot) | Cline 次参考：`apiKeyEnv` 凭据引用模式、`disabledModels` 白名单思路、`/users/me/plan/usage-limits` 额度窗口（5 小时 / 每周 / 每月，80% 与 95% 阈值）—— 本仓库 Cline 用量条的来源，以及套餐标签解析。 |
 
 ### 与参考项目保持同步

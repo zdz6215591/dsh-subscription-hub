@@ -26,6 +26,7 @@ import {
   parseRouting,
   parseTier0,
   slugify,
+  validateChannelBody,
 } from '../src/providers/cline/pins.js'
 import {
   CLINE_MODEL_PREFIX,
@@ -405,4 +406,32 @@ test('the pin store tolerates a corrupt document instead of throwing', async () 
     else process.env.DSH_HOME = previous
     rmSync(home, { recursive: true, force: true })
   }
+})
+
+test('validateChannelBody constructs exact bodies per pipeline', () => {
+  const planner = validateChannelBody('cline-pass/glm-5.2', 'alibaba', 'planner')
+  assert.deepEqual(planner.providerOptions, { gateway: { only: ['alibaba'] } })
+  assert.equal('provider' in planner, false)
+
+  const direct = validateChannelBody('cline-pass/glm-5.3-flash', 'gmicloud', 'direct')
+  assert.deepEqual(direct.provider, { only: ['gmicloud'] })
+  assert.equal('providerOptions' in direct, false)
+
+  const unobserved = validateChannelBody('cline-pass/model', 'baseten', null)
+  assert.deepEqual(unobserved.providerOptions, { gateway: { only: ['baseten'] } })
+  assert.deepEqual(unobserved.provider, { only: ['baseten'] })
+})
+
+test('learnAvailableProviders auto-merges channels discovered from gateway errors', () => {
+  const store = new ClinePinStore()
+  store.learn('cline-pass/glm-5.2', { upstreams: ['alibaba'] })
+
+  // Error from planner with new channels
+  store.learnAvailableProviders('cline-pass/glm-5.2', 'Available providers are: alibaba, baseten, deepinfra.')
+  const meta = store.metaOf('cline-pass/glm-5.2')
+  assert.deepEqual(meta.upstreams, ['alibaba', 'baseten', 'deepinfra'])
+
+  // Unrelated error doesn't wipe or alter
+  store.learnAvailableProviders('cline-pass/glm-5.2', 'Some generic connection error')
+  assert.deepEqual(store.metaOf('cline-pass/glm-5.2').upstreams, ['alibaba', 'baseten', 'deepinfra'])
 })

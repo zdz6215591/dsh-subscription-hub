@@ -78,15 +78,8 @@ export interface ClineAttempt {
   sort: string | null
 }
 
-/** Everything observed about one model, for the settings UI. */
-export interface ClineModelMeta {
-  /** Upstream slugs discovered for this model. */
-  upstreams?: string[]
-  /** The pipeline that served the last request, when observed. */
-  pipeline?: ClinePipeline
-  /** Per-upstream availability verdicts, newest last. */
-  upstreamStatus?: Record<string, ClineUpstreamVerdict>
-}
+/** Availability verdict for one upstream. */
+export type ClineUpstreamStatus = 'ok' | 'limited' | 'bad' | 'auth' | 'unknown'
 
 /** One upstream's observed availability. */
 export interface ClineUpstreamVerdict {
@@ -96,8 +89,46 @@ export interface ClineUpstreamVerdict {
   checkedAt: number
 }
 
-/** Availability verdict for one upstream. */
-export type ClineUpstreamStatus = 'ok' | 'limited' | 'bad' | 'auth' | 'unknown'
+/** Everything observed about one model, for the settings UI. */
+export interface ClineModelMeta {
+  /** Upstream slugs discovered for this model. */
+  upstreams?: string[]
+  /** The pipeline that served the last request, when observed. */
+  pipeline?: ClinePipeline
+  /** Per-upstream availability verdicts, newest last. */
+  upstreamStatus?: ClineChannelVerdicts
+}
+
+/** Availability verdicts keyed by channel, for one model. */
+export type ClineChannelVerdicts = Record<string, ClineUpstreamVerdict>
+
+/** Model-level metadata as the panel reads it. */
+export interface ClineModelMetaView extends ClineModelMeta {
+  id: string
+}
+
+/**
+ * Probe body that pins exactly one channel for real.
+ *
+ * Unlike the zero-cost unknown-channel probe, this spends a tiny real request
+ * per channel (the reference measures ~$0.0002), which is the only way to learn
+ * whether a channel can actually SERVE the model: some channels are valid
+ * channel names that fail on model-id mapping (`invalid_request`), and others
+ * are shared-pool rate limited (429). Validating is therefore a user-initiated
+ * action, never something a background tick does.
+ */
+export function validateChannelBody(
+  model: string,
+  channel: string,
+  pipeline: ClinePipeline | null,
+): Record<string, unknown> {
+  const base = { model, messages: [{ role: 'user', content: 'hi' }], max_tokens: 16 }
+  // The pinned channel must be spelled for the pipeline that will serve it; an
+  // unknown pipeline gets both, matching the pin-injection rule.
+  if (pipeline === 'planner') return { ...base, providerOptions: { gateway: { only: [channel] } } }
+  if (pipeline === 'direct') return { ...base, provider: { only: [channel] } }
+  return { ...base, provider: { only: [channel] }, providerOptions: { gateway: { only: [channel] } } }
+}
 
 /**
  * Normalize a configured sort into a wire value or `null`.
@@ -462,6 +493,24 @@ export class ClinePinStore {
         ? {}
         : { upstreams: mergeUpstreams(current.upstreams, [routing.finalProvider ?? ''], routing.fallbacks) },
     })
+  }
+
+  /**
+   * Merge the gateway's own provider list out of a routing error.
+   *
+   * This is the self-repair path for a **stale allow-list**: the unknown-pin
+   * probe recorded the channels once, the gateway later added one, and the
+   * exclude-derived `only` list therefore omits the new channel. When the
+   * gateway rejects that request it names its current list, so learning from it
+   * fixes the next attempt without the user re-running a probe.
+   */
+  learnAvailableProviders(model: string, message: string): void {
+    const found = extractAvailableProviders(String(message ?? ''), null)
+    if (found === null || found.length === 0) return
+    const current = this.meta.get(model) ?? {}
+    const merged = mergeUpstreams(found, current.upstreams)
+    if (merged.length === (current.upstreams ?? []).length) return
+    this.meta.set(model, { ...current, upstreams: merged })
   }
 
   /** Forget everything observed for one model, or all models. */
