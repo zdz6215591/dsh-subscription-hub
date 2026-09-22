@@ -162,3 +162,77 @@ the reference implements it, and the effort.
   `resetsAt` in `windowUrgency` outranking every fresh member forever; the
   auth store re-read on every poll with no cache; and `mergeReasoning` passing a
   provider-supplied `defaultEffort` through unvalidated on the live path.
+
+---
+
+## Part 4 — Second pass: user-perceivable surfaces
+
+A deliberate second pass asking a different question than Part 1: **what would a
+user actively notice, use, or benefit from** — as opposed to what is broken.
+Ordered by how readily the user would discover the change.
+
+Every item names what the user sees, the reference mechanism with file:line, the
+effort, and whether the hub already carries the plumbing.
+
+### A. Visible in every session
+
+| # | Surface | What the user sees | Reference | Effort | Hub plumbing |
+| --- | --- | --- | --- | --- | --- |
+| A1 | **Session-cost readout** | The harness's own token pill gains a trailing amount (`1.2M tokens · Cache hit 87% · ≈$0.0123`), and each row of the usage dialog it opens gains a price. Tooltip carries the per-bucket breakdown plus "estimate from published rates, not the provider invoice". | `ref-commandcode-provider/src/client/session-cost-display.ts:249-285` (injects into `[data-composer-stats]` / `[data-session-stats-usage]`; rows matched positionally and confirmed by token count), `session-cost.ts:267-358` (all numbers/copy, React-free), `cost-projection.ts:56-97` (durable fold on the `sessionProjections` seam) | M–L | The dock pill and the dialog portal already exist (`SubscriptionUsageBadge.tsx:271-293,446`), and a price table exists but is provider-agnostic and substring-keyed (`token-savings.ts:91`). Missing: a **per-session accumulator** (`recordStreamTokenUsage` has zero call sites) and any `sessionProjections` registration. |
+| A2 | **Plans & quota panel** | A full-width card at the bottom of the sidebar directly above Settings (plan + one row per window with its own used/limit and bar); collapses to a ring in rail mode; clicking it swaps the center column for a dashboard with per-account tabs, monthly bars, reset times and request/token counters. | `ref-commandcode-provider/src/client/index.ts:529-545` (`sidebar.footer.action`, `order: 1`), `:513-516` (`main` cell), `panel.ts:436-604` (one projection, refcounted 2-minute refresh, close via `layout.selectPanel(null)`) | M | Neither slot is declared. The data already flows through one endpoint pair, and the settings page already renders exactly these windows (`SubscriptionsSection.tsx:2071-2140`). |
+| A3 | **Request-image downscale** | A Retina screenshot (2880x1800) is sent as 1568x980 — a 3.4x pixel cut — so turns are faster and context is far smaller while the model loses nothing it would not have downscaled itself. | `ref-commandcode-provider/src/image-request.ts:46-111` (one target object in both attachment generations' vocabulary; aspect-preserving; never enlarges) | **S** | The hub reads the **full original** in four places (`translate/resolved.ts:98`, `providers/agy.ts:636`, `tools/image-generate.ts:378`, `index.ts:518`) and never calls `readImageRequest` — so every attached screenshot is re-sent full-size on *every* request of the session. |
+| C1 | **All-provider usage board** | One screen showing every subscription at once: per provider the tightest window's percentage and reset time, which account is cooling down, which key is about to expire. | `ref-dsh-plugin-subscriptions/src/client/SubscriptionUsageBadge.tsx:180-206` (the superseded plugin had this; the hub regressed to the current model's provider only) | S–M | Every number is already served by the `usage` endpoint. |
+
+**Two traps to carry into implementation (both from the reference's own comments):**
+
+- The `sidebar.footer.action` registration **must** be gated on
+  `ctx.inject(['layout'])` plus a `typeof selectPanel === 'function'` check.
+  That slot exists on every engine, but the `main` cell and `selectPanel` arrive
+  in 0.1.5 — ungated, an older engine renders a **card that does nothing when
+  clicked**. (`ref-commandcode-provider/src/client/index.ts:446-458,529-531`.)
+- The cost readout must render **nothing** when it cannot price a session
+  (`undefined`), never `$0.00`; a partial figure renders with a `≥` prefix and a
+  "priced subtotal only" note; a sub-cent total prints `<$0.0001`.
+  (`session-cost.ts:249-253,269,302,306,315-323`.)
+
+### B. New interaction capability
+
+| # | Surface | What the user does | Reference | Effort | Hub plumbing |
+| --- | --- | --- | --- | --- | --- |
+| B1 | **`/sub` command family** | Types `/sub` in the composer and gets a markdown status report in the transcript (host ping latency, active key + source, default model, 5-hour/weekly bars with reset times, limit alerts, session counters), plus `models`, `accounts`, `switch <account>`, `rotate`, `ping`, `test [model]`. | `ref-clinebot/lib/slash-command.js:28-33` (registers on the **host** `commands` service; `execute` returns markdown), report `:152-192`, subcommands `:37-151` | M | The hub ships only a **client-side** `/fast` (`src/client/index.ts:186-214`), and `commandUi` supports only `ui.kind: 'popupSelect'` — printing text requires the host service instead. |
+| B2 | **Test a key before saving** | Pastes a key, clicks **Test** → "authorized in 812 ms" or the exact upstream error, with nothing stored; **Save and test** stores then verifies. | `ref-cline-pass/lib/panel.js:145-168` (`keyTest` tests a supplied value without storing), buttons `lib/client.js:547-561` | **S** | The hub only shape-checks a key (`src/providers/cline/index.ts:79-88`), so a bad key surfaces mid-conversation as `AUTH`. One endpoint in the table at `src/auth/rpc.ts:31-41`; the fetchers already exist. |
+| B3 | **Quota threshold banner** | Amber/red banner naming the consequence and the recovery clock: "5-hour rolling limit almost exhausted (96%). New requests may be rejected until reset." | `ref-clinebot/lib/provider-sync.js:74-90` (80% warning / 95% exhausted with `resetsAt`), rendered `lib/client.js:578-596` | **S** | `QUOTA_FULL_PERCENT = 95` already exists (`src/providers/pool-usage.ts:20`) and every window already carries `usedPercent`/`resetsAt` to the client (`src/providers/common.ts:429-459`). |
+| B4 | **Per-account pool actions** | Per row: **Pin Active**, **Test**, and Request-count / Last-used columns; plus a line naming the account currently being spent. | `ref-clinebot/lib/client.js:507-571`, `account-pool.js:29,40-54,60-131`; `ref-switcher/public/index.html:678-736` | S–M | Accounts, `setDefault` and per-account `usage` already exist; the hub shows no per-account health or last-used. |
+| B5 | **One-click update** | Card shows "Update available: v0.2.0 (current v0.1.4)" with **Update Now** → "restart DSH". | `ref-clinebot/lib/updater.js:224-275` (status GET; POST runs `dsh plugin --profile <p> add <pkg>@<ver>`), UI `lib/client.js:405-431` | M | The hub already registers exact fenced fetch routes (`src/auth/rpc.ts:306-345,808-811`). Without this a user never learns a fix shipped. |
+| B6 | **Batch channel probe + adoption report** | One button walks every model (per-model progress); **Pull official latest models** reports which sources answered, how many were found/added, highlights new rows, and remembers the last fetch time. | `ref-switcher/public/index.html:121,433-480` | S–M | `probeClineChannels` and `refreshModels` exist, and a "New" badge exists; the batch walk and the report do not. |
+| B7 | **"Paths checked" signed-out diagnostic** | An expandable list of every probed credential path with its source (desktop app / CLI) and reason (not found / unreadable / unusable format). | `ref-trae-primary/src/client/TraeUsageCard.tsx:596-617`, `status-paths.ts:99-106` | **S** | `traeImportFailureMessage` deliberately drops `reason === 'missing'` (`src/providers/trae/importer.ts:69-77`), so an unusual install gets "not detected" with no evidence — while `TraeImportFailure[]` already carries `{path, reason, message}`. |
+| B8 | **Model-picker capability tags** | Picker rows read `[200K · Vision · Coding] <description>`. | `ref-clinebot/lib/models.js:262-276` | **S** | `contextWindow` and `inputModalities` are already discovered (`src/providers/common.ts:461-491`); only the composed prefix is missing. |
+
+### C. Cross-provider surfaces (no single-provider reference has these)
+
+| # | Surface | What the user gets | Reference basis | Effort |
+| --- | --- | --- | --- | --- |
+| C2 | **Per-model → account routing rules** | A settings card of `[models...] -> [account slot]` rows ("always send Opus to account B"), fed by a host-side catalog read so the browser never calls the provider API, with search, tier grouping and stale-id detection. | `ref-commandcode-provider/src/client/model-select.ts:98-148` | M (the `modelDefaults` endpoint shape is the template) |
+| C3 | **Per-session account badge + switch** | A header badge naming the pool account actually serving this session, with the option to pin the session elsewhere. | `ref-clinebot/lib/slash-command.js:75-89` | M (needs per-session account pinning in the pool adapter) |
+
+### Structural note
+
+The hub mounts **one** of the seats its references use: `settings.section` only
+(`src/client/index.ts:119-126`). `ref-cline-pass` mounts `settings.section` +
+`settings.plugin.item` + `settings.models.provider-card`, and `ref-clinebot`
+mounts `plugins.item` + `plugins.row.config` + `settings.plugin.item`. Verified
+present on the installed engine (0.1.5-rc.2) and unused by the hub:
+`sidebar.footer.action`, `main`, `settings.models.provider-card`,
+`settings.models.footer`, `settings.plugin.item`, `settings.plugins.tab`,
+`settings.action`, `settings.onboarding`, `settings.general.item`,
+`conversation.session.header.actions`, `conversation.input.left`,
+`conversation.composer.bar`, `conversation.chat.turnTail`. A user who looks for
+provider configuration on the Plugins page or beside the Models-page error
+currently cannot find the plugin there at all.
+
+### Suggested first tranche (all small, all immediately noticeable)
+
+A3 (request-image downscale) · B2 (test a key) · B3 (quota banner) · B7 (paths
+diagnostic) · A2 (quota panel). The first four are S effort and reuse data the
+hub already has; A2 is the one M that moves quota from behind a settings page to
+always-on-screen.
