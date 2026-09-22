@@ -1,10 +1,17 @@
 # Reference-project audit — findings and dispositions
 
-> **Status of the adoption round.** Landed so far: **F1, F2, F3, F6, F8, A3** and
-> the model-list surface (vendor marks + input-modality glyphs). Still open from
-> the user's list: **F4, F5, F7, B1**. Each landed item's own commit message
-> carries its evidence; the entries below keep the original analysis rather than
-> being rewritten to match the outcome.
+> **Status of the adoption round.** Landed: **F1, F2, F3, F4, F5, F6, F7, F8, A3,
+> B1** and the model-list surface (vendor marks + input-modality glyphs) — the
+> full list the user approved. Remaining from Part 2 are the medium/lower items
+> (F9-F19, F20-F28) and the open cross-cutting items in Part 3. Each landed item's
+> own commit message carries its evidence; the entries below keep the original
+> analysis rather than being rewritten to match the outcome.
+>
+> **F5's verification boundary:** the international gateways are transcribed from
+> the reference's evidence, not probed from here (no international credential).
+> They are only selected for a credential that claims the `ai` region, so a CN
+> account cannot be routed onto an unverified address. Both international hosts
+> were probed and resolve.
 >
 > **Agent Arena scores were tried and dropped** (the user decided against showing
 > them). The research is recorded here so a future attempt does not repeat it:
