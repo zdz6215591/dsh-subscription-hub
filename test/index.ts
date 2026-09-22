@@ -33,3 +33,4 @@ import './cline.spec.js'
 // Registered late: this file existed but was never listed here, so its four
 // agy thoughtSignature tests silently never ran in the directory run.
 import './agy-signature.spec.js'
+import './image-request.spec.js'

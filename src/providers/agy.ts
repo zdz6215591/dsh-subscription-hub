@@ -49,6 +49,7 @@ import { fetchAvailableModels, listAgyModels, parseAgyQuotaUsage, resolveAgyMode
 import { parseAgySse } from './agy/parse.js'
 import { recordToolSignature } from './agy/signature-cache.js'
 import { toAgyRequestBody } from './agy/translate.js'
+import { readRequestImage } from '../translate/image-request.js'
 
 export const AGY_PREEMPT_MS = 2 * 60_000
 
@@ -633,9 +634,9 @@ export class AgyAdapter extends LlmAdapter {
           if (store === undefined) {
             throw new LlmError('agy image input requires the attachment service', 'UNSUPPORTED_CONTENT')
           }
-          const stored = await store.readImage(block.attachment, options.signal)
+          const stored = await readRequestImage(store, block.attachment, options.signal)
           images.set(block.attachment.attachmentId, {
-            mediaType: stored.ref.mediaType,
+            mediaType: stored.mediaType,
             data: Buffer.from(stored.data).toString('base64'),
           })
         }

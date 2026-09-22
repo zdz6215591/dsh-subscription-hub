@@ -9,6 +9,7 @@
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, Message, ToolResultBlock } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
+import { readRequestImage } from './image-request.js'
 
 /** An image block with its bytes resolved to inline base64 for the wire. */
 export interface ResolvedImagePart {
@@ -95,11 +96,14 @@ export async function resolveImages(
       return [{ ...block, content: (await Promise.all(block.content.map(resolveBlock))).flat() }]
     }
     if (block.type !== 'image') return [block]
-    const stored = await attachments.readImage(block.attachment, signal)
-    const { attachmentId, mediaType, bytes, width, height, name } = stored.ref
+    // The model-request version, not the stored original: the provider would
+    // downscale to its own tile budget anyway, and this history is replayed on
+    // every turn of the session.
+    const stored = await readRequestImage(attachments, block.attachment, signal)
+    const { attachmentId, mediaType, bytes, width, height, name } = block.attachment
     return [{
       type: 'image',
-      mediaType: stored.ref.mediaType,
+      mediaType: stored.mediaType,
       dataBase64: Buffer.from(stored.data).toString('base64'),
     }, {
       type: 'text',
