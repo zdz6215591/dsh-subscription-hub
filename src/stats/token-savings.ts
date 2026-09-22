@@ -12,14 +12,16 @@
  * against an API key.
  *
  * TWO TRANSCRIPT GENERATIONS MUST BOTH BE READ. A turn's usage is recorded in
- * one of two places, and which one depends on the transcript format, never on the
- * provider:
+ * one of three places, and which one depends on the transcript format, never on
+ * the provider:
  *
  *  - `session.jsonl.zstd` (legacy) writes a `usage` chunk into the stream, i.e.
  *    `assistant/chunk` -> `chunk.usage`;
  *  - `session.v3.jsonl.zstd` (current) writes NO stream chunks at all and hangs
  *    the same numbers off the settled message, i.e. `assistant/message` ->
- *    `data.usage`.
+ *    `data.usage`;
+ *  - a context compaction is its own request, recorded as `compaction/summary` ->
+ *    `data.usage` with its own `provider`/`model`.
  *
  * Reading only the chunk carrier silently priced the legacy generation and
  * skipped every session recorded in the current one — which, measured over this
@@ -27,11 +29,19 @@
  * estimate), Cline included in full. Where a transcript carries both, the values
  * are IDENTICAL per (turn, step) — verified across every file that has both — so
  * the two are merged by that key and never summed.
+ *
+ * ONE SESSION CAN HOLD BOTH FILES AT ONCE. A directory written across the format
+ * change keeps the legacy transcript beside the new one, and the two then repeat
+ * a large core of the same requests verbatim: 349M tokens across this machine's
+ * 56 dual-format directories, which is 5% of the estimate. The walk therefore
+ * deduplicates per DIRECTORY by request identity (provider, model, every billed
+ * bucket and the timestamp) — never globally, so two identical requests in two
+ * different sessions stay two requests.
  */
 
 import { promises as fs } from 'node:fs'
 import { randomBytes } from 'node:crypto'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import * as zlib from 'node:zlib'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import type { TokenUsage } from '@deepseek-ai/dsh-llm'
@@ -69,7 +79,7 @@ export interface TokenSavingsSummary {
 }
 
 /** Bumped whenever the scan's reading or pricing changes what the totals mean. */
-export const SCAN_VERSION = 2
+export const SCAN_VERSION = 3
 
 const SUBSCRIPTION_PROVIDERS = new Set([
   'codex',
@@ -173,20 +183,54 @@ interface BilledTurn {
   usage: TokenUsage
   /** The transcript timestamp, which decides peak/off-peak; undefined when absent. */
   at: number | undefined
+  /**
+   * Identity of the request itself: provider, model, every billed bucket and the
+   * timestamp.
+   *
+   * One session's directory can hold BOTH transcript files at once (DSH rewrites
+   * the transcript into the current format while keeping the old one), and the
+   * two then repeat a large core of the same requests verbatim — 349M tokens
+   * across this machine's 56 dual-format directories, billed twice. Records that
+   * agree on all of these fields are the same request; nothing else is.
+   */
+  signature: string
+}
+
+/** The identity spelled out above, from the fields a turn already carries. */
+function signatureOf(provider: string, model: string, usage: TokenUsage, at: number | undefined): string {
+  const bucket = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) ? value : 0)
+  return [
+    provider,
+    model,
+    bucket(usage.inputTokens),
+    bucket(usage.outputTokens),
+    bucket(usage.cacheReadTokens),
+    bucket(usage.cacheWriteTokens),
+    at ?? '',
+  ].join('|')
 }
 
 /**
  * Every billed turn in one transcript, whichever carrier it uses.
  *
- * A turn is identified by `(turn, step)` so the two carriers merge instead of
- * double-counting; the chunk carrier wins that merge, being the stream's own
- * record. Events without a turn/step pair get a unique key, because no
- * deduplication is possible without one and dropping them would lose usage.
+ * Three carriers exist, and a turn uses exactly one of them:
+ *
+ *  - `assistant/chunk` -> `chunk.usage` (the legacy transcript format);
+ *  - `assistant/message` -> `data.usage` (the current format, which writes no
+ *    stream chunks at all);
+ *  - `compaction/summary` -> `data.usage`, a summarizer request that carries its
+ *    own `provider`/`model` because it is not part of a turn — the context
+ *    compaction itself is billed, and reading only turns left it uncounted.
+ *
+ * A turn is identified by `(turn, step)` so the two per-turn carriers merge
+ * instead of double-counting; the chunk carrier wins that merge, being the
+ * stream's own record. Events without a turn/step pair get a unique key, because
+ * no deduplication is possible without one and dropping them would lose usage.
  * @param content - the decompressed transcript.
- * @returns one entry per billed turn.
+ * @returns one entry per billed request.
  */
 function collectBilledTurns(content: string): BilledTurn[] {
-  const turns = new Map<string, BilledTurn & { carrier: 'chunk' | 'message' }>()
+  const turns = new Map<string, BilledTurn & { carrier: 'chunk' | 'message' | 'compaction' }>()
   let provider = ''
   let model = ''
   let unique = 0
@@ -198,6 +242,8 @@ function collectBilledTurns(content: string): BilledTurn[] {
       data?: {
         turn?: number
         step?: number
+        provider?: string
+        model?: string
         header?: { config?: { provider?: string; model?: string } }
         chunk?: { type?: string; usage?: TokenUsage }
         usage?: TokenUsage
@@ -216,27 +262,39 @@ function collectBilledTurns(content: string): BilledTurn[] {
     const data = event.data
     if (data === undefined) continue
     let usage: TokenUsage | undefined
-    let carrier: 'chunk' | 'message'
+    let carrier: 'chunk' | 'message' | 'compaction'
+    // A compaction summary names its own route: it is not the session's model.
+    let turnProvider = provider
+    let turnModel = model
     if (event.type === 'assistant/chunk' && data.chunk?.type === 'usage') {
       usage = data.chunk.usage
       carrier = 'chunk'
     } else if (event.type === 'assistant/message' && data.usage !== undefined) {
       usage = data.usage
       carrier = 'message'
+    } else if (event.type === 'compaction/summary' && data.usage !== undefined) {
+      usage = data.usage
+      carrier = 'compaction'
+      turnProvider = data.provider ?? provider
+      turnModel = data.model ?? model
     } else {
       continue
     }
     if (usage === undefined || usage === null || typeof usage !== 'object') continue
-    const key = typeof data.turn === 'number' && typeof data.step === 'number'
-      ? `${String(data.turn)}/${String(data.step)}`
-      : `#${String(unique++)}`
+    const key = carrier === 'compaction'
+      ? `compaction:${String(unique++)}`
+      : typeof data.turn === 'number' && typeof data.step === 'number'
+        ? `${String(data.turn)}/${String(data.step)}`
+        : `#${String(unique++)}`
     const existing = turns.get(key)
     if (existing !== undefined && !(existing.carrier === 'message' && carrier === 'chunk')) continue
+    const at = typeof event.time === 'number' && Number.isFinite(event.time) ? event.time : undefined
     turns.set(key, {
-      provider,
-      model,
+      provider: turnProvider,
+      model: turnModel,
       usage,
-      at: typeof event.time === 'number' && Number.isFinite(event.time) ? event.time : undefined,
+      at,
+      signature: signatureOf(turnProvider, turnModel, usage, at),
       carrier,
     })
   }
@@ -365,17 +423,36 @@ async function runScan(): Promise<TokenSavingsSummary> {
     const files = await walkSessionFiles(sessionsDir)
     const acc = emptyAccumulator()
 
+    // Group by session directory: a directory written across the transcript
+    // format change holds BOTH files, and they repeat a core of the same
+    // requests. Dedup is scoped to that group, never global — two identical
+    // requests in different sessions are two requests.
+    const byDirectory = new Map<string, string[]>()
     for (const file of files) {
-      let content: string
-      try {
-        const raw = await fs.readFile(file)
-        content = (await decompressZstd(raw)).toString('utf8')
-      } catch {
-        continue
-      }
-      for (const turn of collectBilledTurns(content)) {
-        if (!SUBSCRIPTION_PROVIDERS.has(turn.provider)) continue
-        accumulateTurn(acc, turn.provider, turn.model, turn.usage, turn.at)
+      const dir = dirname(file)
+      const list = byDirectory.get(dir)
+      if (list === undefined) byDirectory.set(dir, [file])
+      else list.push(file)
+    }
+
+    for (const directory of byDirectory.values()) {
+      /** Signature -> the transcript that already claimed it in this directory. */
+      const claimed = new Map<string, string>()
+      for (const file of directory) {
+        let content: string
+        try {
+          const raw = await fs.readFile(file)
+          content = (await decompressZstd(raw)).toString('utf8')
+        } catch {
+          continue
+        }
+        for (const turn of collectBilledTurns(content)) {
+          if (!SUBSCRIPTION_PROVIDERS.has(turn.provider)) continue
+          const owner = claimed.get(turn.signature)
+          if (owner !== undefined && owner !== file) continue
+          claimed.set(turn.signature, file)
+          accumulateTurn(acc, turn.provider, turn.model, turn.usage, turn.at)
+        }
       }
     }
 

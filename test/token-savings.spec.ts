@@ -295,6 +295,66 @@ test('a scan tolerates an unreadable transcript instead of failing', async () =>
   })
 })
 
+/** Write one transcript under an explicit session directory (two files, one session). */
+function writeInSession(dir: string, session: string, name: string, lines: object[]): void {
+  const sessionDir = join(dir, 'sessions', session)
+  mkdirSync(sessionDir, { recursive: true })
+  const body = `${lines.map(line => JSON.stringify(line)).join('\n')}\n`
+  writeFileSync(join(sessionDir, name), zlib.zstdCompressSync(Buffer.from(body, 'utf8')))
+}
+
+test('one session recorded in BOTH transcript formats is counted once', async () => {
+  await withScratchHome(async (dir) => {
+    // A real session crosses the format change: the legacy file keeps the turns
+    // it already wrote, the new file rewrites a core of them and adds the rest.
+    const shared = { inputTokens: 100_000, outputTokens: 1_000 }
+    writeInSession(dir, 'migrated', 'session.jsonl.zstd', [
+      headerEvent('grok', 'grok-4.6'),
+      chunkEvent(1, 1, shared, MONDAY_OFF_PEAK),
+      chunkEvent(2, 1, { inputTokens: 50_000 }, MONDAY_OFF_PEAK),
+    ])
+    writeInSession(dir, 'migrated', 'session.v3.jsonl.zstd', [
+      headerEvent('grok', 'grok-4.6'),
+      messageEvent(1, 1, shared, MONDAY_OFF_PEAK),
+      messageEvent(3, 1, { inputTokens: 25_000 }, MONDAY_OFF_PEAK),
+    ])
+    // An identical request in a DIFFERENT session is a different request: the
+    // dedup is scoped to one session directory, never global.
+    writeInSession(dir, 'other-session', 'session.v3.jsonl.zstd', [
+      headerEvent('grok', 'grok-4.6'),
+      messageEvent(1, 1, shared, MONDAY_OFF_PEAK),
+    ])
+
+    const summary = await scanSessionHistory(true)
+    // 5 records exist, 4 are billed: turn 1/1 twice (one session's two files) and
+    // the other session's copy once, plus each file's unique turn.
+    assert.equal(summary.turns, 4)
+    assert.equal(summary.totalTokens, 277_000)
+    assert.equal(summary.byProvider.grok?.turns, 4)
+  })
+})
+
+test('a compaction summary is billed, as its own route', async () => {
+  await withScratchHome(async (dir) => {
+    writeTranscript(dir, 'compacted', [
+      headerEvent('grok', 'grok-4.6'),
+      chunkEvent(1, 1, { inputTokens: 100_000 }, MONDAY_OFF_PEAK),
+      // The summarizer call: its own provider/model, no turn/step, and the same
+      // numbers are NOT repeated on any message event.
+      { type: 'compaction/summary', time: MONDAY_OFF_PEAK, data: { provider: 'cline', model: 'cline-pass/deepseek-v4.1-flash', usage: { inputTokens: 200_000, outputTokens: 2_000 } } },
+    ])
+    const summary = await scanSessionHistory(true)
+    assert.equal(summary.turns, 2)
+    assert.equal(summary.totalTokens, 302_000)
+    // grok: 100k input at 2/M; the compaction's own row prices the deepseek leg.
+    assert.equal(summary.byProvider.grok?.turns, 1)
+    assert.equal(summary.byProvider.cline?.turns, 1)
+    close(summary.byProvider.grok?.costUsd, 0.2)
+    // 200k input at the DeepSeek row's off-peak 0.15/M, plus 2k output at 0.6/M.
+    close(summary.byProvider.cline?.costUsd, 0.0312)
+  })
+})
+
 // Last on purpose: with no loaded summary the hook starts a background walk, so
 // it runs after every test that depends on a scratch home. It asserts nothing
 // beyond "does not throw", being a no-op path inside a stream wrapper.

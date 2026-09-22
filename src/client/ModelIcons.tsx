@@ -28,6 +28,7 @@
 
 import type { ModelVendor } from '../model-vendor.js'
 import type { InputModality } from '../providers/modality.js'
+import { VENDOR_BADGES } from './vendor-badges.js'
 
 /** Shared stroke geometry: one weight for every mark in the set. */
 const STROKE = {
@@ -41,6 +42,8 @@ const STROKE = {
 const BOX = '0 0 16 16'
 /** Rendered size of a vendor mark. */
 const VENDOR_SIZE = 15
+/** Rendered size of a vendored vendor badge. */
+const BADGE_SIZE = 16
 /** Rendered size of a modality glyph. */
 const MODALITY_SIZE = 14
 
@@ -106,12 +109,22 @@ const VENDOR_MARKS: Readonly<Record<string, React.JSX.Element>> = {
 const GENERIC_MARK = (<><circle cx="8" cy="8" r="5.4" /><path d="M8 2.6v10.8M2.6 8h10.8" /></>)
 
 /**
- * The vendor mark: a line-art glyph in the muted text tone.
+ * The vendor mark.
  *
- * No border and no fill, so a long list reads as one quiet column of marks.
+ * A real badge when the vendor has one vendored (see `vendor-badges.ts`): the
+ * 20x20 rounded mark in the vendor's own colour with its logo knocked out in
+ * white, which is what makes the list read as one icon set. Otherwise the
+ * line-art mark below.
+ *
+ * The badge markup is injected as HTML rather than built from JSX elements,
+ * because it is the vendors' own path data and re-expressing it as JSX would be
+ * a lossy transcription. It is VENDORED at build time from a fixed file set and
+ * never derived from runtime input, so there is nothing untrusted in it.
+ *
  * @param props - the vendor to render.
  */
 export function VendorMark({ vendor }: { vendor: ModelVendor }): React.JSX.Element {
+  const badge = VENDOR_BADGES[vendor.id]
   return (
     <span
       aria-hidden="true"
@@ -120,15 +133,29 @@ export function VendorMark({ vendor }: { vendor: ModelVendor }): React.JSX.Eleme
         display: 'inline-flex',
         alignItems: 'center',
         justifyContent: 'center',
-        width: 16,
-        height: 16,
+        width: BADGE_SIZE,
+        height: BADGE_SIZE,
         flex: '0 0 auto',
         color: 'var(--dsw-alias-label-tertiary, #8b8b93)',
       }}
     >
-      <svg width={VENDOR_SIZE} height={VENDOR_SIZE} viewBox={BOX} {...STROKE}>
-        {VENDOR_MARKS[vendor.id] ?? GENERIC_MARK}
-      </svg>
+      {badge === undefined
+        ? (
+          <svg width={VENDOR_SIZE} height={VENDOR_SIZE} viewBox={BOX} {...STROKE}>
+            {VENDOR_MARKS[vendor.id] ?? GENERIC_MARK}
+          </svg>
+        )
+        : (
+          // `viewBox` comes from the badge's own 20x20 frame; width/height are
+          // ours, so one badge set renders at whatever the row needs.
+          <svg
+            width={BADGE_SIZE}
+            height={BADGE_SIZE}
+            viewBox="0 0 20 20"
+            aria-hidden="true"
+            dangerouslySetInnerHTML={{ __html: badge }}
+          />
+        )}
     </span>
   )
 }
