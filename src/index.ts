@@ -277,7 +277,10 @@ const modelEntrySchema: z<ModelEntry> = z.object({
   name: z.string(),
   contextWindow: z.number().step(1).min(1),
   maxTokens: z.number().step(1).min(1),
-  inputModalities: z.array(z.union(['text', 'image'])),
+  // The full vocabulary, so a config can describe a video- or audio-accepting
+  // model. Accepting the value does not make the request path able to send it —
+  // declaring a capability is honest, pretending to use it would not be.
+  inputModalities: z.array(z.union(['text', 'image', 'video', 'audio', 'file'])),
   wire: z.union(['chat-completions', 'responses']),
 })
 

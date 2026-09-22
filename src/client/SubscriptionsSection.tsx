@@ -19,6 +19,7 @@ import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 import { callSubscriptionsAuth, SubscriptionsAuthError } from './subscriptions-rpc.js'
 import { ModalityIcons, VendorMark } from './ModelIcons.js'
+import type { InputModality } from '../providers/modality.js'
 export { callSubscriptionsAuth, SubscriptionsAuthError } from './subscriptions-rpc.js'
 
 /** Poll cadence while a provider login attempt is busy. */
@@ -107,7 +108,7 @@ export interface VisibleModelView {
   /** Owning vendor, resolved host-side; absent when the id names none. */
   vendor?: { id: string; label: string; mono: string }
   /** Accepted input modalities; absent when the route never declared them. */
-  inputModalities?: string[]
+  inputModalities?: InputModality[]
 }
 
 /** The one-click auto-configure report, as answered by `clineAutoConfigure`. */
@@ -2628,14 +2629,15 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                                   checked={model.visible}
                                   onChange={event => { void setVisible(id, model.id, event.target.checked) }}
                                 />
-                                {/* Vendor mark, name, then the capability glyphs: the row
-                                    answers "who makes this, and what does it take?". */}
+                                {/* Vendor mark, then the name, then the capability
+                                    glyphs immediately after it: the row answers
+                                    "who makes this, and what does it take?" without
+                                    the reader's eye crossing the whole row. */}
                                 {model.vendor !== undefined && <VendorMark vendor={model.vendor} />}
                                 <span style={styles.defaultEffortName} title={model.id}>
                                   {model.name}
                                   {model.unread && <span style={styles.unreadModelDot} title={t('newModelBadge')} />}
                                 </span>
-                                <span style={styles.visibilitySpacer} />
                                 <ModalityIcons modalities={model.inputModalities} />
                               </label>
                             ))}

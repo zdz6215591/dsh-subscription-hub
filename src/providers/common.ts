@@ -28,7 +28,7 @@ export interface ModelEntry {
   /** Per-request output cap for this model. */
   maxTokens?: number
   /** Accepted request modalities; when set, wins over the provider default. */
-  inputModalities?: ('text' | 'image')[]
+  inputModalities?: InputModality[]
   /**
    * Force this model's upstream protocol. Only the copilot adapter consumes
    * the semantics; the union is inlined here to avoid a circular import of
@@ -57,10 +57,12 @@ export function validateModels(models: readonly ModelEntry[], label: string): Mo
     if (model.maxTokens !== undefined && (!Number.isInteger(model.maxTokens) || model.maxTokens <= 0)) {
       throw new Error(`${label}: catalog model "${model.id}" maxTokens must be a positive integer`)
     }
-    if (model.inputModalities !== undefined
-      && (model.inputModalities.length === 0
-        || model.inputModalities.some(modality => modality !== 'text' && modality !== 'image'))) {
-      throw new Error(`${label}: catalog model "${model.id}" inputModalities must be a non-empty list of "text"/"image"`)
+    // Only emptiness is rejected. An unrecognised modality is the caller's to
+    // drop (see `normalizeInputModalities`): refusing a whole model because a
+    // catalog began disclosing something new would take a route down over a
+    // field no request depends on.
+    if (model.inputModalities !== undefined && model.inputModalities.length === 0) {
+      throw new Error(`${label}: catalog model "${model.id}" inputModalities must not be empty`)
     }
     if (model.wire !== undefined && model.wire !== 'chat-completions' && model.wire !== 'responses') {
       throw new Error(`${label}: catalog model "${model.id}" wire must be "chat-completions" or "responses"`)
@@ -458,7 +460,9 @@ export interface ProviderUsage {
   limit?: number
 }
 
-/** One model discovered from a provider's live model-list endpoint. */
+/** Every input modality this hub can describe. */
+export type { InputModality } from './modality.js'
+import type { InputModality } from './modality.js'
 export interface DiscoveredModel {
   /** Wire model id. */
   id: string
@@ -475,7 +479,7 @@ export interface DiscoveredModel {
     defaultEffort?: ReasoningEffortId
   }
   /** Accepted request modalities the endpoint advertised (e.g. Copilot's vision support flag). */
-  inputModalities?: ('text' | 'image')[]
+  inputModalities?: InputModality[]
   /** Claude-specific: which extended-thinking wire shape this model accepts. */
   thinkingType?: 'enabled' | 'adaptive'
   /** Codex-specific: the catalog advertises a fast (priority) service tier. */

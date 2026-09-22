@@ -1,3 +1,4 @@
+import type { InputModality } from './modality.js'
 /**
  * ChatGPT/Codex subscription provider: OAuth against auth.openai.com with the
  * Codex CLI client id, and streaming against the ChatGPT backend Responses
@@ -107,7 +108,7 @@ const CODEX_EFFORTS = [
 ] as const
 const CODEX_DEFAULT_EFFORT = ReasoningEffortId('high')
 /** Every gpt-5.x codex model accepts image input. */
-const CODEX_MODALITIES: readonly ('text' | 'image')[] = ['text', 'image']
+const CODEX_MODALITIES: readonly InputModality[] = ['text', 'image']
 
 /**
  * Fast tier (the codex CLI's "fast mode"): the Responses `service_tier` wire

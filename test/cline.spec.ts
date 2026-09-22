@@ -334,9 +334,11 @@ test('parseClineCatalogEntry maps a subscription id onto its catalog slug', () =
   assert.equal(glm?.reasoning, true)
   assert.equal(glm?.source, 'cline')
 
-  // The audio/video modalities collapse onto the harness's image flag.
+  // Every modality the catalog names is KEPT. This used to collapse
+  // video/audio/pdf onto `image`, which made a model that accepts a screen
+  // recording indistinguishable from one that accepts a screenshot.
   const mimo = parseClineCatalogEntry('cline-pass/mimo-v2.6-flash', catalog)
-  assert.deepEqual(mimo?.input, ['text', 'image'])
+  assert.deepEqual(mimo?.input, ['text', 'image', 'video', 'audio'])
   assert.equal(mimo?.reasoning, false)
 
   // The explicit override reaches the id prefix guessing cannot.
@@ -375,10 +377,12 @@ test('parseModelsDevEfforts reads the published reasoning levels', () => {
   assert.equal(qwen?.maxTokens, 65_536)
   assert.equal(qwen?.source, 'models.dev')
 
-  // Video/pdf collapse onto image; `none` is only prepended once.
+  // `none` is only prepended once, and the modalities are kept as published:
+  // models.dev names `video` and `pdf`, and folding those onto `image` is what
+  // made every model look alike. `pdf` normalizes to the `file` modality.
   const glm = parseModelsDevEfforts('cline-pass/glm-5.3-flash', registry)
   assert.deepEqual(glm?.efforts, ['none', 'low', 'high', 'max'])
-  assert.deepEqual(glm?.input, ['text', 'image'])
+  assert.deepEqual(glm?.input, ['text', 'image', 'video', 'file'])
 
   assert.equal(parseModelsDevEfforts('cline-pass/unknown', registry), undefined)
 })

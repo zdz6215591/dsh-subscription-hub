@@ -1,3 +1,5 @@
+import { normalizeInputModalities } from './modality.js'
+import type { InputModality } from './modality.js'
 /**
  * On-disk discovered-model-catalog cache at
  * `~/.dsh/plugins/subscriptions/models.json` — the durable half of each
@@ -83,9 +85,13 @@ function sanitizeModel(value: unknown): DiscoveredModel | undefined {
   const copilotResponses = raw.copilotResponses
   if (copilotResponses !== undefined && typeof copilotResponses !== 'boolean') return undefined
   const inputModalities = raw.inputModalities
-  if (inputModalities !== undefined
-    && (!Array.isArray(inputModalities) || inputModalities.length === 0
-      || inputModalities.some(modality => modality !== 'text' && modality !== 'image'))) return undefined
+  // Normalized rather than rejected: a snapshot written by an older build may
+  // spell a modality differently, and discarding the whole provider's cache over
+  // that would lose every model's window and reasoning metadata with it.
+  const modalities = inputModalities === undefined
+    ? undefined
+    : Array.isArray(inputModalities) ? normalizeInputModalities(inputModalities) : undefined
+  if (inputModalities !== undefined && modalities === undefined) return undefined
   return {
     id: raw.id,
     name: raw.name,
@@ -97,7 +103,7 @@ function sanitizeModel(value: unknown): DiscoveredModel | undefined {
     ...fastTier === undefined ? {} : { fastTier },
     ...copilotWire === undefined ? {} : { copilotWire: copilotWire as 'chat-completions' | 'responses' },
     ...copilotResponses === undefined ? {} : { copilotResponses },
-    ...inputModalities === undefined ? {} : { inputModalities: [...inputModalities] as ('text' | 'image')[] },
+    ...modalities === undefined ? {} : { inputModalities: modalities },
   }
 }
 

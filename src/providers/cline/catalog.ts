@@ -1,3 +1,5 @@
+import { normalizeInputModalities } from '../modality.js'
+import type { InputModality } from '../modality.js'
 /**
  * Cline (ClinePass) model catalog.
  *
@@ -58,7 +60,7 @@ export interface ClineModel {
   name: string
   contextWindow: number
   maxTokens: number
-  input: ('text' | 'image')[]
+  input: InputModality[]
   /** Whether the gateway accepts a `reasoning_effort` for it at all. */
   reasoning: boolean
   /**
@@ -173,11 +175,12 @@ function positiveNumber(value: unknown): number | undefined {
 }
 
 /** Map an `architecture.input_modalities` list onto harness modalities. */
-function inputModalities(value: unknown): ('text' | 'image')[] | undefined {
+function inputModalities(value: unknown): InputModality[] | undefined {
   if (!Array.isArray(value)) return undefined
-  const out: ('text' | 'image')[] = ['text']
-  if (value.some(entry => entry === 'image')) out.push('image')
-  return out
+  // Text is IMPLIED rather than declared here: every model in this catalog
+  // answers in text, and the upstream list names only the extra modalities.
+  const declared = normalizeInputModalities(value) ?? []
+  return ['text', ...declared.filter(modality => modality !== 'text')]
 }
 
 /**
@@ -248,9 +251,11 @@ export function parseModelsDevEfforts(clinePassId: string, registry: unknown): P
   const maxTokens = positiveNumber(limit?.output)
   const modalities = isRecord(entry.modalities) ? entry.modalities : undefined
   const inputRaw = Array.isArray(modalities?.input) ? modalities.input : undefined
-  const input = inputRaw === undefined
-    ? undefined
-    : inputModalities(inputRaw.map(value => (value === 'image' || value === 'video' || value === 'pdf' ? 'image' : value)))
+  // models.dev names `video` and `pdf` for a real set of models, and this used to
+  // collapse all three onto `image` — so a reader could not tell a model that
+  // accepts a screenshot from one that accepts a screen recording. The shared
+  // normalizer keeps `video` as video and folds `pdf` onto `file`.
+  const input = inputRaw === undefined ? undefined : normalizeInputModalities(inputRaw)
   const reasoning = entry.reasoning === true || efforts.length > 0
   return {
     ...contextWindow === undefined ? {} : { contextWindow },

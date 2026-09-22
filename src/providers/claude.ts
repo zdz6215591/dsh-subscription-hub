@@ -1,3 +1,4 @@
+import type { InputModality } from './modality.js'
 /**
  * Claude Pro/Max subscription provider: OAuth against claude.ai /
  * platform.claude.com with the Claude Code client id, and streaming against
@@ -499,7 +500,7 @@ export interface ClaudeAdapterOptions {
 }
 
 /** The Claude 4.5 family accepts image input. */
-const CLAUDE_MODALITIES: readonly ('text' | 'image')[] = ['text', 'image']
+const CLAUDE_MODALITIES: readonly InputModality[] = ['text', 'image']
 
 /**
  * Assemble the Anthropic request body.

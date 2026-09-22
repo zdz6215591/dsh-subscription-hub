@@ -78,13 +78,33 @@ test('sanitizeSnapshot drops malformed snapshots wholesale', () => {
     true,
   )
   assert.equal(sanitizeSnapshot({ at: 1, models: [{ ...model, fastTier: 'yes' }] }), undefined)
-  // Copilot per-model modalities round-trip; malformed ones drop the snapshot.
+  // Per-model modalities round-trip, and the vocabulary is the WIDENED one: a
+  // model whose catalog discloses video or a document must keep saying so, since
+  // flattening those onto `image` is what made every model look the same.
   assert.deepEqual(
     sanitizeSnapshot({ at: 1, models: [{ ...model, inputModalities: ['text', 'image'] }] })?.models[0].inputModalities,
     ['text', 'image'],
   )
+  assert.deepEqual(
+    sanitizeSnapshot({ at: 1, models: [{ ...model, inputModalities: ['text', 'image', 'video', 'audio', 'file'] }] })?.models[0].inputModalities,
+    ['text', 'image', 'video', 'audio', 'file'],
+  )
+  // An empty list is malformed: it claims the model accepts nothing.
   assert.equal(sanitizeSnapshot({ at: 1, models: [{ ...model, inputModalities: [] }] }), undefined)
-  assert.equal(sanitizeSnapshot({ at: 1, models: [{ ...model, inputModalities: ['video'] }] }), undefined)
+  // `video` alone is legal now — this assertion used to pin the opposite.
+  assert.deepEqual(
+    sanitizeSnapshot({ at: 1, models: [{ ...model, inputModalities: ['video'] }] })?.models[0].inputModalities,
+    ['video'],
+  )
+  // An ALIAS is folded rather than rejected, so a snapshot written with a
+  // document spelling survives.
+  assert.deepEqual(
+    sanitizeSnapshot({ at: 1, models: [{ ...model, inputModalities: ['text', 'pdf'] }] })?.models[0].inputModalities,
+    ['text', 'file'],
+  )
+  // A list of nothing but unknown values is unreadable, so the snapshot drops.
+  assert.equal(sanitizeSnapshot({ at: 1, models: [{ ...model, inputModalities: ['hologram'] }] }), undefined)
+  assert.equal(sanitizeSnapshot({ at: 1, models: [{ ...model, inputModalities: 'text' }] }), undefined)
   // The Copilot wire choice and dual-protocol flag round-trip (a snapshot
   // losing them would route every restarted model to the chat wire); a
   // malformed value drops the snapshot.

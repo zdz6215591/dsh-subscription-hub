@@ -1,3 +1,4 @@
+import type { InputModality } from './modality.js'
 /**
  * Grok (X Premium / xAI) subscription provider: OIDC-discovered OAuth against
  * auth.x.ai with the Grok CLI client id, and streaming against the xAI
@@ -399,7 +400,7 @@ export const GROK_MODELS_URL = 'https://api.x.ai/v1/models'
  * Input modalities for one grok model: chat models (grok-4 family) accept
  * images; code and embedding models are text-only.
  */
-function grokModalities(id: string): readonly ('text' | 'image')[] {
+function grokModalities(id: string): readonly InputModality[] {
   return /code|embed/i.test(id) ? ['text'] : ['text', 'image']
 }
 

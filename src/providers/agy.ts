@@ -1,3 +1,4 @@
+import type { InputModality } from './modality.js'
 /**
  * Google Antigravity over HTTP OAuth (no `agy` CLI, no cmd.exe windows).
  */
@@ -472,7 +473,7 @@ function discoveredFromList(models: readonly LlmModelInfo[]): DiscoveredModel[] 
       id: model.id,
       name: model.name,
       ...meta === undefined ? {} : { contextWindow: meta.contextLength },
-      ...model.inputModalities === undefined ? {} : { inputModalities: [...model.inputModalities] as ('text' | 'image')[] },
+      ...model.inputModalities === undefined ? {} : { inputModalities: [...model.inputModalities] as InputModality[] },
     }
   })
 }
