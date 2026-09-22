@@ -37,6 +37,12 @@ export interface CommandCodeCatalogEntry {
   name: string
   contextWindow: number
   maxTokens: number
+  /**
+   * The gateway declared this model Messages-only. Persisted because it decides
+   * which transport the request uses: dropping it would make a post-restart
+   * request lead with a transport the gateway rejects.
+   */
+  messagesOnly?: boolean
 }
 
 /** Default location, beside the plugin's other durable state. */
@@ -75,7 +81,15 @@ function sanitizeEntry(value: unknown): CommandCodeCatalogEntry | undefined {
   const contextWindow = positive(raw.contextWindow)
   const maxTokens = positive(raw.maxTokens)
   if (contextWindow === undefined || maxTokens === undefined) return undefined
-  return { id: raw.id, name: raw.name, contextWindow, maxTokens }
+  const messagesOnly = raw.messagesOnly
+  if (messagesOnly !== undefined && typeof messagesOnly !== 'boolean') return undefined
+  return {
+    id: raw.id,
+    name: raw.name,
+    contextWindow,
+    maxTokens,
+    ...messagesOnly === undefined ? {} : { messagesOnly },
+  }
 }
 
 /**

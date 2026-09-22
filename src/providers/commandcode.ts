@@ -370,6 +370,19 @@ export function messagesToCommandCode(messages: readonly (Message | Translatable
       for (const block of message.content) {
         if (block.type === 'text') {
           parts.push({ type: 'text', text: block.text })
+        } else if (block.type === 'reasoning') {
+          // Replay the thinking block, exactly as the official CLI's
+          // `toWireMessages` does: a `thinking` block becomes
+          // `{ type: 'reasoning', text }`. This is not politeness — the gateway
+          // rebuilds the provider request from these parts, and a DeepSeek
+          // thinking-mode assistant turn whose tool calls arrive without its
+          // reasoning is rejected outright with "The `reasoning_content` in the
+          // thinking mode must be passed back to the API", which failed every
+          // tool-loop turn on the CLI transport (upstream issue #34). The
+          // Provider API transport replays the same content as
+          // `reasoning_content`; both must carry it or the two transports
+          // behave differently for the same history.
+          parts.push({ type: 'reasoning', text: block.text })
         } else if (block.type === 'tool-call' && paired.has(block.id)) {
           parts.push({
             type: 'tool-call',
@@ -1074,11 +1087,23 @@ function parseCatalogModel(row: Record<string, unknown>): CommandCodeCatalogMode
   const contextLength = coercePositiveNumber(row.context_length ?? row.contextWindow ?? row.context)
   if (contextLength === undefined) return undefined
   const rawMax = coercePositiveNumber(row.max_tokens) ?? coercePositiveNumber(row.max_output_tokens)
+  // The gateway declares which endpoint serves each model. A row listing only
+  // `/messages` is served exclusively through the Anthropic Messages shape, so
+  // the chat-completions transport answers 400 for it — reading the field here
+  // is what lets the request avoid that round trip. Absent means "not
+  // declared", which is left undefined rather than guessed at.
+  const endpoints = Array.isArray(row.supported_endpoints)
+    ? row.supported_endpoints.filter((entry): entry is string => typeof entry === 'string')
+    : undefined
+  const messagesOnly = endpoints !== undefined && endpoints.length > 0
+    ? endpoints.every(endpoint => endpoint === '/messages')
+    : undefined
   return {
     id,
     name,
     contextWindow: contextLength,
     maxTokens: rawMax !== undefined ? rawMax : Math.min(contextLength, DEFAULT_MAX_OUTPUT_TOKENS),
+    ...messagesOnly === undefined ? {} : { messagesOnly },
   }
 }
 
@@ -1268,6 +1293,72 @@ interface CommandCodeCatalogModel {
   name: string
   contextWindow: number
   maxTokens: number
+  /**
+   * The gateway serves this model only through the Anthropic Messages shape
+   * (`supported_endpoints: ['/messages']`), so the chat-completions transport
+   * rejects it with a 400 unless the request goes to the CLI transport.
+   */
+  messagesOnly?: boolean
+}
+
+/**
+ * Models the gateway serves ONLY through the Anthropic Messages shape.
+ *
+ * Verified live: `POST /provider/v1/chat/completions {model: 'claude-sonnet-5'}`
+ * answers
+ * `400 {"error":{"message":"Model \"claude-sonnet-5\" must be called via
+ * /provider/v1/messages (Anthropic Messages shape).","code":"unsupported_model"}}`
+ * — a 400, which the 403-`upgrade_required` fallback never matched, so every
+ * Claude request failed outright on exactly the plans entitled to Claude.
+ * The live catalog also declares this (`supported_endpoints`), which is the
+ * authoritative source; this set covers a cold cache.
+ *
+ * Adapted from Mars-Sea/dsh-commandcode-provider (MIT) `MESSAGES_ONLY_MODELS`.
+ */
+export const COMMANDCODE_MESSAGES_ONLY_MODELS: ReadonlySet<string> = new Set([
+  'claude-sonnet-5',
+  'claude-sonnet-4-6',
+  'claude-fable-5-1',
+  'claude-fable-5',
+  'claude-opus-5',
+  'claude-opus-4-8',
+  'claude-opus-4-7',
+  'claude-haiku-4-5-20251001',
+])
+
+/**
+ * Whether the gateway will only serve `modelId` through the Messages shape.
+ *
+ * The prefix test is deliberate: it covers a Claude model shipped after this
+ * table was written, and the whole Claude family is Messages-only upstream.
+ * @param modelId - the catalog model id.
+ * @returns whether the CLI transport is the only surface that can answer.
+ */
+export function requiresMessagesEndpoint(modelId: string): boolean {
+  return COMMANDCODE_MESSAGES_ONLY_MODELS.has(modelId) || modelId.startsWith('claude-')
+}
+
+/**
+ * Whether a failed chat-completions response is the gateway saying "this model
+ * needs the Messages shape".
+ *
+ * A safety net for a model the prefix test does not recognise: the message is
+ * explicit, and matching it costs one body clone. It deliberately does NOT
+ * record anything per-account or per-key — caching a transport decision on the
+ * account would pin every later model, including the DeepSeek/GLM/Qwen ones,
+ * to the CLI transport.
+ * @param response - the failed response.
+ * @returns whether to retry the same model on the CLI transport.
+ */
+async function needsMessagesTransport(response: Response): Promise<boolean> {
+  if (response.status !== 400) return false
+  let text = ''
+  try {
+    text = (await response.clone().text()).toLowerCase()
+  } catch {
+    return false
+  }
+  return text.includes('unsupported_model') && text.includes('/provider/v1/messages')
 }
 
 export class CommandCodeAdapter extends LlmAdapter {
@@ -1287,6 +1378,20 @@ export class CommandCodeAdapter extends LlmAdapter {
   private durableCatalog(): Promise<CommandCodeCatalogModel[] | undefined> {
     this.durableRead ??= readCommandCodeCatalog(this.options.catalogCachePath).catch(() => undefined)
     return this.durableRead
+  }
+
+  /**
+   * The catalog entry for one model, from memory when a live read has happened
+   * and from the durable roster otherwise.
+   *
+   * Both sources matter: the durable one decides the TRANSPORT for a
+   * Messages-only model, so reading memory alone would make a post-restart
+   * request lead with a transport the gateway rejects.
+   * @param model - the wire model id.
+   * @returns the entry, or undefined when neither source knows it.
+   */
+  private async catalogEntry(model: string): Promise<CommandCodeCatalogModel | undefined> {
+    return this.catalogModel(model) ?? (await this.durableCatalog())?.find(entry => entry.id === model)
   }
 
   /** The live catalog entry for a model from any account, preferring the most recent snapshot. */
@@ -1323,7 +1428,7 @@ export class CommandCodeAdapter extends LlmAdapter {
     // either reasons at a fixed depth or takes no reasoning at all, and the
     // picker must not offer a selector for it.
     const reasoning = commandCodeReasoning(model)
-    let live = this.catalogModel(model)
+    let live = await this.catalogEntry(model)
     if (live === undefined) {
       // Prime the live catalog on the resolve path so a caller that resolves a
       // model before discovery runs still gets the real context/output caps
@@ -1331,16 +1436,8 @@ export class CommandCodeAdapter extends LlmAdapter {
       try {
         const accounts = (await this.options.tokens.list()).map(entry => entry.key)
         if (accounts.length > 0) await this.listOwnModels(provider, accounts[0])
-        live = this.catalogModel(model)
+        live = await this.catalogEntry(model)
       } catch { /* best-effort warm */ }
-    }
-    if (live === undefined) {
-      // The warm-up may have failed. A mid-conversation resolve must still size
-      // the request from the last roster this machine read rather than from an
-      // invented default — this is the path the harness takes for every
-      // capability lookup, so leaving it out would have kept the mis-sizing F8
-      // exists to remove.
-      live = (await this.durableCatalog())?.find(entry => entry.id === model)
     }
     if (live !== undefined) {
       return {
@@ -1467,7 +1564,7 @@ export class CommandCodeAdapter extends LlmAdapter {
       const systemText = [options.system ?? '', ...options.messages.filter(m => m.role === 'system')
         .map(m => m.content.map(blockText).filter(Boolean).join('\n'))]
         .filter(Boolean).join('\n\n')
-      const live = this.catalogModel(options.model)
+      const live = await this.catalogEntry(options.model)
       const configured = this.options.models.find(entry => entry.id === options.model)
       const modelMax = live?.maxTokens ?? configured?.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
       const maxTokens = Math.min(
@@ -1548,26 +1645,40 @@ export class CommandCodeAdapter extends LlmAdapter {
       }
 
       let response: Response
-      let usedProviderApi = true
+      // The configured fetcher, like the catalog read and every other request:
+      // calling `proxiedFetch` directly here made the `fetchFn` option dead on
+      // the streaming path, which is the one path a test most needs to drive.
+      const request = this.options.fetchFn ?? proxiedFetch
+      // Which transport leads. The Provider API is the default because it is the
+      // one that replays reasoning. A Messages-only model (the whole Claude
+      // family — the live catalog declares it, and the gateway 400s otherwise)
+      // can only be served by the CLI transport, so leading with the Provider
+      // API there would spend a request that cannot succeed.
+      let usedProviderApi = !(live?.messagesOnly === true || requiresMessagesEndpoint(options.model))
+      const providerApiRequest = (): Promise<Response> => request(`${COMMANDCODE_API_BASE}/provider/v1/chat/completions`, {
+        method: 'POST',
+        headers: { ...headers, accept: 'text/event-stream' },
+        body: JSON.stringify(openAiBody),
+        signal: watchdog.signal,
+      })
+      const cliRequest = (): Promise<Response> => request(`${COMMANDCODE_API_BASE}/alpha/generate`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(cliBody),
+        signal: watchdog.signal,
+      })
       try {
-        // DeepSeek thinking models REQUIRE reasoning replay, which only the
-        // Provider API performs, so it leads. A Go-plan account without API
-        // access answers 403 `upgrade_required`, and only then do we fall back
-        // to the CLI transport (whose message shape is what that plan serves).
-        response = await proxiedFetch(`${COMMANDCODE_API_BASE}/provider/v1/chat/completions`, {
-          method: 'POST',
-          headers: { ...headers, accept: 'text/event-stream' },
-          body: JSON.stringify(openAiBody),
-          signal: watchdog.signal,
-        })
-        if (!response.ok && await isProviderUpgradeRequired(response)) {
-          usedProviderApi = false
-          response = await proxiedFetch(`${COMMANDCODE_API_BASE}/alpha/generate`, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(cliBody),
-            signal: watchdog.signal,
-          })
+        if (usedProviderApi) {
+          response = await providerApiRequest()
+          // A Go-plan account without API access answers 403 `upgrade_required`;
+          // a Messages-only model answers 400 and names the endpoint. Both mean
+          // the same thing: use the CLI transport, whose shape that plan serves.
+          if (!response.ok && (await isProviderUpgradeRequired(response) || await needsMessagesTransport(response))) {
+            usedProviderApi = false
+            response = await cliRequest()
+          }
+        } else {
+          response = await cliRequest()
         }
       } catch (error) {
         throw mapFetchFailure('commandcode', error, watchdog, options.signal)

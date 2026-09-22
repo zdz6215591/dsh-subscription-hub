@@ -576,9 +576,14 @@ describe('commandcode messagesToCommandCode', () => {
     assert.deepEqual(wire[0], { role: 'user', content: [{ type: 'text', text: 'list files' }] })
     const assistant = wire[1] as { role: string; content: Array<Record<string, unknown>> }
     assert.equal(assistant.role, 'assistant')
-    assert.equal(assistant.content.length, 2, 'reasoning must not be replayed on the CLI transport')
+    // Reasoning IS replayed on the CLI transport, in content order, as the
+    // official CLI's own `toWireMessages` does. Dropping it is what made every
+    // DeepSeek thinking-mode tool-loop turn fail with "The `reasoning_content`
+    // in the thinking mode must be passed back to the API" (upstream issue #34).
+    assert.equal(assistant.content.length, 3)
     assert.deepEqual(assistant.content[0], { type: 'text', text: 'checking' })
-    assert.deepEqual(assistant.content[1], {
+    assert.deepEqual(assistant.content[1], { type: 'reasoning', text: 'private thought' })
+    assert.deepEqual(assistant.content[2], {
       type: 'tool-call',
       toolCallId: callId,
       toolName: 'pwsh',
