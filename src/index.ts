@@ -195,6 +195,8 @@ import {
   sessionFromZedPaste,
 } from './providers/zed.js'
 import { filterVisible, hiddenIds, markProviderModelsRead, setModelVisible, syncDiscoveredModels } from './model-visibility.js'
+import { modelVendor } from './model-vendor.js'
+import { agentScoreFor } from './model-agent-score.js'
 import { createXSearchTool } from './tools/x-search.js'
 import { createImageGenerateTool } from './tools/image-generate.js'
 import { createVideoGenerateTool, videosDirectory } from './tools/video-generate.js'
@@ -1458,12 +1460,23 @@ export function apply(ctx: Context, config: Config): void {
       const models = await adapter.listOwnModels(provider)
       const modelIds = models.map(m => m.id)
       const { hidden, unread } = await syncDiscoveredModels(provider, modelIds)
-      return models.map(model => ({
-        id: model.id,
-        name: model.name,
-        visible: !hidden.has(model.id),
-        unread: unread.has(model.id),
-      }))
+      return models.map(model => {
+        // The vendor and the board score are resolved here rather than in the
+        // browser, so the client bundle carries no vendor table and issues no
+        // request to arena.ai. Both are absent when unknown, never guessed.
+        const vendor = modelVendor(model.id)
+        const score = agentScoreFor(model.id)
+        const modalities = model.inputModalities
+        return {
+          id: model.id,
+          name: model.name,
+          visible: !hidden.has(model.id),
+          unread: unread.has(model.id),
+          ...vendor === undefined ? {} : { vendor: { ...vendor } },
+          ...modalities === undefined ? {} : { inputModalities: [...modalities] },
+          ...score === undefined ? {} : { agentScore: score },
+        }
+      })
     },
     async markModelsRead(provider) {
       if (provider !== undefined) {

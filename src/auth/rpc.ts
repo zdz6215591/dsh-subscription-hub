@@ -163,7 +163,24 @@ export interface ExtraOps {
   checkin(provider: ProviderId, account: string): Promise<{ ok: boolean; message: string }>
   /** Today's check-in state for one provider (CodeBuddy and Trae both have one). */
   checkinStatus?(provider?: ProviderId): Promise<CodeBuddyCheckinStatusView>
-  visibility(provider: ProviderId): Promise<{ id: string; name: string; visible: boolean; unread?: boolean }[]>
+  /**
+   * Every model of one route, with the display facts the list renders beside its
+   * name: the owning vendor, the accepted input modalities, and the Agent Arena
+   * score when the board lists the model. All three are resolved host-side so the
+   * browser needs no vendor table of its own and no request to arena.ai.
+   */
+  visibility(provider: ProviderId): Promise<{
+    id: string
+    name: string
+    visible: boolean
+    unread?: boolean
+    /** Owning vendor, or absent when the id names none this build knows. */
+    vendor?: { id: string; label: string; mono: string }
+    /** Accepted input modalities, or absent when the route never declared them. */
+    inputModalities?: string[]
+    /** Agent Arena net improvement, or absent when the board does not list the model. */
+    agentScore?: { score: number; ci: number; rank: number; label: string; effort?: string; vendor: string; effortMismatch: boolean }
+  }[]>
   setVisible(provider: ProviderId, model: string, visible: boolean): Promise<void>
   refreshModels?(provider?: ProviderId): Promise<{ ok: boolean }>
   markModelsRead?(provider: ProviderId): Promise<{ ok: boolean }>
