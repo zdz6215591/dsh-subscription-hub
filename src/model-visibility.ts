@@ -69,7 +69,20 @@ function extractFirstJsonObject(str: string): string | null {
   return null
 }
 
+/**
+ * Set when the last {@link readDocument} could not read the file for a reason
+ * other than "it does not exist yet".
+ *
+ * A transient I/O failure (a permission problem, an antivirus lock, a partially
+ * flushed file) used to be indistinguishable from an empty document, and
+ * `syncDiscoveredModels` then WROTE its seeded state back — permanently erasing
+ * the user's hidden list. Readers inside the file lock now consult this flag and
+ * refuse to persist a document they could not actually read.
+ */
+let documentReadDegraded = false
+
 async function readDocument(): Promise<VisibilityDocument> {
+  documentReadDegraded = false
   try {
     const text = await readFile(visibilityFilePath(), 'utf8')
     let value: unknown
@@ -77,19 +90,22 @@ async function readDocument(): Promise<VisibilityDocument> {
       value = JSON.parse(text)
     } catch {
       // In case of corruption (e.g. leftover bytes from an interrupted write),
-      // salvage by extracting the first complete top-level JSON object.
+      // salvage by extracting the first complete top-level JSON object. The heal
+      // is queued through the lock rather than fired from inside the read.
       const clean = extractFirstJsonObject(text)
       if (clean) {
         try {
           value = JSON.parse(clean)
-          // Asynchronously self-heal the file on disk
-          void writeDocument(value as VisibilityDocument).catch(() => {})
+          scheduleHeal(value as VisibilityDocument)
         } catch {
           // fall through
         }
       }
     }
     if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      // A file that parses but is not a document is NOT an empty document: mark
+      // it degraded so nothing overwrites content we cannot interpret.
+      documentReadDegraded = true
       return { hidden: {}, known: {}, unread: {} }
     }
     const doc = value as VisibilityDocument
@@ -100,11 +116,29 @@ async function readDocument(): Promise<VisibilityDocument> {
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      // The genuine "nothing stored yet" case: an empty document is correct and
+      // safe to seed.
       return { hidden: {}, known: {}, unread: {} }
     }
-    // Never throw a SyntaxError or I/O error to the caller, which would crash adapter.listModels.
+    // Any other I/O failure: report empty so listModels cannot crash, but mark it
+    // degraded so no caller writes this placeholder back over real state.
+    documentReadDegraded = true
     return { hidden: {}, known: {}, unread: {} }
   }
+}
+
+/** Queue a self-heal write that re-reads under the lock before persisting. */
+function scheduleHeal(salvaged: VisibilityDocument): void {
+  void withFileLock(async () => {
+    // Re-read inside the lock: another writer may already have repaired the file,
+    // and persisting the stale salvage would clobber a newer toggle.
+    const current = await readDocument()
+    if (documentReadDegraded) return
+    const currentHidden = Object.keys(current.hidden).length
+    if (currentHidden > 0) return
+    if (Object.keys(salvaged.hidden).length === 0) return
+    await writeDocument(salvaged)
+  }).catch(() => {})
 }
 
 async function writeDocument(document: VisibilityDocument): Promise<void> {
@@ -149,6 +183,10 @@ export async function syncDiscoveredModels(
 ): Promise<{ hidden: ReadonlySet<string>; unread: ReadonlySet<string> }> {
   return withFileLock(async () => {
     const document = await readDocument()
+    // A degraded read (permission error, unreadable file) must never be written
+    // back: the empty document is a placeholder, and persisting the seeded state
+    // would erase the user's real hidden/known lists for good.
+    if (documentReadDegraded) return { hidden: new Set<string>(), unread: new Set<string>() }
     if (!document.hidden[provider]) document.hidden[provider] = []
     if (!document.known) document.known = {}
     if (!document.unread) document.unread = {}

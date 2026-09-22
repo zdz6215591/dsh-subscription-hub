@@ -189,6 +189,22 @@ function normalizeAccount(account: Account): Account {
  * @param refreshToken - the refresh token to spend.
  * @returns the new tokens, or `undefined` when the refresh was refused.
  */
+/**
+ * A refresh that never reached the server.
+ *
+ * Deliberately NOT reported as `undefined`: `undefined` means the server
+ * answered and rejected the credential, which is what makes an account
+ * permanently dead. Conflating the two let a network blip delete the user's
+ * account.
+ */
+export class CodeBuddyTransportError extends Error {
+  constructor(cause: unknown) {
+    super('CodeBuddy token refresh could not reach the server')
+    this.name = 'CodeBuddyTransportError'
+    this.cause = cause
+  }
+}
+
 export async function refreshAccessToken(
   identity: CodeBuddyIdentity,
   refreshToken: string,
@@ -207,8 +223,10 @@ export async function refreshAccessToken(
       method: 'POST',
       headers,
     })
-  } catch {
-    return undefined
+  } catch (error) {
+    // The request never arrived: this is transient and must never be read as a
+    // revoked credential.
+    throw new CodeBuddyTransportError(error)
   }
   if (!response.ok) return undefined
   const body = await response.json() as AuthTokenResponse

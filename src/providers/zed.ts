@@ -388,8 +388,20 @@ export async function refreshZed(session: ZedSession): Promise<ZedSession> {
   }
 }
 
+/**
+ * Whether a Zed refresh failure means the credential is permanently dead.
+ *
+ * Decided by the error CODE, not by matching message text: `mintLlmToken` routes
+ * a non-OK response through `httpLlmError`, which maps 401/403 to `'AUTH'`, so a
+ * revoked token is recognised exactly. The previous
+ * `/401|unauthorized|invalid/i` over the message was both too loose (a transport
+ * failure reading "invalid certificate" or "invalid URL" would have deleted the
+ * account) and too narrow (a 403 never matched, so a revoked token was retried
+ * forever instead of prompting a re-login).
+ */
 export function isZedPermanentRefreshError(error: unknown): boolean {
-  return error instanceof Error && /401|unauthorized|invalid/i.test(error.message)
+  if (!(error instanceof LlmError)) return false
+  return error.code === 'AUTH' || error.code === 'INVALID_CREDENTIAL' || error.code === 'MISSING_CREDENTIAL'
 }
 
 function planDisplayName(plan: unknown): string | undefined {

@@ -155,9 +155,47 @@ async function writeCatalogFile(store: CatalogFile, path: string): Promise<void>
 }
 
 /**
+ * One write chain per store path.
+ *
+ * Every mutation here is a read-modify-write of the whole shared models.json,
+ * and the plugin runs them concurrently by design: `families()` lists every
+ * provider's models in parallel, and "Refresh models" re-discovers all routes at
+ * once. Overlapping them unserialized was NOT benign on Windows — reproduced
+ * with five concurrent saves, which threw `EPERM rename` twice and left the file
+ * holding a single provider, silently discarding the other four. The throw is
+ * swallowed upstream (`void save(...).catch(() => undefined)`), so the loss was
+ * invisible until a restart found the reasoning/vision/context metadata gone.
+ *
+ * A chain is dropped once nothing is queued behind it, so the map holds an entry
+ * only while writes are in flight.
+ */
+const catalogWriteChains = new Map<string, Promise<unknown>>()
+
+/**
+ * Run one read-modify-write of the catalog path after every write already
+ * queued for it. Callers join the chain synchronously, so call order is write
+ * order.
+ * @param path - the store file being mutated.
+ * @param action - the read-modify-write to run.
+ * @returns whatever `action` returns.
+ */
+async function serializeCatalog<T>(path: string, action: () => Promise<T>): Promise<T> {
+  const previous = catalogWriteChains.get(path) ?? Promise.resolve()
+  // Both handlers: a failed write must not strand everything queued behind it.
+  const next = previous.then(action, action)
+  const tail = next.then(() => undefined, () => undefined)
+  catalogWriteChains.set(path, tail)
+  try {
+    return await next
+  } finally {
+    if (catalogWriteChains.get(path) === tail) catalogWriteChains.delete(path)
+  }
+}
+
+/**
  * Build the durable half of one provider's catalog cache over the shared
- * models.json file (concurrent writers are last-writer-wins, acceptable for
- * a cache).
+ * models.json file. Every mutation is serialized per path, so concurrent
+ * writers merge instead of clobbering each other.
  * @param provider - the provider route keying the file entry.
  * @param path - store file path; defaults to {@link modelsFilePath}.
  * @returns the persistence hooks for {@link ModelCatalogCache}.
@@ -168,15 +206,19 @@ export function catalogStore(provider: ProviderId, path = modelsFilePath()): Cat
       return sanitizeSnapshot((await readCatalogFile(path))[provider])
     },
     async save(snapshot) {
-      const store = await readCatalogFile(path)
-      store[provider] = snapshot
-      await writeCatalogFile(store, path)
+      await serializeCatalog(path, async () => {
+        const store = await readCatalogFile(path)
+        store[provider] = snapshot
+        await writeCatalogFile(store, path)
+      })
     },
     async clear() {
-      const store = await readCatalogFile(path)
-      if (store[provider] === undefined) return
-      delete store[provider]
-      await writeCatalogFile(store, path)
+      await serializeCatalog(path, async () => {
+        const store = await readCatalogFile(path)
+        if (store[provider] === undefined) return
+        delete store[provider]
+        await writeCatalogFile(store, path)
+      })
     },
   }
 }

@@ -611,8 +611,22 @@ async function dispatch(
 ): Promise<RpcResult<unknown>> {
   switch (endpoint) {
     case 'status': {
+      // One provider's failure must not blank the whole page: a malformed
+      // `auth.json` or an unreadable local store (zed/trae) used to reject the
+      // entire Promise.all, so the Settings page rendered nothing at all. Each
+      // provider is contained and degrades to its own error entry instead.
       const entries = await Promise.all(PROVIDER_IDS.map(
-        async provider => [provider, await controller.status(provider)] as const,
+        async provider => {
+          try {
+            return [provider, await controller.status(provider)] as const
+          } catch (error) {
+            return [provider, {
+              busy: false,
+              accounts: [],
+              detail: error instanceof Error ? error.message : String(error),
+            }] as const
+          }
+        },
       ))
       return ok({ providers: Object.fromEntries(entries) })
     }

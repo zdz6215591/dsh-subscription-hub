@@ -13,6 +13,17 @@ import { createPkce, randomHex, randomToken, type PkcePair } from './pkce.js'
 /** Default attempt lifetime: three minutes for the user to complete login. */
 export const DEFAULT_FLOW_TIMEOUT_MS = 180_000
 
+/**
+ * Placeholder parked in the attempt map while `start()` is still binding its
+ * callback port.
+ *
+ * `start()` has to `await listen(...)` before it can build the real attempt, and
+ * the "one attempt per provider" guard runs before that await. Reserving the
+ * slot with this sentinel keeps the guard authoritative across it, so two
+ * concurrent starts cannot both bind and then overwrite each other.
+ */
+const RESERVED_ATTEMPT = Object.freeze({ reserved: true })
+
 /** Where the temporary callback server listens; port 0 asks the OS for an ephemeral port. */
 export interface ListenSpec {
   host: string
@@ -185,6 +196,28 @@ export class OAuthFlowManager {
     if (this.attempts.has(provider)) {
       throw new Error(`a ${provider} login attempt is already in progress`)
     }
+    // Reserve the slot BEFORE the first await. The check above and the
+    // `attempts.set` at the end of this method are separated by `await
+    // listen(...)`, so two concurrent `start()` calls both passed the guard,
+    // both bound ports, and the second overwrote the first — after which the
+    // FIRST attempt's `settle()` deleted the SECOND's registration while it was
+    // still listening (isBusy → false, pending → none), and the tab the user
+    // actually authorized carried the older claim whose session was discarded.
+    // A placeholder keeps the guard authoritative across the await.
+    const reservation = new Error(`a ${provider} login attempt is already in progress`)
+    this.attempts.set(provider, RESERVED_ATTEMPT as unknown as OAuthAttempt)
+    try {
+      return await this.startReserved(provider, spec, reservation)
+    } catch (error) {
+      // Any failure before the real attempt is registered must release the slot,
+      // or the provider would be wedged until the process restarts.
+      if (this.attempts.get(provider) === RESERVED_ATTEMPT as unknown as OAuthAttempt) this.attempts.delete(provider)
+      throw error
+    }
+  }
+
+  /** The body of {@link start}, run with the provider slot already reserved. */
+  private async startReserved(provider: string, spec: FlowSpec, reservation: Error): Promise<OAuthAttempt> {
     const input: AuthorizeInput = {
       redirectUri: '',
       state: randomToken(32),
@@ -234,6 +267,12 @@ export class OAuthFlowManager {
       settle(undefined, code)
     }
 
+    // Identity of the attempt that currently owns the provider slot. Declared
+    // before `settle` because settle must compare against it: releasing the slot
+    // unconditionally let a superseded attempt unregister whichever attempt had
+    // replaced it, leaving a live listener with no registration.
+    let registered: OAuthAttempt | undefined
+
     const settle = (error?: Error, code?: string): void => {
       if (settled) return
       settled = true
@@ -242,7 +281,12 @@ export class OAuthFlowManager {
         server.close()
         server.closeAllConnections()
       }
-      this.attempts.delete(provider)
+      const current = this.attempts.get(provider)
+      // Release the slot only when it is ours, or when it is still the start()
+      // reservation this attempt is replacing (so a failure cannot wedge it).
+      if (registered === undefined ? current === RESERVED_ATTEMPT as unknown as OAuthAttempt : current === registered) {
+        this.attempts.delete(provider)
+      }
       if (error !== undefined) rejectCode(error)
       else if (code !== undefined) resolveCode(code)
     }
@@ -290,6 +334,7 @@ export class OAuthFlowManager {
         settle(new Error('login cancelled'))
       },
     }
+    registered = attempt
     this.attempts.set(provider, attempt)
     return attempt
   }

@@ -12,6 +12,7 @@
  */
 
 import { promises as fs } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 import * as zlib from 'node:zlib'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
@@ -101,6 +102,27 @@ function statsFilePath(): string {
 
 let inMemorySummary: TokenSavingsSummary | undefined
 let isScanning = false
+/**
+ * The walk currently in flight, so concurrent callers join it instead of
+ * starting their own. Without this, every live usage chunk during the first
+ * turns after a start launched a full scan of the sessions tree.
+ */
+let inFlightScan: Promise<TokenSavingsSummary> | undefined
+
+/** A zeroed summary, used to answer a caller that joins an in-flight scan. */
+function emptySummary(): TokenSavingsSummary {
+  return {
+    totalTokens: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    turns: 0,
+    savedUsd: 0,
+    savedRmb: 0,
+    byProvider: {},
+    updatedAt: Date.now(),
+  }
+}
 
 async function decompressZstd(buf: Buffer): Promise<Buffer> {
   const chunks: Buffer[] = []
@@ -140,10 +162,30 @@ async function walkSessionFiles(dir: string, acc: string[] = []): Promise<string
   return acc
 }
 
-export async function scanSessionHistory(): Promise<TokenSavingsSummary> {
-  if (isScanning && inMemorySummary !== undefined) return inMemorySummary
+export function scanSessionHistory(): Promise<TokenSavingsSummary> {
+  // Coalesce: one walk runs at a time, and every concurrent caller joins it.
+  // The old condition returned early only when a summary already existed, so
+  // while the first scan was running EVERY live usage chunk started another full
+  // walk + zstd decompression of the whole sessions tree.
+  if (inFlightScan !== undefined) return inFlightScan
+  if (inMemorySummary !== undefined && !isScanning) {
+    // A summary is already loaded; a caller wanting a refresh still gets a fresh
+    // walk only when one is not already running (handled above).
+    return Promise.resolve(inMemorySummary)
+  }
+  const scan = runScan().finally(() => {
+    if (inFlightScan === scan) {
+      inFlightScan = undefined
+      isScanning = false
+    }
+  })
+  inFlightScan = scan
   isScanning = true
+  return scan
+}
 
+/** The walk itself; {@link scanSessionHistory} owns the coalescing around it. */
+async function runScan(): Promise<TokenSavingsSummary> {
   try {
     const sessionsDir = dshHomePath('sessions')
     const files = await walkSessionFiles(sessionsDir)
@@ -230,8 +272,10 @@ export async function scanSessionHistory(): Promise<TokenSavingsSummary> {
     inMemorySummary = summary
     await persistStats(summary).catch(() => undefined)
     return summary
-  } finally {
-    isScanning = false
+  } catch {
+    // A failed walk still leaves the caller with a usable summary rather than a
+    // rejected promise; scanSessionHistory's finally releases the latch.
+    return inMemorySummary ?? emptySummary()
   }
 }
 
@@ -239,7 +283,11 @@ async function persistStats(summary: TokenSavingsSummary): Promise<void> {
   const filePath = statsFilePath()
   const dir = dshHomePath('plugins', 'subscriptions')
   await fs.mkdir(dir, { recursive: true })
-  const tmp = `${filePath}.${process.pid}.tmp`
+  // A random nonce, like every other store in this plugin. A pid-only name was
+  // shared by two concurrent increments in one process (multiple sessions each
+  // recording usage), so both wrote the same temp file and the rename could
+  // publish torn content or lose a write entirely.
+  const tmp = `${filePath}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
   await fs.writeFile(tmp, `${JSON.stringify(summary, null, 2)}\n`, 'utf8')
   await fs.rename(tmp, filePath)
 }
@@ -256,8 +304,8 @@ export async function getTokenSavingsSummary(): Promise<TokenSavingsSummary> {
   // Try reading persisted stats
   try {
     const raw = await fs.readFile(statsFilePath(), 'utf8')
-    const parsed = JSON.parse(raw) as TokenSavingsSummary
-    if (parsed && typeof parsed.totalTokens === 'number') {
+    const parsed = sanitizePersisted(JSON.parse(raw) as unknown)
+    if (parsed !== undefined) {
       inMemorySummary = parsed
       return parsed
     }
@@ -265,6 +313,44 @@ export async function getTokenSavingsSummary(): Promise<TokenSavingsSummary> {
 
   // Fall back to scanning session history
   return scanSessionHistory()
+}
+
+/**
+ * Validate a persisted stats file into the full summary shape.
+ *
+ * A partially-written or hand-edited file used to be accepted on the strength of
+ * `totalTokens` alone, and the next `recordStreamTokenUsage` then threw
+ * `TypeError: Cannot read properties of undefined (reading '<provider>')` on
+ * `byProvider` — from inside the adapter's stream wrapper, so the user's turn
+ * failed at the usage chunk AFTER the model had already answered. Every field
+ * the increment path touches is therefore required here; anything missing
+ * discards the file and lets the history scan rebuild it.
+ * @param value - the parsed JSON document.
+ * @returns the validated summary, or undefined when the shape is unusable.
+ */
+function sanitizePersisted(value: unknown): TokenSavingsSummary | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const raw = value as Record<string, unknown>
+  const numeric = ['totalTokens', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'turns', 'savedUsd', 'savedRmb'] as const
+  const out: Record<string, number> = {}
+  for (const key of numeric) {
+    const field = raw[key]
+    if (typeof field !== 'number' || !Number.isFinite(field)) return undefined
+    out[key] = field
+  }
+  const byProvider = raw.byProvider
+  if (typeof byProvider !== 'object' || byProvider === null || Array.isArray(byProvider)) return undefined
+  return {
+    totalTokens: out.totalTokens!,
+    inputTokens: out.inputTokens!,
+    outputTokens: out.outputTokens!,
+    cacheReadTokens: out.cacheReadTokens!,
+    turns: out.turns!,
+    savedUsd: out.savedUsd!,
+    savedRmb: out.savedRmb!,
+    byProvider: byProvider as TokenSavingsSummary['byProvider'],
+    updatedAt: typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt) ? raw.updatedAt : Date.now(),
+  }
 }
 
 /**
@@ -286,6 +372,11 @@ export function recordStreamTokenUsage(
   const cost = (inp * price.input + out * price.output + cache * price.cache) / 1_000_000
 
   if (inMemorySummary === undefined) {
+    // One scan at a time. The old guard returned early only when a summary
+    // already existed, so while the first scan was still running EVERY live
+    // usage chunk started another full walk + zstd decompression of the whole
+    // sessions tree — dozens of concurrent history scans during the first turns
+    // after a start. `isScanning` is the coalescing latch here.
     void scanSessionHistory()
     return
   }

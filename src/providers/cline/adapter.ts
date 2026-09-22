@@ -17,7 +17,7 @@
  *   - `off` is not a valid `reasoning_effort`; the gateway rejects it with 400.
  */
 
-import { LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, LlmError, QUOTA_EXCEEDED_CODE, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -136,6 +136,28 @@ async function *clineFrames(
     }
   } finally {
     reader.releaseLock()
+  }
+}
+
+/**
+ * Whether a pinned attempt's failure must end the whole chain instead of
+ * failing over to the next channel.
+ *
+ * Auth and quota are account-shaped: every pinned channel would fail the same
+ * way, so rotating only hides the real problem behind the last channel's error.
+ * The codes here are the ones `httpLlmError` and the credential refresh
+ * actually produce — `'AUTH'` for 401/403, the harness's `QUOTA_EXCEEDED_CODE`
+ * (`'QUOTA'`), and the missing-credential family.
+ */
+function isFatalPinnedFailure(error: LlmError): boolean {
+  switch (error.code) {
+    case 'AUTH':
+    case QUOTA_EXCEEDED_CODE:
+    case 'INVALID_CREDENTIAL':
+    case 'MISSING_CREDENTIAL':
+      return true
+    default:
+      return false
   }
 }
 
@@ -446,10 +468,13 @@ export class ClineAdapter extends LlmAdapter {
           // provider list; merging it repairs a stale allow-list without a probe.
           if (attempt.upstream === null) this.options.pins.learnAvailableProviders(options.model, detail)
           lastError = await httpLlmError(new Response(raw, { status: response.status, headers: response.headers }), 'cline')
-          const code = (lastError as LlmError).code
           // An auth or quota failure is not a pinning problem: every candidate
-          // would fail the same way, so the chain stops here.
-          if (code === 'INVALID_CREDENTIAL' || code === 'QUOTA_EXCEEDED') throw lastError
+          // would fail the same way, so the chain stops here. Compare against
+          // the codes `httpLlmError` actually produces — it maps 401/403 to
+          // 'AUTH' and uses the harness's QUOTA_EXCEEDED_CODE ('QUOTA'), so the
+          // older 'INVALID_CREDENTIAL'/'QUOTA_EXCEEDED' literals never matched
+          // and the chain re-hit every pinned channel with doomed requests.
+          if (isFatalPinnedFailure(lastError as LlmError)) throw lastError
           continue
         }
         if (response.body === null) {
@@ -568,8 +593,25 @@ export class ClineAdapter extends LlmAdapter {
         // the caller's, not a reason to silently ask another channel.
         const hasDeliveredContent = yielded || sawToolCalls || toolCalls.size > 0
         if (hasDeliveredContent) {
+          // Failing over is wrong once content reached the caller, but SWALLOWING
+          // the failure is worse: the reference rethrows here, and without it a
+          // cut stream is delivered as a complete answer (no error, no harness
+          // retry), and a cut that landed inside a tool call emits a block-end
+          // carrying truncated JSON arguments the loop then tries to execute.
+          if (streamFailure !== undefined) throw streamFailure
           const closing = closeOpen()
           if (closing !== undefined) yield closing
+          // A truncating finish means the tool-call arguments are incomplete;
+          // report the truncation and drop the calls rather than executing a
+          // mangled argument string. The harness's assembler already discards
+          // tool-call blocks on a max-tokens finish, so emitting them would only
+          // produce a phantom call.
+          const truncated = finishReasonToKind(finishReason).kind === 'max-tokens'
+          if (truncated && toolCalls.size > 0) {
+            yield { type: 'usage', usage: usage ?? { inputTokens: 0, outputTokens: 0 } }
+            yield { type: 'finish', reason: finishReasonToKind(finishReason) }
+            return
+          }
           for (const [, call] of [...toolCalls.entries()].sort((a, b) => a[0] - b[0])) {
             if (call.name === '') continue
             const blockIndex = nextIndex++
@@ -595,7 +637,7 @@ export class ClineAdapter extends LlmAdapter {
 
         if (streamFailure !== undefined) {
           // A missing credential is fatal for the same reason an auth failure is.
-          if (streamFailure.code === 'INVALID_CREDENTIAL' || streamFailure.code === 'QUOTA_EXCEEDED') throw streamFailure
+          if (isFatalPinnedFailure(streamFailure)) throw streamFailure
           lastError = streamFailure
           continue
         }

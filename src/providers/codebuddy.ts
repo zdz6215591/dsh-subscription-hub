@@ -77,7 +77,10 @@ export async function completeCodeBuddyLogin(state: string, signal?: AbortSignal
 
 export async function refreshCodeBuddy(session: CodeBuddySession): Promise<CodeBuddySession> {
   const token = await refreshAccessToken(identityOf(session), session.refreshToken)
-  if (token === undefined) throw new Error('CodeBuddy refresh was refused')
+  // `undefined` here means the server ANSWERED and refused the credential —
+  // the only case that makes the account permanently dead. A request that never
+  // arrived throws CodeBuddyTransportError instead and propagates as transient.
+  if (token === undefined) throw new Error('CodeBuddy refresh was refused by the server')
   return {
     ...session,
     accessToken: token.accessToken,
@@ -87,8 +90,16 @@ export async function refreshCodeBuddy(session: CodeBuddySession): Promise<CodeB
   }
 }
 
+/**
+ * Whether a CodeBuddy refresh failure means the credential is permanently dead.
+ *
+ * Matched on the exact refusal marker rather than a loose `/refused|401|invalid/i`
+ * over the message: that regex also matched transport wording ("connection
+ * refused", "invalid URL"), so a network blip deleted the account and forced a
+ * re-login. Only the server's own refusal counts.
+ */
 export function isCodeBuddyPermanentRefreshError(error: unknown): boolean {
-  return error instanceof Error && /refused|401|invalid/i.test(error.message)
+  return error instanceof Error && error.message.includes('refused by the server')
 }
 
 export async function fetchCodeBuddyUsage(

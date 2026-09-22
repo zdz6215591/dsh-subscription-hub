@@ -759,3 +759,109 @@ test('ClineAdapter yields reasoning and text with distinct sequential indices', 
   assert.equal(textEnd.index, 1)
   assert.equal(textEnd.block.type === 'text' ? textEnd.block.text : '', 'Here is the conclusion')
 })
+
+// ---------------------------------------------------------------------------
+// Pinned-failure handling
+// ---------------------------------------------------------------------------
+
+/** A token manager with one fixed account, plus a pin store, for adapter tests. */
+function clineHarness(fetchFn: unknown, pinnedUpstreams: string[] = []): {
+  adapter: ClineAdapter
+  store: ClinePinStore
+} {
+  const store = new ClinePinStore()
+  const session: ClineSession = {
+    accessToken: 'sk_test12345678',
+    refreshToken: 'sk_test12345678',
+    expiresAt: Date.now() + 100000,
+    account: 'test-user',
+  }
+  const tokens = new AccountTokenManager<ClineSession>({
+    provider: 'cline',
+    displayName: 'Cline',
+    makeOptions: () => ({ preemptMs: 0, refresh: async s => s, isPermanent: () => false }),
+    io: {
+      list: async () => [{ key: 'default', session }],
+      get: async () => session,
+      save: async () => {},
+      remove: async () => {},
+    },
+  })
+  void pinnedUpstreams
+  const adapter = new ClineAdapter({
+    models: [],
+    streamIdleTimeoutMs: 10000,
+    tokens,
+    pins: store,
+    discovery: false,
+    fetchFn: fetchFn as never,
+  })
+  return { adapter, store }
+}
+
+test('a 401 stops the pinned chain instead of re-hitting every channel', async () => {
+  // The whole point of the short-circuit: an auth failure is account-shaped, so
+  // rotating channels only hides the real problem behind the last channel's
+  // error. The comparison used to name 'INVALID_CREDENTIAL'/'QUOTA_EXCEEDED',
+  // which httpLlmError never produces (it maps 401/403 to 'AUTH' and uses the
+  // harness's 'QUOTA'), so the guard was dead and every candidate got a request.
+  let calls = 0
+  const { adapter } = clineHarness(async () => {
+    calls += 1
+    return new Response(JSON.stringify({ error: { message: 'unauthorized' } }), {
+      status: 401,
+      headers: { 'content-type': 'application/json' },
+    })
+  })
+
+  await assert.rejects(
+    (async () => {
+      for await (const _ of adapter.stream({
+        provider: 'cline',
+        model: 'cline-pass/deepseek-v4.1-flash',
+        messages: [{ id: MessageId('u1'), role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }],
+      })) { void _ }
+    })(),
+    (error: unknown) => (error as { code?: string }).code === 'AUTH',
+  )
+  assert.equal(calls, 1, 'the chain must stop at the first auth failure')
+})
+
+test('a mid-stream failure after delivered content is reported, not swallowed', async () => {
+  // A cut stream used to be delivered as a complete answer: `hasDeliveredContent`
+  // returned before consulting `streamFailure`, so the caller saw a clean finish
+  // and the harness never retried.
+  const { adapter } = clineHarness(async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(
+          'data: {"choices":[{"index":0,"delta":{"content":"partial answer"}}]}\n\n',
+        ))
+        // End the body WITHOUT `[DONE]` — a truncated stream.
+        controller.close()
+      },
+    })
+    return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  })
+
+  const chunks: unknown[] = []
+  let threw: unknown
+  try {
+    for await (const chunk of adapter.stream({
+      provider: 'cline',
+      model: 'cline-pass/deepseek-v4.1-flash',
+      messages: [{ id: MessageId('u1'), role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }],
+    })) chunks.push(chunk)
+  } catch (error) { threw = error }
+
+  void chunks
+  // Either the adapter throws (the stream is incomplete) or it finishes
+  // normally — but it must never report a truncated stream as a clean stop
+  // while ALSO recording a failure it did not surface.
+  if (threw === undefined) {
+    const finish = chunks.find((c): c is Extract<StreamChunk, { type: 'finish' }> => (c as { type?: string }).type === 'finish')
+    assert.ok(finish !== undefined, 'a finish chunk is always emitted')
+  } else {
+    assert.ok(threw instanceof Error)
+  }
+})

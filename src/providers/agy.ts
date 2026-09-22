@@ -24,6 +24,7 @@ import {
   isMissingOrInvalidCredential,
   mapFetchFailure,
   ModelCatalogCache,
+  OAuthEndpointError,
   oauthEndpointError,
 } from './common.js'
 import type { CatalogPersistence, DiscoveredModel, FetchFn, ModelEntry, ProviderUsage, UsageWindow } from './common.js'
@@ -284,7 +285,22 @@ export async function refreshAgy(session: AgySession): Promise<AgySession> {
   }
 }
 
+/**
+ * Whether a Google refresh failure means the grant is permanently dead.
+ *
+ * Checked on the structured `oauthCode` FIRST, because the message is built from
+ * `error_description`: Google answers
+ * `{"error":"invalid_grant","error_description":"Token has been expired or revoked."}`,
+ * so the message reads "…: Token has been expired or revoked." and never
+ * contains the literal `invalid_grant`. Matching the message alone meant a
+ * revoked grant was treated as transient — the session was never removed, the
+ * card never said "log in again", and a doomed refresh was retried forever.
+ * The message test stays only as a fallback for a body that carried no code.
+ */
 export function isAgyPermanentRefreshError(error: unknown): boolean {
+  if (error instanceof OAuthEndpointError && error.oauthCode !== undefined) {
+    return error.oauthCode === 'invalid_grant'
+  }
   return error instanceof Error && /invalid_grant/i.test(error.message)
 }
 

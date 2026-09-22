@@ -288,10 +288,12 @@ function imageGenerateText(value: ImageGenerateValue): ContentBlock {
  * Resolved lazily so a missing sharp never breaks text-to-image generation.
  */
 async function defaultTranscodeWebp(data: Buffer): Promise<{ data: Buffer; mediaType: 'image/png' | 'image/jpeg' }> {
-  const candidates = [
-    'sharp',
-    'C:/Users/DongZhi/AppData/Roaming/npm/node_modules/@deepseek-ai/dsh/node_modules/sharp/lib/index.js',
-  ]
+  // `sharp` is the host's own dependency, not this plugin's, so it is resolved
+  // through the running harness's module tree rather than a direct specifier
+  // (a bare `import('sharp')` fails from a plugin that does not depend on it).
+  // A hard-coded absolute path must never appear here: it would bind the
+  // feature to one machine's install layout and fail everywhere else.
+  const candidates = await transcodeCandidates()
   for (const specifier of candidates) {
     try {
       const imported = await import(specifier)
@@ -310,6 +312,34 @@ async function defaultTranscodeWebp(data: Buffer): Promise<{ data: Buffer; media
     }
   }
   throw new Error('image_generate: WebP reference images require an image transcoder that is not available')
+}
+
+/**
+ * Specifiers to try for the transcoder, most portable first.
+ *
+ * The harness ships `sharp`, so the reliable route is to resolve it relative to
+ * the harness installation the plugin is actually loaded from — found by
+ * walking up from this module's own URL — instead of guessing at an absolute
+ * path. The bare specifier stays first so a deployment that does expose `sharp`
+ * to plugins keeps working.
+ * @returns candidate specifiers in try order.
+ */
+async function transcodeCandidates(): Promise<string[]> {
+  const candidates = ['sharp']
+  try {
+    const { createRequire } = await import('node:module')
+    const require = createRequire(import.meta.url)
+    // `@deepseek-ai/dsh` owns sharp; resolving it through the plugin's own
+    // require chain lands in the host's node_modules wherever that lives.
+    for (const anchor of ['@deepseek-ai/dsh-llm', '@deepseek-ai/dsh']) {
+      try {
+        const entry = require.resolve(anchor)
+        const hostRequire = createRequire(entry)
+        candidates.push(hostRequire.resolve('sharp'))
+      } catch { /* this anchor is unavailable in this deployment */ }
+    }
+  } catch { /* not a CommonJS-resolvable environment; the bare specifier stands */ }
+  return [...new Set(candidates)]
 }
 
 /**
