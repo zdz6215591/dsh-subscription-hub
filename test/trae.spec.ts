@@ -32,7 +32,8 @@ import {
   traeEndpoint,
   traeHeaders,
 } from '../src/providers/trae/protocol.js'
-import { mergeTraeModels, TRAE_FALLBACK_MODELS, fetchRemoteModels } from '../src/providers/trae/catalog.js'
+import { mergeTraeModelSources, mergeTraeModels, TRAE_FALLBACK_MODELS, fetchRemoteModels } from '../src/providers/trae/catalog.js'
+import type { TraeModel } from '../src/providers/trae/catalog.js'
 import { toTraeMessages } from '../src/providers/trae/adapter.js'
 import type { FetchFn } from '../src/providers/common.js'
 import {
@@ -338,7 +339,7 @@ test('mergeTraeModels falls back to a sized roster when discovery is empty', () 
   }
 })
 
-test('fetchRemoteModels unions every directory function and drops uncallable configs', async () => {
+test('fetchRemoteModels builds the unfiltered skeleton from every directory group', async () => {
   const payload = {
     data: {
       list: [
@@ -388,8 +389,11 @@ test('fetchRemoteModels unions every directory function and drops uncallable con
   assert.ok(models !== undefined)
   const byId = new Map(models.map(model => [model.id, model]))
 
-  // The uncallable IDE-only config never reaches the picker.
-  assert.equal(byId.has('deepseek-v4.1-flash'), false)
+  // The skeleton keeps EVERY advertised row, including the IDE-only one: this
+  // is the merge skeleton, and callability is decided by the wire roster in
+  // `mergeTraeModelSources`, not by the static table here. Filtering here is
+  // what used to hide a brand-new model until the table was edited by hand.
+  assert.equal(byId.has('deepseek-v4.1-flash'), true)
   // A model only the coder directory lists is present, with its own function.
   assert.equal(byId.get('glm-5')?.functionName, 'solo_coder')
   // A model only the agent directory lists is present.
@@ -411,6 +415,97 @@ test('fetchRemoteModels unions every directory function and drops uncallable con
   const doubao = byId.get('Doubao-Seed-Code')
   assert.equal(doubao?.contextWindow, 256_000)
   assert.deepEqual(doubao?.efforts, ['none', 'low', 'high'])
+})
+
+// ---------------------------------------------------------------------------
+// The two-source merge: skeleton × wire roster
+// ---------------------------------------------------------------------------
+
+/** A skeleton row, as the remote directory supplies it. */
+function skeleton(id: string, extra: Partial<TraeModel> = {}): TraeModel {
+  return { id, name: id, functionName: 'solo_work_remote', ...extra }
+}
+
+/** A wire row, as `get_detail_param` supplies it. */
+function wire(id: string, extra: Partial<TraeModel> = {}): TraeModel {
+  return { id, name: id, functionName: 'solo_work_remote', ...extra }
+}
+
+test('the merge keeps only skeleton rows the wire roster can actually call', () => {
+  // The rule that stops the picker advertising models that always 4001: the
+  // remote directory advertises `Doubao-Seed-Code` and `glm-5.3`, neither of
+  // which is a current config_name, so both fail every request.
+  const merged = mergeTraeModelSources(
+    [skeleton('glm-5.2'), skeleton('Doubao-Seed-Code'), skeleton('kimi-k3')],
+    [wire('glm-5.2'), wire('kimi-k3'), wire('search_agent_v2')],
+  )
+  assert.deepEqual(merged.map(m => m.id), ['glm-5.2', 'kimi-k3'])
+  // An agent-internal config exists in the wire roster but never the skeleton,
+  // which is exactly why iterating the skeleton is what filters it out.
+  assert.equal(merged.some(m => m.id === 'search_agent_v2'), false)
+})
+
+test('the merge joins by config_name first, then by display name', () => {
+  // Tier 1: the display id IS the wire id (the common case).
+  const byId = mergeTraeModelSources(
+    [skeleton('glm-5.2', { name: 'GLM-5.2' })],
+    [wire('glm-5.2', { functionName: 'solo_work_lite' })],
+  )
+  assert.equal(byId[0]?.functionName, 'solo_work_lite')
+  // No `wireConfigName`: the id already IS the wire id, so the chat call sends
+  // it unchanged.
+  assert.equal(byId[0]?.wireConfigName, undefined)
+
+  // Tier 2: the display id differs from the wire id across Trae versions, so the
+  // join falls back to the display name and records the real config_name.
+  const byName = mergeTraeModelSources(
+    [skeleton('Seed-Code-Display', { name: 'Seed-Code' })],
+    [wire('Doubao-Seed-Code', { name: 'Seed-Code', functionName: 'solo_agent' })],
+  )
+  assert.equal(byName[0]?.id, 'Seed-Code-Display')
+  assert.equal(byName[0]?.wireConfigName, 'Doubao-Seed-Code')
+  assert.equal(byName[0]?.functionName, 'solo_agent')
+})
+
+test('the merge takes display facts from the skeleton and the function from the wire', () => {
+  const merged = mergeTraeModelSources(
+    [skeleton('glm-5.2', { name: 'GLM-5.2', contextWindow: 200_000, maxContextWindow: 1_000_000, efforts: ['none', 'high'] })],
+    // The wire row carries its own (poorer) metadata and must NOT override the
+    // skeleton's: the directory is authoritative for display facts.
+    [wire('glm-5.2', { name: 'glm-5.2', contextWindow: 1, functionName: 'solo_work_lite' })],
+  )
+  assert.equal(merged[0]?.contextWindow, 200_000)
+  assert.equal(merged[0]?.maxContextWindow, 1_000_000)
+  assert.deepEqual(merged[0]?.efforts, ['none', 'high'])
+  assert.equal(merged[0]?.functionName, 'solo_work_lite')
+})
+
+test('the merge is case- and whitespace-insensitive on both keys', () => {
+  const merged = mergeTraeModelSources(
+    [skeleton('GLM-5.2 ', { name: ' GLM-5.2' })],
+    [wire(' glm-5.2', { name: 'glm-5.2' })],
+  )
+  assert.equal(merged.length, 1)
+  // The skeleton's own spelling is what the picker shows.
+  assert.equal(merged[0]?.id, 'GLM-5.2 ')
+})
+
+test('the merge preserves skeleton order and drops duplicates by first match', () => {
+  const merged = mergeTraeModelSources(
+    [skeleton('b'), skeleton('a'), skeleton('c')],
+    [wire('a'), wire('b'), wire('c')],
+  )
+  // Skeleton order, not wire order: the directory decides how the picker reads.
+  assert.deepEqual(merged.map(m => m.id), ['b', 'a', 'c'])
+})
+
+test('an empty wire roster yields an empty merge, never the skeleton', () => {
+  // This is what makes the caller's degradation meaningful: an empty merge is
+  // distinguishable from a populated one, so `fetchTraeModels` can keep the
+  // skeleton instead of showing nothing.
+  assert.deepEqual(mergeTraeModelSources([skeleton('a')], []), [])
+  assert.deepEqual(mergeTraeModelSources([], [wire('a')]), [])
+  assert.deepEqual(mergeTraeModelSources([], []), [])
 })
 
 test('parseTraeUsage derives available/consumed and per-pack remainders', () => {

@@ -285,10 +285,12 @@ export async function fetchRemoteModels(
         if (typeof raw !== 'object' || raw === null) continue
         const id = typeof raw.name === 'string' ? raw.name : ''
         if (id === '') continue
-        const functionName = TRAE_CALLABILITY[id]
-        // The directory advertises IDE-only models the SOLO chat endpoint
-        // rejects with 4001; never list a model that cannot be called.
-        if (functionName === undefined) continue
+        // NOT filtered against the static table any more. The directory is the
+        // skeleton and the live wire roster decides callability (see
+        // `mergeTraeModelSources`), so a model this table has never heard of is
+        // still listed when the account can actually call it; the table's only
+        // remaining job is the offline fallback list.
+        const functionName = TRAE_CALLABILITY[id] ?? TRAE_SOLO_DIRECTORY_FUNCTIONS[0]!
         const display = typeof raw.display_name === 'string' && raw.display_name !== '' ? raw.display_name : id
         const name = TRAE_DISPLAY_OVERRIDES[id] ?? display
         const windows = windowsOf(raw)
@@ -350,27 +352,38 @@ export async function fetchRemoteModels(
 }
 
 /**
- * Read the callable roster for one credential: every directory function is
- * asked and the answers unioned, with the first function to list a config
- * owning it. A model is only callable through the function that lists it, so
- * asking a single function silently hides the models the others serve.
+ * The live WIRE roster: every `config_name` the account can actually call.
+ *
+ * Each directory function is asked in precedence order and the answers are
+ * unioned, FIRST function wins. Trae splits its roster across directory
+ * functions and a model is only callable through the function that lists it —
+ * `glm-5.3` exists solely under `solo_work_remote` on the CN gateway — so asking
+ * one function silently hides everything the others serve.
+ *
+ * One function failing must not hide the rest, so a failure is skipped; the
+ * result is `undefined` only when EVERY function failed, which the caller reads
+ * as "callability is unknown" rather than "nothing is callable".
+ * @param accessToken - the account's access token.
+ * @param userId - the Trae user id.
+ * @param channel - selects the directory function set.
+ * @param signal - optional cancellation.
+ * @param fetchFn - injectable fetcher for tests.
+ * @returns the wire rows, or undefined when no function answered.
  */
-export async function fetchTraeModels(
+export async function fetchWireRoster(
   accessToken: string,
   userId: string,
   channel: TraeChannel,
   signal?: AbortSignal,
   fetchFn: FetchFn = proxiedFetch,
-): Promise<TraeModel[]> {
-  const remote = await fetchRemoteModels(accessToken, signal, fetchFn)
-  if (remote !== undefined && remote.length > 0) return remote
-
+): Promise<TraeModel[] | undefined> {
   const byId = new Map<string, TraeModel>()
-  // The edition names the install the device identity is read from.
   const edition: TraeEdition = channel === 'solo' ? 'solo' : 'cn'
+  let answered = false
   for (const functionName of directoryFunctions(channel)) {
     const list = await fetchConfigList(accessToken, userId, functionName, signal, fetchFn, edition)
     if (list === undefined) continue
+    answered = true
     for (const raw of list) {
       if (typeof raw !== 'object' || raw === null) continue
       const config = raw as Record<string, unknown>
@@ -386,20 +399,102 @@ export async function fetchTraeModels(
       })
     }
   }
-  const flashFallback = byId.get('DeepSeek-V4-Flash-Official')
-  if (flashFallback !== undefined && !byId.has('deepseek-v4.1-flash')) {
-    byId.set('deepseek-v4.1-flash', {
-      id: 'deepseek-v4.1-flash',
-      name: 'DeepSeek-V4.1-Flash',
-      ...flashFallback.contextWindow === undefined ? {} : { contextWindow: flashFallback.contextWindow },
-      ...flashFallback.maxContextWindow === undefined ? {} : { maxContextWindow: flashFallback.maxContextWindow },
-      maxTokens: flashFallback.maxTokens ?? 32_000,
-      functionName: flashFallback.functionName,
-      wireConfigName: flashFallback.id,
-      efforts: flashFallback.efforts ?? ['none', 'low', 'high', 'xhigh'],
+  if (!answered) return undefined
+  return [...byId.values()]
+}
+
+/**
+ * Merge the two Trae model sources into one callable catalog.
+ *
+ * The REMOTE directory is the skeleton: display id and name, context windows,
+ * the Max window, the credit multiplier and the reasoning flags. The WIRE roster
+ * supplies the real `llm_utils_chat` `config_name` — the only id the chat
+ * endpoint accepts.
+ *
+ * A skeleton row with no wire match is DROPPED, because sending its display id
+ * would be rejected with `4001 param is invalid`: `Doubao-Seed-Code` and
+ * `glm-5.3` are both advertised by the directory and are not current
+ * `config_name`s, so they fail every request. Dropping them is also what keeps
+ * agent-internal configs (`search_agent_*`, paygo variants) out of the picker —
+ * they exist in the wire roster but never in the skeleton.
+ *
+ * Joining is two-tier, in priority order: the wire `config_name` equals the
+ * skeleton id (the common case), else the wire display name equals the skeleton
+ * name. A matched `config_name` that differs from the skeleton id is recorded as
+ * `wireConfigName`, which is what the chat call sends.
+ * @param remote - the skeleton rows.
+ * @param wire - the callable wire rows.
+ * @returns the merged catalog, in skeleton order.
+ */
+export function mergeTraeModelSources(remote: readonly TraeModel[], wire: readonly TraeModel[]): TraeModel[] {
+  const key = (value: string): string => value.trim().toLowerCase()
+  const wireById = new Map<string, TraeModel>()
+  const wireByName = new Map<string, TraeModel>()
+  for (const row of wire) {
+    if (!wireById.has(key(row.id))) wireById.set(key(row.id), row)
+    if (!wireByName.has(key(row.name))) wireByName.set(key(row.name), row)
+  }
+  const merged: TraeModel[] = []
+  for (const row of remote) {
+    const match = wireById.get(key(row.id)) ?? wireByName.get(key(row.name))
+    // No config_name maps to this display id: the chat endpoint would reject it.
+    if (match === undefined) continue
+    merged.push({
+      id: row.id,
+      name: row.name,
+      ...row.contextWindow === undefined ? {} : { contextWindow: row.contextWindow },
+      ...row.maxContextWindow === undefined ? {} : { maxContextWindow: row.maxContextWindow },
+      ...row.maxTokens === undefined ? {} : { maxTokens: row.maxTokens },
+      ...row.efforts === undefined ? {} : { efforts: row.efforts },
+      // The owning function comes from the WIRE row: it is what the chat call
+      // replays, and the skeleton does not know it.
+      functionName: match.functionName,
+      ...key(match.id) === key(row.id) ? {} : { wireConfigName: match.id },
     })
   }
-  return byId.size > 0 ? [...byId.values()] : [...TRAE_FALLBACK_MODELS]
+  return merged
+}
+
+/**
+ * Fetch the callable Trae catalog: the remote skeleton joined with the live wire
+ * roster.
+ *
+ * Both sources are fetched together because neither alone is usable — the
+ * skeleton is not callable, and the wire roster is unfiltered.
+ *
+ * Degradation is deliberate. When the wire roster is UNAVAILABLE (every
+ * directory function failed, e.g. the aggressive rate-limiting the reference
+ * documents as an intermittent 401) the skeleton rows are returned verbatim
+ * rather than dropped, because "cannot verify callability" is not the same as
+ * "not callable", and collapsing the picker is the worse failure. When the wire
+ * roster answers but nothing matches, the static list is returned so the picker
+ * is never empty.
+ * @param accessToken - the account's access token.
+ * @param userId - the Trae user id.
+ * @param channel - selects the directory function set.
+ * @param signal - optional cancellation.
+ * @param fetchFn - injectable fetcher for tests.
+ * @returns the catalog to show.
+ */
+export async function fetchTraeModels(
+  accessToken: string,
+  userId: string,
+  channel: TraeChannel,
+  signal?: AbortSignal,
+  fetchFn: FetchFn = proxiedFetch,
+): Promise<TraeModel[]> {
+  const [remote, wire] = await Promise.all([
+    fetchRemoteModels(accessToken, signal, fetchFn),
+    fetchWireRoster(accessToken, userId, channel, signal, fetchFn),
+  ])
+  if (wire === undefined) {
+    // Callability is unknown: keep every skeleton row rather than hiding a model
+    // that may work perfectly.
+    if (remote !== undefined && remote.length > 0) return remote
+    return [...TRAE_FALLBACK_MODELS]
+  }
+  const merged = mergeTraeModelSources(remote ?? [], wire)
+  return merged.length > 0 ? merged : [...TRAE_FALLBACK_MODELS]
 }
 
 /** Project one Trae model into the harness model-info shape. */
