@@ -1,10 +1,32 @@
 # Reference-project audit — findings and dispositions
 
 > **Status of the adoption round.** Landed so far: **F1, F2, F3, F6, F8, A3** and
-> the new model-list surface (vendor marks, modality icons, Agent Arena scores).
-> Still open from the user's list: **F4, F5, F7, B1**. Each landed item's own
-> commit message carries its evidence; the entries below keep the original
-> analysis rather than being rewritten to match the outcome.
+> the model-list surface (vendor marks + input-modality glyphs). Still open from
+> the user's list: **F4, F5, F7, B1**. Each landed item's own commit message
+> carries its evidence; the entries below keep the original analysis rather than
+> being rewritten to match the outcome.
+>
+> **Agent Arena scores were tried and dropped** (the user decided against showing
+> them). The research is recorded here so a future attempt does not repeat it:
+>
+> - `https://arena.ai/leaderboard/agent` renders **entirely client-side**; the
+>   SSR HTML contains only FAQ prose. Every candidate API endpoint under
+>   `/api/**` answers **403**, so the data cannot be fetched without a browser.
+> - Driving a real browser works: `playwright-core` against the machine's
+>   installed Chrome extracted 46 rows (Rank, Model, Net Improvement with a 95%
+>   CI, five per-signal columns, Sessions, cost/tokens/price). Use
+>   `waitUntil: 'domcontentloaded'` — NOT `networkidle`, which never settles
+>   because the page streams analytics beacons.
+> - **The published board is not monotonic.** Ranks 1-26 descend correctly
+>   (13.71% → 0.07%), but ranks 27-46 ASCEND to 15.52%, which would place the
+>   last-ranked model above rank 1. No leaderboard can mean that, and the
+>   anomaly was never explained: repeated re-reads were cut off when Cloudflare
+>   began serving a bot challenge. Any future attempt must resolve that before
+>   trusting the tail; the head alone is self-consistent.
+> - The row text concatenates the logo alt text, the display name and a
+>   "<vendor> · <license>" trailer, and the rank cell's text is the rank followed
+>   by the rank-change chip — both need splitting (the rank is the cell's first
+>   `span`).
 
 This document records one full pass over every reference project this hub is a
 derivative of, comparing it against the hub's own implementation and recording

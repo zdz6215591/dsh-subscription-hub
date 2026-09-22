@@ -1,16 +1,14 @@
 /**
- * Model vendor attribution and Agent Arena score lookup.
+ * Model vendor attribution.
  *
- * The rule both modules exist to enforce: a value appears only when it is known,
- * and an unknown model gets nothing rather than a plausible-looking guess. A
- * wrong company label or a score belonging to a different model is worse than a
- * blank, because the reader has no way to tell.
+ * The rule this module exists to enforce: a vendor appears only when it is
+ * known. A wrong company label is worse than a blank, because the reader has no
+ * way to tell it is wrong.
  */
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { modelVendor, vendorsOf } from '../src/model-vendor.js'
-import { AGENT_SCORE_ROWS, agentScoreFor, agentScoreKey } from '../src/model-agent-score.js'
 
 test('an owner segment is authoritative', () => {
   assert.equal(modelVendor('deepseek/deepseek-v4-pro')?.id, 'deepseek')
@@ -40,7 +38,6 @@ test('a bare id falls back to its family prefix', () => {
 })
 
 test('a family prefix applies to a model behind an unknown owner segment', () => {
-  // The owner is not a company this build knows, so the family still decides.
   assert.equal(modelVendor('some-gateway/glm-5.3')?.label, 'Z.ai')
   assert.equal(modelVendor('custom/deepseek-v4-pro')?.label, 'DeepSeek')
 })
@@ -51,9 +48,8 @@ test('an unknown model gets NO vendor rather than a guess', () => {
   for (const id of ['mystery-model-9', 'internal/secret-llm', 'foo', 'a/b/c']) {
     assert.equal(modelVendor(id), undefined, id)
   }
-  // Only the LAST segment names the model, and the FIRST names the owner, so a
-  // nested id still resolves by family while the owner check never reads the
-  // wrong part.
+  // The FIRST segment is the owner and the LAST is the model, so a nested id
+  // still resolves by family without the owner check reading the wrong part.
   assert.equal(modelVendor('mystery/gateway/claude-opus-5')?.label, 'Anthropic')
 })
 
@@ -69,119 +65,11 @@ test('vendorsOf lists each vendor once, in first-seen order', () => {
   assert.deepEqual(vendors.map(v => v.id), ['deepseek', 'anthropic', 'qwen'])
 })
 
-test('the score key normalizes ids and board names alike', () => {
-  // Owner segments, punctuation, case and parentheticals must all wash out, or
-  // a real match would be missed.
-  assert.equal(agentScoreKey('claude-opus-5'), 'claudeopus5')
-  assert.equal(agentScoreKey('Claude Opus 5 (High)'), 'claudeopus5')
-  assert.equal(agentScoreKey('DeepSeek V4 Pro (High) (0813)'), 'deepseekv4pro')
-  assert.equal(agentScoreKey('deepseek-v4-pro'), 'deepseekv4pro')
-  assert.equal(agentScoreKey('GPT 5.6 Sol (xHigh)'), 'gpt56sol')
-  assert.equal(agentScoreKey('Qwen3.8 Flash Next'), 'qwen38flashnext')
-})
-
-test('a score resolves for the models this hub actually routes to', () => {
-  const cases: [string, number][] = [
-    // With no effort known, the base's BEST measured variant is shown, and the
-    // returned score carries its own effort so the tooltip can disclose it.
-    ['claude-opus-5', 10.25],
-    ['claude-fable-5', 8.81],
-    ['claude-opus-4-8', 8.19],
-    ['claude-sonnet-5', 5.97],
-    ['gpt-5.6-sol', 7.10],
-    ['gpt-5.5', 2.67],                  // the board's unqualified row wins over (xHigh)
-    ['gpt-5.4', 1.26],
-    ['grok-4.5', 2.92],
-    ['grok-4.6', 2.01],
-    ['deepseek/deepseek-v4-pro', 4.14],
-    ['deepseek/deepseek-v4.1-flash', 4.88],
-    ['deepseek/deepseek-v4-flash', 1.80],
-    ['google/gemini-3.8-flash', 4.71],
-    ['z-ai/glm-5.3', 3.05],
-    ['z-ai/glm-5.3-flashx', undefined as unknown as number], // not the same model as "GLM 5.3 Flash"
-    ['moonshotai/Kimi-K3', 6.22],
-    ['Qwen/Qwen3.8-Max', 3.30],
-    ['meta/muse-spark-1.3', 4.20],
-  ]
-  for (const [id, expected] of cases) {
-    const score = agentScoreFor(id)
-    if (expected === undefined) {
-      // The board's nearest name is `GLM 5.3 Flash`, a DIFFERENT model, so the
-      // lookup must refuse rather than attribute another model's number.
-      assert.equal(score, undefined, `${id} must not inherit GLM 5.3 Flash's score`)
-      continue
-    }
-    assert.equal(score?.score, expected, id)
-  }
-})
-
-test('an exact effort is preferred over the base row, and a mismatch is flagged', () => {
-  // The board lists Claude Opus 5 twice, at (High) and (Max).
-  const high = agentScoreFor('claude-opus-5', 'high')
-  assert.equal(high?.score, 10.25)
-  assert.equal(high?.effort, 'high')
-  assert.equal(high?.effortMismatch, false)
-
-  const max = agentScoreFor('claude-opus-5', 'max')
-  assert.equal(max?.score, 10.16)
-  assert.equal(max?.effortMismatch, false)
-
-  // An effort the board did not measure falls back to a variant and SAYS SO,
-  // rather than implying the number was measured at this setting.
-  const low = agentScoreFor('claude-opus-5', 'low')
-  assert.ok(low !== undefined)
-  assert.equal(low.effortMismatch, true)
-  assert.equal(low.score, 10.25) // the best variant
-
-  // And with no effort known at all, a qualified row is STILL disclosed as a
-  // variant: the reader is looking at a number measured at one specific setting.
-  const unknown = agentScoreFor('claude-opus-5')
-  assert.equal(unknown?.effort, 'high')
-  assert.equal(unknown?.effortMismatch, true)
-})
-
-test('an unlisted model gets NO score rather than a nearest match', () => {
-  for (const id of ['gpt-6', 'claude-opus-9', 'mystery/llm-1', 'Qwen/Qwen3.8-Flash', '']) {
-    assert.equal(agentScoreFor(id), undefined, id)
-  }
-})
-
-test('every vendored row is well formed and internally consistent', () => {
-  const seen = new Set<string>()
-  for (const row of AGENT_SCORE_ROWS) {
-    assert.match(row.key, /^[a-z0-9]+$/, row.key)
-    assert.ok(row.label.length > 0)
-    assert.ok(Number.isFinite(row.score))
-    assert.ok(row.ci >= 0)
-    assert.ok(row.rank >= 1)
-    assert.ok(row.vendor.length > 0)
-    // Same key at different efforts is legal (Claude Opus 5); the same key AND
-    // effort twice would be a transcription error.
-    const identity = `${row.key}:${row.effort ?? ''}`
-    assert.equal(seen.has(identity), false, `duplicate row ${identity}`)
-    seen.add(identity)
-  }
-  // The board is sorted by rank, and the vendored head is its monotonic region:
-  // rank order and score order must agree, or a row was transcribed wrongly.
-  for (let i = 1; i < AGENT_SCORE_ROWS.length; i += 1) {
-    const previous = AGENT_SCORE_ROWS[i - 1]!
-    const current = AGENT_SCORE_ROWS[i]!
-    assert.ok(previous.score >= current.score, `score order breaks at rank ${String(current.rank)}`)
-    assert.ok(previous.rank < current.rank, `rank order breaks at ${String(current.rank)}`)
-  }
-  // Every row's key must be reachable through the public lookup.
-  for (const row of AGENT_SCORE_ROWS) {
-    const direct = agentScoreFor(row.label, row.effort)
-    assert.ok(direct !== undefined, `unreachable row ${row.label}`)
-  }
-})
-
 /**
  * Real ids, taken from the live catalogs observed while building this: Command
  * Code's `GET /provider/v1/models`, the bundled Codex/Claude/Grok/Copilot
- * rosters, and the Trae/Cline model lists. This is the check that matters — the
- * synthetic cases above prove the rules, this proves the rules meet the ids the
- * hub actually serves.
+ * rosters, and the Trae/Cline model lists. The synthetic cases above prove the
+ * rules; this proves the rules meet the ids the hub actually serves.
  */
 const LIVE_IDS: readonly string[] = [
   // Command Code (live /provider/v1/models)
@@ -214,19 +102,27 @@ test('every live hub model id resolves to a vendor', () => {
     [],
     `unresolved live ids: ${unresolved.join(', ')}`,
   )
+  // Spot-check the exact attributions the list will show.
+  assert.equal(modelVendor('deepseek/deepseek-v4-pro')?.label, 'DeepSeek')
+  assert.equal(modelVendor('Qwen/Qwen3.8-Max')?.label, 'Alibaba Qwen')
+  assert.equal(modelVendor('google/gemini-3.8-flash')?.label, 'Google')
+  assert.equal(modelVendor('claude-opus-5')?.label, 'Anthropic')
+  assert.equal(modelVendor('gpt-5.6-sol')?.label, 'OpenAI')
+  assert.equal(modelVendor('grok-4.5')?.label, 'xAI')
 })
 
-test('the live ids the board lists resolve to their board score', () => {
-  const expected = LIVE_IDS.filter(id => agentScoreFor(id) !== undefined).length
-  // Coverage is the point: a mis-keyed lookup would silently return nothing for
-  // these flagship models, and the feature would look implemented but empty.
-  assert.ok(expected >= 20, `only ${String(expected)} of ${String(LIVE_IDS.length)} live ids scored`)
-  // Spot-check the exact figures end to end, through the real id shapes.
-  assert.equal(agentScoreFor('deepseek/deepseek-v4-pro')?.score, 4.14)
-  assert.equal(agentScoreFor('Qwen/Qwen3.8-Max')?.score, 3.30)
-  assert.equal(agentScoreFor('google/gemini-3.8-flash')?.score, 4.71)
-  assert.equal(agentScoreFor('claude-opus-5')?.score, 10.25)
-  assert.equal(agentScoreFor('gpt-5.6-sol')?.score, 7.10)
-  assert.equal(agentScoreFor('grok-4.5')?.score, 2.92)
-  assert.equal(agentScoreFor('doubao-seed-code'), undefined) // not on the board
+test('every vendor carries a usable monogram and a distinct id', () => {
+  const ids = new Set<string>()
+  for (const id of LIVE_IDS) {
+    const vendor = modelVendor(id)
+    if (vendor === undefined) continue
+    // The mark shows this verbatim, so it must be present and short.
+    assert.ok(vendor.mono.length >= 1 && vendor.mono.length <= 2, `${id}: mono=${vendor.mono}`)
+    assert.ok(vendor.label.length > 0)
+    // One vendor is one id, so the legend and the React keys stay stable.
+    ids.add(vendor.id)
+  }
+  // The live roster spans several companies; a single-id result would mean the
+  // owner table never matched and every row fell through to one family rule.
+  assert.ok(ids.size >= 8, `only ${String(ids.size)} distinct vendors resolved`)
 })

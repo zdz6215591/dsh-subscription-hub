@@ -18,7 +18,7 @@ import type { ConnectionHandle, RpcResult } from '@deepseek-ai/dsh-api-remotes/c
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 import { callSubscriptionsAuth, SubscriptionsAuthError } from './subscriptions-rpc.js'
-import { AgentScoreBadge, ModalityIcons, VendorMark } from './ModelIcons.js'
+import { ModalityIcons, VendorMark } from './ModelIcons.js'
 export { callSubscriptionsAuth, SubscriptionsAuthError } from './subscriptions-rpc.js'
 
 /** Poll cadence while a provider login attempt is busy. */
@@ -108,8 +108,6 @@ export interface VisibleModelView {
   vendor?: { id: string; label: string; mono: string }
   /** Accepted input modalities; absent when the route never declared them. */
   inputModalities?: string[]
-  /** Agent Arena net improvement; absent when the board does not list the model. */
-  agentScore?: { score: number; ci: number; rank: number; label: string; effort?: string; vendor: string; effortMismatch: boolean }
 }
 
 /** One Cline model's upstream-channel pin, as answered by `clinePins`. */
@@ -2555,9 +2553,8 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                                   checked={model.visible}
                                   onChange={event => { void setVisible(id, model.id, event.target.checked) }}
                                 />
-                                {/* Vendor mark, name, then the capability icons and the
-                                    board score: the row answers "who makes this, what
-                                    does it take, and how good is it at driving tools?" */}
+                                {/* Vendor mark, name, then the capability glyphs: the row
+                                    answers "who makes this, and what does it take?". */}
                                 {model.vendor !== undefined && <VendorMark vendor={model.vendor} />}
                                 <span style={styles.defaultEffortName} title={model.id}>
                                   {model.name}
@@ -2565,7 +2562,6 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                                 </span>
                                 <span style={styles.visibilitySpacer} />
                                 <ModalityIcons modalities={model.inputModalities} />
-                                <AgentScoreBadge score={model.agentScore} />
                               </label>
                             ))}
                           </div>

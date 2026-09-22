@@ -1,26 +1,29 @@
 /**
- * The model list's icon set: vendor mark, input modalities, agent score.
+ * The model list's icon set: the vendor mark and the input-modality glyphs.
  *
- * Design rules, all in service of "precise and small" rather than decorative:
+ * Layout per row: vendor mark → model name → (elastic gap) → modality glyphs, so
+ * a grid of rows reads as aligned columns rather than ragged text.
  *
- * - **Monochrome and borderless.** Every glyph is `currentColor` at the muted
- *   text tone with no box, border or fill, so a long list reads as one quiet
- *   column of marks instead of a row of badges.
- * - **Fixed footprint.** Each mark is a fixed-size inline-flex box, so rows line
- *   up whether or not a model has an image modality or a score.
- * - **Never a guess.** A model with no known vendor renders nothing, and one the
- *   board does not list renders no score — see the modules that supply them.
- * - **Accessible without the glyph.** Icons are `aria-hidden`; the vendor's name
- *   and the score's meaning travel in `title` and in the row's own label, so
- *   nothing is conveyed by shape or colour alone.
+ * Visual rules, in service of "precise and small":
+ *
+ * - **Monochrome and borderless.** Every mark is `currentColor` in the muted text
+ *   tone, with no border, no fill and no chip background, so a long list reads as
+ *   one quiet column of marks rather than a row of badges.
+ * - **Fixed footprint.** Each mark occupies the same box, so rows line up whether
+ *   a model declares one modality or five.
+ * - **Never a guess.** A model whose vendor is unknown renders no mark, and a
+ *   route that never declared its modalities renders no glyphs: the harness treats
+ *   an explicit omission as a negative capability, not as text-only.
+ * - **Accessible without shape.** Marks are `aria-hidden`; the meaning travels in
+ *   each one's `title` and in the harness's own model list, so nothing is
+ *   conveyed by a pictogram alone.
  *
  * @module dsh-subscription-hub/client/ModelIcons
  */
 
 import type { ModelVendor } from '../model-vendor.js'
-import type { AgentScore } from '../model-agent-score.js'
 
-/** Shared geometry for one inline glyph. */
+/** Glyph box in pixels. Small enough to disappear into a dense list. */
 const GLYPH = 14
 
 /**
@@ -28,8 +31,8 @@ const GLYPH = 14
  *
  * A monogram rather than each company's logo: those are third-party trademarks,
  * and a hand-redrawn lookalike that renders subtly wrong is worse than a clean
- * initial that is always right. The seam is a single component, so real marks can
- * be dropped in later without touching any call site.
+ * initial that is always right. The seam is one component, so real marks can be
+ * dropped in later without touching any call site.
  * @param props - the vendor to render.
  */
 export function VendorMark({ vendor }: { vendor: ModelVendor }): React.JSX.Element {
@@ -45,10 +48,9 @@ export function VendorMark({ vendor }: { vendor: ModelVendor }): React.JSX.Eleme
         height: 16,
         flex: '0 0 auto',
         // No border, no background: the glyph alone carries the identity.
-        color: 'var(--dsw-alias-text-tertiary, #8b8b93)',
+        color: 'var(--dsw-alias-label-tertiary, #8b8b93)',
         fontSize: 10,
         fontWeight: 600,
-        letterSpacing: 0,
         lineHeight: 1,
         userSelect: 'none',
       }}
@@ -58,8 +60,32 @@ export function VendorMark({ vendor }: { vendor: ModelVendor }): React.JSX.Eleme
   )
 }
 
-/** One input-modality glyph, drawn as a stroked mark. */
-function ModalityGlyph({ kind }: { kind: 'text' | 'image' }): React.JSX.Element {
+/** The tooltip and ordering for one modality. */
+interface ModalityMeta {
+  label: string
+  order: number
+}
+
+/**
+ * The modality vocabulary, keyed by the harness's `ModelModality` values.
+ *
+ * `text` and `image` are what dsh-llm declares today; `video`, `file` and `audio`
+ * are carried so a route that starts declaring them gets a glyph instead of
+ * nothing, and any value not listed here still gets the neutral glyph below.
+ */
+const MODALITIES: Readonly<Record<string, ModalityMeta>> = Object.freeze({
+  text: { label: 'Text', order: 0 },
+  image: { label: 'Image', order: 1 },
+  video: { label: 'Video', order: 2 },
+  audio: { label: 'Audio', order: 3 },
+  file: { label: 'File', order: 4 },
+})
+
+/** Metadata for a modality this build does not know by name. */
+const UNKNOWN_MODALITY: ModalityMeta = { label: 'Additional input', order: 9 }
+
+/** One stroked glyph, sized to the shared box. */
+function ModalityGlyph({ kind }: { kind: string }): React.JSX.Element {
   const common = {
     width: GLYPH,
     height: GLYPH,
@@ -70,45 +96,73 @@ function ModalityGlyph({ kind }: { kind: 'text' | 'image' }): React.JSX.Element 
     strokeLinecap: 'round' as const,
     strokeLinejoin: 'round' as const,
   }
-  return (
-    <svg {...common} aria-hidden="true">
-      {kind === 'text' ? (
-        // Three text baselines.
-        <>
-          <path d="M2.5 4h11" />
-          <path d="M2.5 8h11" />
-          <path d="M2.5 12h6.5" />
-        </>
-      ) : (
-        // A framed picture with a horizon mark.
-        <>
-          <rect x="2" y="3" width="12" height="10" rx="1.5" />
-          <circle cx="5.75" cy="6.5" r="1" />
-          <path d="M2.5 11.5l3.2-3 2.6 2.4 2.4-2.2 2.8 2.6" />
-        </>
-      )}
-    </svg>
-  )
+  switch (kind) {
+    case 'text':
+      // A capital T, drawn rather than typed so it keeps the same stroke weight
+      // as the other glyphs at this size.
+      return (
+        <svg {...common} aria-hidden="true">
+          <path d="M3 4h10" />
+          <path d="M8 4v8" />
+        </svg>
+      )
+    case 'image':
+      // A framed picture with a horizon and a sun.
+      return (
+        <svg {...common} aria-hidden="true">
+          <rect x="2" y="3" width="12" height="10" rx="1.8" />
+          <circle cx="5.7" cy="6.4" r="0.9" />
+          <path d="M2.4 11.4l3-2.9 2.4 2.3 2.2-2.1 2.6 2.5" />
+        </svg>
+      )
+    case 'video':
+      // A camera body with a lens barrel.
+      return (
+        <svg {...common} aria-hidden="true">
+          <rect x="2" y="4.4" width="8" height="7.2" rx="1.6" />
+          <path d="M10 8l4-2.3v4.6L10 8z" />
+        </svg>
+      )
+    case 'file':
+      // A page with a folded corner.
+      return (
+        <svg {...common} aria-hidden="true">
+          <path d="M4 2.4h5l3 3v8.2H4z" />
+          <path d="M9 2.4v3h3" />
+        </svg>
+      )
+    default:
+      // The neutral mark for an unrecognised modality: a puzzle piece, reading as
+      // "additional input" rather than as a warning.
+      return (
+        <svg {...common} aria-hidden="true">
+          <path d="M6.2 3.4a1.35 1.35 0 112.7 0v1.2h1.5a.8.8 0 01.8.8v1.7h1.1a1.35 1.35 0 110 2.7h-1.1v1.7a.8.8 0 01-.8.8H8.9v1.2a1.35 1.35 0 11-2.7 0v-1.2H4.7a.8.8 0 01-.8-.8V9.8h1.1a1.35 1.35 0 100-2.7H3.9V5.4a.8.8 0 01.8-.8h1.5z" />
+        </svg>
+      )
+  }
 }
 
 /**
- * The input modalities a model accepts, as muted inline glyphs.
+ * The input modalities a model accepts, as muted borderless glyphs.
  *
- * `undefined` means the route never declared them, which is NOT the same as
- * text-only: the harness treats an explicit omission as a negative capability, so
- * rendering nothing is the honest choice for an undeclared model.
- * @param props - the modalities to render.
+ * Text is shown ONLY when the model accepts nothing else: every text-out model
+ * takes text, so a text glyph on every row would be noise. A model with image
+ * input therefore shows just the image glyph, which is the fact a reader is
+ * actually scanning for.
+ * @param props - the declared modalities, or undefined when the route never said.
  */
 export function ModalityIcons({ modalities }: { modalities: readonly string[] | undefined }): React.JSX.Element | null {
   if (modalities === undefined || modalities.length === 0) return null
-  // Text is implied by every text-out model and would be noise on every row;
-  // only a modality that is NOT plain text is worth a glyph, plus a single text
-  // mark when the model is text-only so the column never looks empty-handed.
+
   const onlyText = modalities.length === 1 && modalities[0] === 'text'
-  const shown: ('text' | 'image')[] = onlyText
-    ? ['text']
-    : modalities.filter((m): m is 'image' => m === 'image')
+  const shown = onlyText ? ['text'] : modalities.filter(modality => modality !== 'text')
   if (shown.length === 0) return null
+
+  // A stable, meaningful order rather than whatever order the route listed.
+  const ordered = [...new Set(shown)].sort(
+    (left, right) => (MODALITIES[left] ?? UNKNOWN_MODALITY).order - (MODALITIES[right] ?? UNKNOWN_MODALITY).order,
+  )
+
   return (
     <span
       style={{
@@ -116,55 +170,19 @@ export function ModalityIcons({ modalities }: { modalities: readonly string[] | 
         alignItems: 'center',
         gap: 4,
         flex: '0 0 auto',
-        color: 'var(--dsw-alias-text-tertiary, #8b8b93)',
+        color: 'var(--dsw-alias-label-tertiary, #8b8b93)',
       }}
     >
-      {shown.map(kind => (
+      {ordered.map(modality => (
         <span
-          key={kind}
+          key={modality}
           aria-hidden="true"
-          title={kind === 'image' ? 'Accepts images' : 'Text only'}
+          title={(MODALITIES[modality] ?? UNKNOWN_MODALITY).label}
           style={{ display: 'inline-flex', alignItems: 'center' }}
         >
-          <ModalityGlyph kind={kind} />
+          <ModalityGlyph kind={modality} />
         </span>
       ))}
-    </span>
-  )
-}
-
-/**
- * The Agent Arena net-improvement figure, with its confidence interval.
- *
- * Rendered only when the board lists the model. The tooltip names the board's own
- * model name, the measured effort variant and the CI, so the number is never read
- * as more precise than it is — and when the variant differs from the one in
- * effect, the tooltip says so rather than implying a measurement of this setting.
- * @param props - the resolved score.
- */
-export function AgentScoreBadge({ score }: { score: AgentScore | undefined }): React.JSX.Element | null {
-  if (score === undefined) return null
-  const sign = score.score >= 0 ? '+' : ''
-  const effortNote = score.effort === undefined
-    ? ''
-    : ` (${score.effort}${score.effortMismatch ? ' variant, not the setting in use' : ''})`
-  return (
-    <span
-      title={`Agent Arena · ${score.label}${effortNote} · ${sign}${score.score.toFixed(2)}% ±${score.ci.toFixed(2)} net improvement vs the average model · rank #${String(score.rank)}`}
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        flex: '0 0 auto',
-        color: 'var(--dsw-alias-text-tertiary, #8b8b93)',
-        fontSize: 10,
-        lineHeight: 1,
-        fontVariantNumeric: 'tabular-nums',
-        whiteSpace: 'nowrap',
-      }}
-    >
-      {/* The word carries the meaning; the glyph makes it scannable. */}
-      <span aria-hidden="true" style={{ fontSize: 9, marginRight: 3, opacity: 0.9 }}>◈</span>
-      {sign}{score.score.toFixed(2)}%
     </span>
   )
 }
