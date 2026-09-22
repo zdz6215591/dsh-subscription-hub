@@ -227,12 +227,21 @@ export interface TokenSavingsView {
   inputTokens: number
   outputTokens: number
   cacheReadTokens: number
+  /** Cache-write tokens; priced only when the published rate table carries a rate for them. */
+  cacheWriteTokens?: number
+  /** Cache-write tokens that no published rate covers, so they are billed at nothing. */
+  unpricedCacheWriteTokens?: number
   savedRmb: number
   savedUsd: number
+  /** The host's USD→CNY rate; absent on a Host older than the field. */
+  rmbPerUsd?: number
   turns: number
   byProvider: Record<string, ProviderSavingsView>
   updatedAt: number
 }
+
+/** The rate to print per-provider RMB figures with, tolerating an older Host. */
+const FALLBACK_RMB_PER_USD = 7.23
 
 /** `login` endpoint value: the URL the user completes OAuth at. */
 interface LoginResponse {
@@ -1643,11 +1652,14 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     void loadCheckinStatus('trae')
   }, [loadCheckinStatus])
 
-  const loadSavings = useCallback(async (showSpinner = false): Promise<void> => {
+  const loadSavings = useCallback(async (refresh = false): Promise<void> => {
     if (rpc === undefined) return
-    if (showSpinner) setSavingsLoading(true)
+    if (refresh) setSavingsLoading(true)
     try {
-      const res = await callSubscriptionsAuth<TokenSavingsView>(rpc, 'tokenStats', {})
+      // `refresh` makes the HOST re-walk the session history; without it the
+      // endpoint answers from its cached summary, so the button would relabel a
+      // cached figure as freshly recalculated.
+      const res = await callSubscriptionsAuth<TokenSavingsView>(rpc, 'tokenStats', refresh ? { refresh: true } : {})
       if (mountedRef.current) setSavings(res)
     } catch { /* best effort */ } finally {
       if (mountedRef.current) setSavingsLoading(false)
@@ -1898,6 +1910,12 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 {`缓存读取 (${savings.totalTokens > 0 ? ((savings.cacheReadTokens / savings.totalTokens) * 100).toFixed(0) : 0}%)`}
               </span>
             </div>
+            {(savings.cacheWriteTokens ?? 0) > 0 && (
+              <div style={styles.savingsMetric}>
+                <span style={styles.savingsMetricValue}>{formatTokens(savings.cacheWriteTokens ?? 0)}</span>
+                <span style={styles.savingsMetricLabel}>{t('savingsCacheWrite')}</span>
+              </div>
+            )}
           </div>
           {savingsProviders.length > 0 && (
             <div style={styles.savingsProviders}>
@@ -1913,7 +1931,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                     }} />
                   </span>
                   <span style={styles.savingsProviderValue}>
-                    {`${formatTokens(stat.tokens)} · ¥${(stat.costUsd * 7.23).toFixed(2)}`}
+                    {`${formatTokens(stat.tokens)} · ¥${(stat.costUsd * (savings.rmbPerUsd ?? FALLBACK_RMB_PER_USD)).toFixed(2)}`}
                   </span>
                 </div>
               ))}

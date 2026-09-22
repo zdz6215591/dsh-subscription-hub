@@ -22,8 +22,14 @@ One Settings → **Subscriptions** page for ten subscription routes:
 Also included:
 
 - **Lifetime token accounting + savings banner** — totals every subscription
-  token you have spent and prices it against pay-as-you-go API rates, showing
-  the money you avoided paying (in ¥, with a per-subscription breakdown).
+  token you have spent and prices it against published pay-as-you-go API rates,
+  showing the money you avoided paying (in ¥, with a per-subscription breakdown).
+  It reads both transcript generations (a turn's usage is recorded either as a
+  stream `usage` chunk or on the settled assistant message — a session uses one
+  or the other), prices each turn by its own catalog row including the
+  peak/off-peak windows, context-length bands and cache-write rates that row
+  publishes, and marks a model no published rate covers as approximate instead of
+  guessing a lookalike. **Recalculate** re-walks the whole history.
 - **Multi-account pool** with quota-aware rotation, per-account usage bars, and
   image-request account failover.
 - **Visible-model checkboxes** (composer picker only) plus a **Refresh models**

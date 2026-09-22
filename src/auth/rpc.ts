@@ -807,7 +807,11 @@ async function dispatch(
       return ok(await extras.clineAutoConfigure(readString(payload, 'model')))
     }
     case 'tokenStats': {
-      return ok(await getTokenSavingsSummary())
+      // `refresh` re-walks the session history: the panel's own refresh button
+      // must not hand back the cached summary under a "recalculating" label.
+      const refresh = typeof payload === 'object' && payload !== null && !Array.isArray(payload)
+        && (payload as Record<string, unknown>).refresh === true
+      return ok(await getTokenSavingsSummary(refresh))
     }
     case 'poolGet':
       if (poolMode === undefined) throw new BadRequest('pool mode is unavailable')
