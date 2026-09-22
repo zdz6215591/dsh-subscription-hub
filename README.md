@@ -328,6 +328,11 @@ credits: their provider endpoints, model rosters, and pin/probe mechanics change
 with the upstream products, so both lists must be re-checked on every such
 request. Nothing is merged silently.
 
+The record of the last full pass — every difference found, each marked
+**adopted / adapted / deliberately skipped**, plus the items still open — is kept
+in [`docs/reference-audit.md`](docs/reference-audit.md). Read it before starting
+another pass so the same ground is not covered twice.
+
 ## Development notes
 
 - `npm test` — TypeScript build plus the full offline suite.
