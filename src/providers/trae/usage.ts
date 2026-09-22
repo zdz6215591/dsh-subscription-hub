@@ -45,6 +45,11 @@ function numberValue(value: unknown): number | undefined {
   return undefined
 }
 
+/** Real timer, injectable so tests never wait on the retry backoff. */
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise(resolve => { setTimeout(resolve, ms) })
+}
+
 /** One credit source (a pack) from the entitlement list. */
 export interface TraeCreditPack {
   /** Human label from the API, e.g. 老用户福利 / 每月登录赠送 / 签到奖励. */
@@ -228,46 +233,137 @@ function alreadyClaimed(payload: unknown): boolean {
 }
 
 /**
- * Claim today's check-in credits. Already-claimed counts as success, matching
- * the CodeBuddy surface: pressing the button on a day that is already done
- * reports success instead of an error.
+ * Whether the upstream refused the claim *transiently*.
+ *
+ * Trae answers `当前签到人数过多` (and the equivalent `too many` / `busy` /
+ * `频繁` wordings) when its claim queue is saturated. The web client simply lets
+ * the user press again, and the claim is idempotent server-side, so this hub
+ * retries with backoff instead of reporting a dead end.
+ */
+function transientClaimRefusal(message: string, code: number | undefined): boolean {
+  if (/人数过多|过多|稍后|稍候|稍后再试|频繁|忙|too\s*many|busy|try\s*again|rate\s*limit/i.test(message)) return true
+  // A 429-shaped business code is a rate limit even when the text is opaque.
+  return code === 429 || code === 10001 || code === 10002
+}
+
+/** The claim outcome for one attempt. */
+interface TraeClaimAttempt {
+  /** Parsed payload, when the endpoint answered JSON. */
+  payload: unknown
+  /** Business code from the payload, when present. */
+  code: number | undefined
+  /** Business message from the payload, when present. */
+  message: string
+  /** Whether reading today's status before the claim said it was already done. */
+  alreadyDone: boolean
+  /** Credits the pre-claim status reported, when it was already done. */
+  doneCredits: number
+}
+
+/** One claim attempt: read the status, then post the claim. */
+async function attemptClaim(
+  accessToken: string,
+  userId: string,
+  signal: AbortSignal | undefined,
+  fetchFn: typeof proxiedFetch,
+): Promise<TraeClaimAttempt> {
+  // Probe first so an already-completed day does not error upstream.
+  const status = await fetchTraeCheckinStatus(accessToken, userId, signal, fetchFn).catch(() => undefined)
+  if (status?.checkedIn === true) {
+    return { payload: undefined, code: 0, message: '今日已签到', alreadyDone: true, doneCredits: status.credits }
+  }
+  const payload = await postJson(accessToken, userId, TRAE_CHECKIN_CLAIM_PATH, {}, signal, fetchFn)
+  const record = isRecord(payload) ? payload : {}
+  const message = typeof record.message === 'string' && record.message !== ''
+    ? record.message
+    : typeof record.msg === 'string' && record.msg !== ''
+      ? record.msg
+      : ''
+  return {
+    payload,
+    code: numberValue(record.code),
+    message,
+    alreadyDone: false,
+    doneCredits: 0,
+  }
+}
+
+/** Attempts and backoff for a saturated claim queue. */
+const TRAE_CLAIM_MAX_ATTEMPTS = 4
+const TRAE_CLAIM_RETRY_DELAYS_MS: readonly number[] = [2_000, 5_000, 10_000]
+
+/**
+ * Claim today's check-in credits.
+ *
+ * Two upstream behaviours are absorbed rather than surfaced as failures:
+ * a day that is already claimed counts as success (matching the CodeBuddy
+ * surface), and the transient `当前签到人数过多` refusal is retried with
+ * backoff — re-reading the status between attempts, so a claim that actually
+ * landed on a saturated response is still reported as the success it is.
  */
 export async function claimTraeCheckin(
   accessToken: string,
   userId: string,
   signal?: AbortSignal,
   fetchFn: typeof proxiedFetch = proxiedFetch,
-): Promise<{ ok: boolean; message: string; credits?: number }> {
+  sleep: (ms: number) => Promise<void> = defaultSleep,
+): Promise<{ ok: boolean; message: string; credits?: number; attempts: number }> {
+  let attempts = 0
   try {
-    // Probe first so an already-completed day does not error upstream.
-    const status = await fetchTraeCheckinStatus(accessToken, userId, signal, fetchFn).catch(() => undefined)
-    if (status?.checkedIn === true) {
-      return { ok: true, message: '今日已签到', ...status.credits > 0 ? { credits: status.credits } : {} }
-    }
-    if (status?.enabled === false) return { ok: false, message: '该账号当前未开启签到活动' }
-    const payload = await postJson(accessToken, userId, TRAE_CHECKIN_CLAIM_PATH, {}, signal, fetchFn)
-    if (alreadyClaimed(payload)) {
-      const record = isRecord(payload) ? payload : {}
-      const credits = numberValue(record.credits)
-      return { ok: true, message: '今日已签到', ...credits === undefined ? {} : { credits } }
-    }
-    const record = isRecord(payload) ? payload : {}
-    // A non-zero business code is a real failure even on HTTP 200.
-    const code = numberValue(record.code)
-    if (code !== undefined && code !== 0) {
-      const message = typeof record.message === 'string' && record.message !== ''
-        ? record.message
-        : `签到失败（code ${String(code)}）`
-      return { ok: false, message }
-    }
-    const credits = numberValue(record.credits) ?? numberValue(isRecord(record.data) ? record.data.credits : undefined)
-    return {
-      ok: true,
-      message: credits === undefined ? '签到成功' : `签到成功，获得 ${String(credits)} 积分`,
-      ...credits === undefined ? {} : { credits },
+    for (;;) {
+      attempts += 1
+      const attempt = await attemptClaim(accessToken, userId, signal, fetchFn)
+
+      if (attempt.alreadyDone) {
+        return {
+          ok: true,
+          message: '今日已签到',
+          ...attempt.doneCredits > 0 ? { credits: attempt.doneCredits } : {},
+          attempts,
+        }
+      }
+      if (alreadyClaimed(attempt.payload)) {
+        const record = isRecord(attempt.payload) ? attempt.payload : {}
+        const credits = numberValue(record.credits)
+        return { ok: true, message: '今日已签到', ...credits === undefined ? {} : { credits }, attempts }
+      }
+
+      const failed = attempt.code !== undefined && attempt.code !== 0
+      const transient = transientClaimRefusal(attempt.message, attempt.code)
+      if (!failed || !transient) {
+        if (failed) {
+          return {
+            ok: false,
+            message: attempt.message === '' ? `签到失败（code ${String(attempt.code)}）` : attempt.message,
+            attempts,
+          }
+        }
+        const record = isRecord(attempt.payload) ? attempt.payload : {}
+        const credits = numberValue(record.credits) ?? numberValue(isRecord(record.data) ? record.data.credits : undefined)
+        return {
+          ok: true,
+          message: credits === undefined ? '签到成功' : `签到成功，获得 ${String(credits)} 积分`,
+          ...credits === undefined ? {} : { credits },
+          attempts,
+        }
+      }
+
+      if (attempts >= TRAE_CLAIM_MAX_ATTEMPTS) {
+        return {
+          ok: false,
+          message: `${attempt.message === '' ? '签到失败' : attempt.message}（已重试 ${String(attempts)} 次，签到本身是幂等的，稍后可再试或直接在 Trae 客户端签到）`,
+          attempts,
+        }
+      }
+      // Wait before retrying, but never outlive the caller's own cancellation.
+      const delay = TRAE_CLAIM_RETRY_DELAYS_MS[attempts - 1] ?? TRAE_CLAIM_RETRY_DELAYS_MS[TRAE_CLAIM_RETRY_DELAYS_MS.length - 1] ?? 5_000
+      await sleep(delay)
+      if (signal?.aborted === true) {
+        return { ok: false, message: '签到已取消', attempts }
+      }
     }
   } catch (error) {
-    return { ok: false, message: error instanceof Error ? error.message : String(error) }
+    return { ok: false, message: error instanceof Error ? error.message : String(error), attempts }
   }
 }
 

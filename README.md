@@ -153,6 +153,18 @@ Two other rules keep the picker honest:
   function while the effort levels and the Max window are folded in. A row whose
   `max` window merely repeats `dev` exposes no budget switch.
 
+### Check-in
+
+The daily claim tolerates both upstream behaviours the web client lives with:
+
+- a day that is already claimed counts as **success**, not an error;
+- the transient `当前签到人数过多` refusal (the claim queue is saturated) is
+  **retried with backoff** (2s → 5s → 10s). Today's status is re-read between
+  attempts, so a claim that actually landed on a saturated answer is still
+  reported as the success it is. Only after the retry budget is spent does the
+  card show the message, together with the note that the claim is idempotent —
+  retrying later, or in the Trae client, is safe.
+
 ## Why this exists
 
 Installing several subscription plugins at once:

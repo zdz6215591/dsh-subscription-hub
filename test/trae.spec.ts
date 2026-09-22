@@ -36,6 +36,8 @@ import { mergeTraeModels, TRAE_FALLBACK_MODELS, fetchRemoteModels } from '../src
 import { toTraeMessages } from '../src/providers/trae/adapter.js'
 import type { FetchFn } from '../src/providers/common.js'
 import {
+  claimTraeCheckin,
+  fetchTraeCheckinStatus,
   generateMorningTargetTime,
   localDateString,
   parseTraeUsage,
@@ -458,4 +460,100 @@ test('the Trae check-in schedules a morning target on the same day', () => {
   assert.equal(at.getDate(), 20)
   // The window is 06:00:00–07:54:59.
   assert.ok(at.getHours() >= 6 && at.getHours() < 8, `target hour was ${String(at.getHours())}`)
+})
+
+// ---------------------------------------------------------------------------
+// Check-in claiming
+// ---------------------------------------------------------------------------
+
+/** A fetch stub that answers the status path and a scripted claim sequence. */
+function checkinFetch(script: {
+  status: unknown
+  claims: readonly unknown[]
+  statusAfter?: unknown
+}): { fetchFn: FetchFn; claimCalls: () => number } {
+  let claimCalls = 0
+  const fetchFn = (async (input: string | URL | Request) => {
+    const url = String(input)
+    if (url.includes('/checkin_credits/claim')) {
+      const payload = script.claims[Math.min(claimCalls, script.claims.length - 1)]
+      claimCalls += 1
+      return new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+    if (url.includes('/checkin_credits/status')) {
+      const payload = claimCalls > 0 && script.statusAfter !== undefined ? script.statusAfter : script.status
+      return new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })
+  }) as unknown as FetchFn
+  return { fetchFn, claimCalls: () => claimCalls }
+}
+
+test('claimTraeCheckin retries the saturated check-in queue and reports the success', async () => {
+  const { fetchFn, claimCalls } = checkinFetch({
+    status: { checked_in: false, credits: 0, enable: true },
+    claims: [
+      { code: 4001, message: '当前签到人数过多，请稍后再试' },
+      { code: 4001, message: '当前签到人数过多，请稍后再试' },
+      { code: 0, message: 'success', credits: 150 },
+    ],
+  })
+  const delays: number[] = []
+  const result = await claimTraeCheckin('token', 'user', undefined, fetchFn, async (ms) => { delays.push(ms) })
+
+  assert.equal(result.ok, true)
+  assert.equal(result.attempts, 3)
+  assert.equal(result.credits, 150)
+  assert.equal(claimCalls(), 3)
+  // The backoff waits between attempts, and never waits after the last one.
+  assert.deepEqual(delays, [2_000, 5_000])
+})
+
+test('claimTraeCheckin treats a landed claim as success even when the answer was saturated', async () => {
+  const { fetchFn } = checkinFetch({
+    status: { checked_in: false, credits: 0, enable: true },
+    claims: [{ code: 4001, message: '当前签到人数过多' }],
+    // The queue answered saturated, but the claim actually landed.
+    statusAfter: { checked_in: true, credits: 150, enable: true },
+  })
+  const result = await claimTraeCheckin('token', 'user', undefined, fetchFn, async () => {})
+  assert.equal(result.ok, true)
+  assert.equal(result.message, '今日已签到')
+  assert.equal(result.credits, 150)
+})
+
+test('claimTraeCheckin stops after the retry budget and explains the idempotence', async () => {
+  const { fetchFn, claimCalls } = checkinFetch({
+    status: { checked_in: false, credits: 0, enable: true },
+    claims: [{ code: 4001, message: '当前签到人数过多，请稍后再试' }],
+  })
+  const result = await claimTraeCheckin('token', 'user', undefined, fetchFn, async () => {})
+  assert.equal(result.ok, false)
+  assert.equal(result.attempts, 4)
+  assert.equal(claimCalls(), 4)
+  assert.match(result.message, /人数过多/)
+  assert.match(result.message, /重试 4 次/)
+})
+
+test('claimTraeCheckin reports a non-transient business failure without retrying', async () => {
+  const { fetchFn, claimCalls } = checkinFetch({
+    status: { checked_in: false, credits: 0, enable: true },
+    claims: [{ code: 4003, message: '该账号当前未开启签到活动' }],
+  })
+  const result = await claimTraeCheckin('token', 'user', undefined, fetchFn, async () => {})
+  assert.equal(result.ok, false)
+  assert.equal(result.attempts, 1)
+  assert.equal(claimCalls(), 1)
+  assert.equal(result.message, '该账号当前未开启签到活动')
+})
+
+test('fetchTraeCheckinStatus reads today state off the status endpoint', async () => {
+  const { fetchFn } = checkinFetch({
+    status: { checked_in: true, credits: 150, enable: true },
+    claims: [],
+  })
+  const status = await fetchTraeCheckinStatus('token', 'user', undefined, fetchFn)
+  assert.equal(status.checkedIn, true)
+  assert.equal(status.credits, 150)
+  assert.equal(status.enabled, true)
 })
