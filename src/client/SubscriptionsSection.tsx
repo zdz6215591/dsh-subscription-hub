@@ -110,8 +110,25 @@ export interface VisibleModelView {
   inputModalities?: string[]
 }
 
-/** One Cline model's upstream-channel pin, as answered by `clinePins`. */
-export interface ClinePinView {
+/** The one-click auto-configure report, as answered by `clineAutoConfigure`. */
+export interface ClineAutoConfigureView {
+  model: string
+  ok: boolean
+  stage: 'probe' | 'discover' | 'pin' | 'verify' | 'done'
+  error: string
+  pipeline: string
+  channels: string[]
+  pinned: string[]
+  excluded: string[]
+  available: string[]
+  rateLimited: string[]
+  unusable: string[]
+  verified: boolean
+  actual: string
+  summary: { ok: number; limited: number; bad: number; auth: number; unknown: number }
+}
+
+/** One Cline model's upstream-channel pin, as answered by `clinePins`. */export interface ClinePinView {
   model: string
   /** Upstream channels discovered for this model. */
   channels: string[]
@@ -1041,6 +1058,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [clineProbing, setClineProbing] = useState<string | undefined>(undefined)
   /** Model whose channels are being validated (undefined = idle). */
   const [clineValidating, setClineValidating] = useState<string | undefined>(undefined)
+  /** The model whose one-click auto-configure is running, if any. */
+  const [clineAutoRunning, setClineAutoRunning] = useState<string | undefined>(undefined)
+  /** The last auto-configure report per model, shown until the next run. */
+  const [clineAutoResults, setClineAutoResults] = useState<Record<string, ClineAutoConfigureView>>({})
 
   const setProviderError = useCallback((provider: SubscriptionProvider, message: string | undefined): void => {
     if (!mountedRef.current) return
@@ -1399,8 +1420,30 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     }
   }, [rpc, clineValidating])
 
-  const toggleClineSection = useCallback((): void => {
-    setClinePinsOpen((prev) => {
+  /**
+   * The one-click path: probe, measure, pin the working channels fastest first,
+   * exclude the broken, and verify.
+   *
+   * The pins list is reloaded afterwards rather than patched from the response,
+   * because the host is the authority on what was actually saved — and on the
+   * paths where nothing was saved it has deliberately left the pin empty.
+   */
+  const autoConfigureCline = useCallback(async (model: string): Promise<void> => {
+    if (rpc === undefined || clineAutoRunning !== undefined) return
+    setClineAutoRunning(model)
+    try {
+      const result = await callSubscriptionsAuth<ClineAutoConfigureView>(rpc, 'clineAutoConfigure', { model })
+      if (!mountedRef.current) return
+      setClineAutoResults(prev => ({ ...prev, [model]: result }))
+      await loadClinePins()
+    } catch (error) {
+      if (mountedRef.current) setClinePinsError(messageOf(error))
+    } finally {
+      if (mountedRef.current) setClineAutoRunning(undefined)
+    }
+  }, [rpc, clineAutoRunning, loadClinePins])
+
+  const toggleClineSection = useCallback((): void => {    setClinePinsOpen((prev) => {
       const next = !prev
       if (next) void loadClinePins()
       return next
@@ -2344,10 +2387,22 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                                 {row.pipeline !== undefined && (
                                   <span style={styles.pinPipeline}>{row.pipeline}</span>
                                 )}
+                                {/* The one-click path leads: probe + measure + pin +
+                                    verify is one decision, and doing it by hand is
+                                    three actions per model. */}
                                 <button
                                   type="button"
-                                  style={{ ...styles.buttonSmall, marginLeft: 'auto', ...clineProbing === probeKey ? { opacity: 0.5, cursor: 'default' } : {} }}
-                                  disabled={clineProbing !== undefined || clineValidating !== undefined}
+                                  style={{ ...styles.buttonSmall, marginLeft: 'auto', ...clineAutoRunning === probeKey ? { opacity: 0.5, cursor: 'default' } : {} }}
+                                  disabled={clineProbing !== undefined || clineValidating !== undefined || clineAutoRunning !== undefined}
+                                  title={t('clineAutoHint')}
+                                  onClick={() => { void autoConfigureCline(probeKey) }}
+                                >
+                                  {clineAutoRunning === probeKey ? t('clineAutoRunning') : t('clineAuto')}
+                                </button>
+                                <button
+                                  type="button"
+                                  style={{ ...styles.buttonSmall, ...clineProbing === probeKey ? { opacity: 0.5, cursor: 'default' } : {} }}
+                                  disabled={clineProbing !== undefined || clineValidating !== undefined || clineAutoRunning !== undefined}
                                   onClick={() => { void probeClineChannels(probeKey) }}
                                 >
                                   {clineProbing === probeKey ? t('refreshModelsRunning') : t('clinePinProbe')}
@@ -2355,13 +2410,33 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                                 <button
                                   type="button"
                                   style={{ ...styles.buttonSmall, ...clineValidating === probeKey ? { opacity: 0.5, cursor: 'default' } : {} }}
-                                  disabled={clineProbing !== undefined || clineValidating !== undefined}
+                                  disabled={clineProbing !== undefined || clineValidating !== undefined || clineAutoRunning !== undefined}
                                   title={t('clinePinValidateHint')}
                                   onClick={() => { void validateClineChannels(probeKey) }}
                                 >
                                   {clineValidating === probeKey ? t('clinePinValidating') : t('clinePinValidate')}
                                 </button>
                               </div>
+                              {/* What the last auto-configure found and did, stated as
+                                  counts rather than as "done", so a partial result is
+                                  visible rather than implied successful. */}
+                              {(() => {
+                                const report = clineAutoResults[probeKey]
+                                if (report === undefined) return null
+                                return (
+                                  <p style={report.ok ? styles.statusLine : styles.errorLine}>
+                                    {report.ok
+                                      ? t('clineAutoOk', {
+                                          pinned: report.pinned.join(' → '),
+                                          actual: report.actual,
+                                          ok: report.summary.ok,
+                                          limited: report.summary.limited,
+                                          unusable: report.unusable.length,
+                                        })
+                                      : t('clineAutoFailed', { stage: report.stage, message: report.error })}
+                                  </p>
+                                )
+                              })()}
                               {/* Channel chips: click pins (in click order), ⊘ excludes. */}
                               {(() => {
                                 const displayChannels = [...new Set([...row.channels, ...row.upstreams])]

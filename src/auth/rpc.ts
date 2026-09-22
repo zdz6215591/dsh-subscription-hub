@@ -36,7 +36,7 @@ export const SUBSCRIPTIONS_AUTH_ENDPOINTS = [
   'modelDefaults', 'setModelDefault',
   'checkin', 'checkinStatus', 'visibility', 'setVisible', 'refreshModels', 'markModelsRead',
   'poolGet', 'poolSet',
-  'clinePins', 'setClinePin', 'probeClineChannels', 'validateClineChannels',
+  'clinePins', 'setClinePin', 'probeClineChannels', 'validateClineChannels', 'clineAutoConfigure',
   'tokenStats',
 ] as const
 
@@ -198,6 +198,43 @@ export interface ExtraOps {
    * amount of quota, so it is user-initiated only.
    */
   validateClineChannels?(model: string): Promise<{ verdicts: Record<string, { status: string; note: string; ms: number; checkedAt: number }> }>
+  /**
+   * The one-click path: probe, measure every channel, pin the working ones in
+   * measured-latency order, exclude the broken ones, then verify with a real
+   * request. Nothing usable leaves the model on automatic routing rather than
+   * pinned to a dead channel.
+   */
+  clineAutoConfigure?(model: string): Promise<ClineAutoConfigureView>
+}
+
+/** What {@link ExtrasApi.clineAutoConfigure} reports back to the panel. */
+export interface ClineAutoConfigureView {
+  model: string
+  /** Whether a usable pin was saved AND verified. */
+  ok: boolean
+  /** Which step produced the outcome, so a failure says where it stopped. */
+  stage: 'probe' | 'discover' | 'pin' | 'verify' | 'done'
+  /** Empty on success. */
+  error: string
+  pipeline: string
+  /** Every channel the gateway disclosed. */
+  channels: string[]
+  /** The saved pin, in try order. */
+  pinned: string[]
+  /** The saved exclusion list. */
+  excluded: string[]
+  /** Channels whose measured verdict was `ok`, fastest first. */
+  available: string[]
+  /** Channels measured `limited`; usable but possibly throttled. */
+  rateLimited: string[]
+  /** Channels that cannot serve the model. */
+  unusable: string[]
+  /** Whether the verification request after pinning succeeded. */
+  verified: boolean
+  /** Which upstream actually served the verification request. */
+  actual: string
+  /** Verdict counts, so the panel can state what it found without re-counting. */
+  summary: { ok: number; limited: number; bad: number; auth: number; unknown: number }
 }
 
 /** Default-effort picker operations behind the `modelDefaults/setModelDefault` endpoints. */
@@ -764,6 +801,10 @@ async function dispatch(
     case 'validateClineChannels': {
       if (extras?.validateClineChannels === undefined) throw new BadRequest('Cline pinning is unavailable')
       return ok(await extras.validateClineChannels(readString(payload, 'model')))
+    }
+    case 'clineAutoConfigure': {
+      if (extras?.clineAutoConfigure === undefined) throw new BadRequest('Cline pinning is unavailable')
+      return ok(await extras.clineAutoConfigure(readString(payload, 'model')))
     }
     case 'tokenStats': {
       return ok(await getTokenSavingsSummary())

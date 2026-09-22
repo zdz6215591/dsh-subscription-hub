@@ -32,6 +32,7 @@ import { ImageAccountPool } from './providers/image-pool.js'
 import { recordStreamTokenUsage } from './stats/token-savings.js'
 import type {
   AuthController,
+  ClineAutoConfigureView,
   ImageBytesResult,
   LoginMethod,
   ModelDefaultsCatalog,
@@ -170,6 +171,8 @@ import {
   classifyUpstreamError,
 } from './providers/cline/index.js'
 import type { ClineUpstreamStatus, ClineUpstreamVerdict } from './providers/cline/index.js'
+import type { ClineChannelVerdicts } from './providers/cline/pins.js'
+import { planClinePin } from './providers/cline/auto-configure.js'
 import {
   TraeAdapter,
   TRAE_PREEMPT_MS,
@@ -1662,6 +1665,86 @@ export function apply(ctx: Context, config: Config): void {
         }))
       }
       return { verdicts }
+    },
+    /**
+     * One-click channel setup: probe, measure, pin the working channels fastest
+     * first, exclude the broken, then verify with a real request.
+     *
+     * Pinning a dead channel is this route's main failure mode, and doing it by
+     * hand means three separate actions per model (probe, validate, then pin each
+     * channel in the right order). This does all of it from measurement rather
+     * than from a hand-written list, and — the part that matters most — pins
+     * NOTHING when no measurement says a channel works, leaving the model on
+     * automatic routing instead.
+     */
+    async clineAutoConfigure(model) {
+      const shape: ClineAutoConfigureView = {
+        model, ok: false, stage: 'probe', error: '', pipeline: '',
+        channels: [], pinned: [], excluded: [], available: [], rateLimited: [], unusable: [],
+        verified: false, actual: '',
+        summary: { ok: 0, limited: 0, bad: 0, auth: 0, unknown: 0 },
+      }
+
+      const probe = await this.probeClineChannels?.(model)
+      if (probe === undefined) return { ...shape, error: 'Cline pinning is unavailable' }
+      shape.pipeline = probe.pipeline ?? ''
+      shape.channels = [...probe.channels]
+      shape.stage = 'discover'
+      if (shape.channels.length === 0) {
+        return {
+          ...shape,
+          error: 'the gateway disclosed no channels for this model; it stays on automatic routing',
+        }
+      }
+
+      const validated = await this.validateClineChannels?.(model)
+      // The ranking is a pure decision, so it lives in its own module where it
+      // can be tested without any I/O.
+      const plan = planClinePin(shape.channels, (validated?.verdicts ?? {}) as ClineChannelVerdicts)
+      shape.available = plan.available
+      shape.rateLimited = plan.rateLimited
+      shape.unusable = plan.unusable
+      shape.summary = plan.summary
+
+      shape.stage = 'pin'
+      await this.setClinePin?.(model, {
+        upstreams: plan.upstreams,
+        exclude: plan.exclude,
+        pinMode: plan.pinMode,
+        sort: plan.sort,
+      })
+      const stored = (await clinePins.allPins())[model]
+      shape.pinned = [...(stored?.upstreams ?? [])]
+      shape.excluded = [...(stored?.exclude ?? [])]
+
+      if (plan.upstreams.length === 0) {
+        return {
+          ...shape,
+          stage: 'done',
+          error: 'no channel answered for this model; it stays on automatic routing',
+        }
+      }
+
+      // Verification is a REAL request made AFTER the pin is saved, so it goes
+      // through the config the next turn will use. Re-probing is exactly that:
+      // the probe sends a plain completion request and learns which upstream
+      // served it.
+      shape.stage = 'verify'
+      try {
+        const verify = await this.probeClineChannels?.(model)
+        const served = clinePins.metaOf(model).lastProvider ?? null
+        shape.actual = served ?? ''
+        shape.verified = verify !== undefined && verify.channels.length > 0 && served !== null
+      } catch (error) {
+        shape.verified = false
+        shape.error = error instanceof Error ? error.message : String(error)
+      }
+      shape.stage = 'done'
+      shape.ok = shape.verified && shape.pinned.length > 0
+      if (!shape.verified && shape.error === '') {
+        shape.error = 'the pin was saved but the verification request reported no serving upstream'
+      }
+      return shape
     },
     async setVisible(provider, model, visible) {
       await setModelVisible(provider, model, visible)

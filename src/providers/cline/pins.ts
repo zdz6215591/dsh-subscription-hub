@@ -97,6 +97,21 @@ export interface ClineModelMeta {
   pipeline?: ClinePipeline
   /** Per-upstream availability verdicts, newest last. */
   upstreamStatus?: ClineChannelVerdicts
+  /**
+   * The upstream that actually served the most recent request.
+   *
+   * Distinct from `upstreams`, which is the DISCOVERED set: this is the one
+   * channel the gateway really used, which is the only honest answer to "is the
+   * saved pin working?". Set by {@link ClinePinStore.learnRouting}.
+   */
+  lastProvider?: string
+  /**
+   * The gateway's canonical model slug for the last request, when it disclosed
+   * one. Useful when a model is reachable under more than one alias.
+   */
+  canonicalSlug?: string
+  /** When the last request was observed, for a "checked N ago" readout. */
+  lastSeenAt?: number
 }
 
 /** Availability verdicts keyed by channel, for one model. */
@@ -490,12 +505,18 @@ export class ClinePinStore {
   }
 
   /** Record the pipeline + upstream a request actually used. */
-  learnRouting(model: string, routing: { pipeline: ClinePipeline | null; finalProvider: string | null; fallbacks: string[] }): void {
+  learnRouting(model: string, routing: { pipeline: ClinePipeline | null; finalProvider: string | null; fallbacks: string[]; canonicalSlug?: string | null }): void {
     if (routing.pipeline === null && routing.finalProvider === null) return
     const current = this.meta.get(model) ?? {}
     this.meta.set(model, {
       ...current,
       ...routing.pipeline === null ? {} : { pipeline: routing.pipeline },
+      // Recorded separately from the discovered list: this is the channel that
+      // REALLY served, and it is what proves a saved pin works.
+      ...routing.finalProvider === null ? {} : { lastProvider: routing.finalProvider },
+      ...routing.canonicalSlug === undefined || routing.canonicalSlug === null
+        ? {} : { canonicalSlug: routing.canonicalSlug },
+      lastSeenAt: Date.now(),
       // The provider that served the request is proof it exists, so it seeds
       // the known list even before any probe runs.
       ...routing.finalProvider === null && routing.fallbacks.length === 0
