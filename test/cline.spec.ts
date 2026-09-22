@@ -31,7 +31,11 @@ import {
 import {
   CLINE_MODEL_PREFIX,
   clineModel,
+  discoverClineModels,
+  mergeClineModel,
+  parseClineCatalogEntry,
   parseGatewayModels,
+  parseModelsDevEfforts,
   parseRecommendedModels,
   toClineModelInfo,
 } from '../src/providers/cline/catalog.js'
@@ -40,6 +44,7 @@ import { MessageId } from '@deepseek-ai/dsh-llm'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { assertUsableClineKey, maskClineKey, sessionFromClineKey, ClineAdapter } from '../src/providers/cline/index.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
+import type { FetchFn } from '../src/providers/common.js'
 import type { ClineSession } from '../src/auth/store.js'
 
 // ---------------------------------------------------------------------------
@@ -293,6 +298,168 @@ test('toClineModelInfo carries the input modalities', () => {
   assert.equal(info.provider, 'cline')
   assert.deepEqual(info.inputModalities, ['text', 'image'])
   assert.equal(info.id.startsWith(CLINE_MODEL_PREFIX), true)
+})
+
+test('parseClineCatalogEntry maps a subscription id onto its catalog slug', () => {
+  // Cline's own catalog lists the underlying slugs, not the cline-pass ids.
+  const catalog = {
+    data: [
+      {
+        id: 'z-ai/glm-5.3',
+        context_length: 1310720,
+        top_provider: { max_completion_tokens: 131072 },
+        architecture: { input_modalities: ['text'] },
+        supported_parameters: ['reasoning_effort', 'tools'],
+      },
+      {
+        id: 'xiaomi/mimo-v2.6-flash',
+        context_length: 1048576,
+        top_provider: { max_completion_tokens: 131072 },
+        architecture: { input_modalities: ['text', 'image', 'video', 'audio'] },
+        supported_parameters: ['tools'],
+      },
+      {
+        id: 'meta/muse-spark-1.3-contributor',
+        context_length: 1048576,
+        top_provider: { max_completion_tokens: 943718 },
+        architecture: { input_modalities: ['text', 'image'] },
+        supported_parameters: ['reasoning_effort'],
+      },
+    ],
+  }
+  const glm = parseClineCatalogEntry('cline-pass/glm-5.3', catalog)
+  assert.equal(glm?.contextWindow, 1_310_720)
+  assert.equal(glm?.maxTokens, 131_072)
+  assert.deepEqual(glm?.input, ['text'])
+  assert.equal(glm?.reasoning, true)
+  assert.equal(glm?.source, 'cline')
+
+  // The audio/video modalities collapse onto the harness's image flag.
+  const mimo = parseClineCatalogEntry('cline-pass/mimo-v2.6-flash', catalog)
+  assert.deepEqual(mimo?.input, ['text', 'image'])
+  assert.equal(mimo?.reasoning, false)
+
+  // The explicit override reaches the id prefix guessing cannot.
+  const muse = parseClineCatalogEntry('cline-pass/muse-spark-1.3-contributor', catalog)
+  assert.equal(muse?.contextWindow, 1_048_576)
+  assert.equal(muse?.maxTokens, 943_718)
+
+  // A model the catalog does not describe yields nothing rather than a guess.
+  assert.equal(parseClineCatalogEntry('cline-pass/nonexistent-model', catalog), undefined)
+})
+
+test('parseModelsDevEfforts reads the published reasoning levels', () => {
+  const registry = {
+    providers: {
+      'cline-pass': {
+        models: {
+          'cline-pass/qwen3.7-max': {
+            reasoning: true,
+            reasoning_options: [{ type: 'effort', values: ['none', 'low', 'medium', 'high', 'xhigh'] }],
+            limit: { context: 1_000_000, output: 65_536 },
+            modalities: { input: ['text'] },
+          },
+          'cline-pass/glm-5.3-flash': {
+            reasoning: true,
+            reasoning_options: [{ type: 'effort', values: ['low', 'high', 'max'] }],
+            limit: { context: 1_000_000, output: 131_072 },
+            modalities: { input: ['text', 'image', 'video', 'pdf'] },
+          },
+        },
+      },
+    },
+  }
+  const qwen = parseModelsDevEfforts('cline-pass/qwen3.7-max', registry)
+  assert.deepEqual(qwen?.efforts, ['none', 'low', 'medium', 'high', 'xhigh'])
+  assert.equal(qwen?.contextWindow, 1_000_000)
+  assert.equal(qwen?.maxTokens, 65_536)
+  assert.equal(qwen?.source, 'models.dev')
+
+  // Video/pdf collapse onto image; `none` is only prepended once.
+  const glm = parseModelsDevEfforts('cline-pass/glm-5.3-flash', registry)
+  assert.deepEqual(glm?.efforts, ['none', 'low', 'high', 'max'])
+  assert.deepEqual(glm?.input, ['text', 'image'])
+
+  assert.equal(parseModelsDevEfforts('cline-pass/unknown', registry), undefined)
+})
+
+test('mergeClineModel prefers models.dev levels and falls back to the static row', () => {
+  const merged = mergeClineModel('cline-pass/glm-5.3', {
+    cline: { contextWindow: 1_310_720, maxTokens: 131_072, input: ['text'], reasoning: true, source: 'cline' },
+    modelsDev: { contextWindow: 1_000_000, maxTokens: 131_072, efforts: ['none', 'low', 'high', 'max'], reasoning: true, source: 'models.dev' },
+  })
+  // models.dev wins where both speak.
+  assert.equal(merged.contextWindow, 1_000_000)
+  assert.deepEqual(merged.efforts, ['none', 'low', 'high', 'max'])
+  assert.equal(merged.source, 'models.dev')
+  // A model with no live row keeps the pinned table's numbers.
+  const fallback = mergeClineModel('cline-pass/kimi-k3', {})
+  assert.equal(fallback.source, 'static')
+  assert.equal(fallback.contextWindow, 1_048_576)
+})
+
+test('discoverClineModels merges the roster with both official catalogs', async () => {
+  const responses: Record<string, unknown> = {
+    'recommended-models': {
+      clinePass: [{ id: 'cline-pass/glm-5.3' }, { id: 'cline-pass/brand-new-model' }],
+    },
+    '/ai/cline/models': {
+      data: [
+        {
+          id: 'z-ai/glm-5.3',
+          context_length: 1_310_720,
+          top_provider: { max_completion_tokens: 131_072 },
+          architecture: { input_modalities: ['text'] },
+          supported_parameters: ['reasoning_effort'],
+        },
+        {
+          id: 'z-ai/brand-new-model',
+          context_length: 500_000,
+          top_provider: { max_completion_tokens: 64_000 },
+          architecture: { input_modalities: ['text', 'image'] },
+          supported_parameters: ['reasoning_effort'],
+        },
+      ],
+    },
+    'models.dev': {
+      providers: {
+        'cline-pass': {
+          models: {
+            'cline-pass/glm-5.3': {
+              reasoning: true,
+              reasoning_options: [{ type: 'effort', values: ['low', 'high', 'max'] }],
+              limit: { context: 1_000_000, output: 131_072 },
+              modalities: { input: ['text'] },
+            },
+          },
+        },
+      },
+    },
+  }
+  const fetchFn = (async (input: string | URL | Request) => {
+    const url = String(input)
+    const key = Object.keys(responses).find(candidate => url.includes(candidate))
+    const body = key === undefined ? {} : responses[key]
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+  }) as unknown as FetchFn
+
+  const models = await discoverClineModels('sk_key', 'https://api.cline.bot/api/v1', undefined, fetchFn)
+  const byId = new Map(models.map(model => [model.id, model]))
+
+  // The roster union keeps an id only the recommended list carries.
+  const brandNew = byId.get('cline-pass/brand-new-model')
+  assert.ok(brandNew !== undefined)
+  assert.equal(brandNew.contextWindow, 500_000)
+  assert.deepEqual(brandNew.input, ['text', 'image'])
+
+  // models.dev supplies the levels for the model it describes.
+  assert.deepEqual(byId.get('cline-pass/glm-5.3')?.efforts, ['none', 'low', 'high', 'max'])
+  assert.equal(byId.get('cline-pass/glm-5.3')?.contextWindow, 1_000_000)
+  // Cline's own catalog still describes a model models.dev omits.
+  assert.equal(brandNew.maxTokens, 64_000)
+
+  // The pinned table rides underneath as the offline safety net.
+  assert.equal(byId.has('cline-pass/kimi-k3'), true)
 })
 
 test('parseClineUsage maps the four window types onto harness kinds', () => {

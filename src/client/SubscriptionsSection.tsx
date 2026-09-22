@@ -2272,8 +2272,19 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
               )
             })()}
             {/* Cline only: per-model upstream channel pinning. The gateway fans
-                a model across several backing providers; this chooses which. */}
-            {id === 'cline' && accounts.length > 0 && (
+                a model across several backing providers; this chooses which.
+                Only the models enabled in this provider's visibility card are
+                listed — a model the picker does not offer needs no pin — plus
+                any model that already carries a pin, so nothing is hidden. */}
+            {id === 'cline' && accounts.length > 0 && (() => {
+              const visibleCline = visibilityModels['cline']
+              const clineRows = clinePins === undefined
+                ? undefined
+                : clinePins.filter(row => visibleCline === undefined
+                  || visibleCline.length === 0
+                  || row.upstreams.length > 0
+                  || visibleCline.some(model => model.id === row.model && model.visible))
+              return (
               <div style={styles.defaultEffort}>
                 <button
                   type="button"
@@ -2283,11 +2294,11 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 >
                   <span style={styles.usageTitle}>{t('clinePinsTitle')}</span>
                   <span style={styles.usagePlan}>
-                    {clinePins === undefined
+                    {clineRows === undefined
                       ? (clinePinsLoading ? t('visibilityLoading') : '')
                       : t('clinePinsSummary', {
-                          pinned: clinePins.filter(row => row.upstreams.length > 0).length,
-                          total: clinePins.length,
+                          pinned: clineRows.filter(row => row.upstreams.length > 0).length,
+                          total: clineRows.length,
                         })}
                   </span>
                   <span style={styles.defaultEffortChevron} aria-hidden="true">
@@ -2298,15 +2309,19 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                   <>
                     <p style={styles.statusLine}>{t('clinePinsHint')}</p>
                     {clinePinsError !== undefined && <p style={styles.errorLine}>{clinePinsError}</p>}
-                    {clinePinsLoading && clinePins === undefined && (
+                    {clinePinsLoading && clineRows === undefined && (
                       <p style={styles.statusLine}>{t('visibilityLoading')}</p>
                     )}
-                    {clinePins !== undefined && clinePins.length === 0 && (
-                      <p style={styles.statusLine}>{t('clinePinsEmpty')}</p>
+                    {clineRows !== undefined && clineRows.length === 0 && (
+                      <p style={styles.statusLine}>
+                        {clinePins !== undefined && clinePins.length > 0
+                          ? t('clinePinsAllHidden')
+                          : t('clinePinsEmpty')}
+                      </p>
                     )}
-                    {clinePins !== undefined && clinePins.length > 0 && (
+                    {clineRows !== undefined && clineRows.length > 0 && (
                       <div style={styles.pinList}>
-                        {clinePins.map((row) => {
+                        {clineRows.map((row) => {
                           const probeKey = row.model
                           return (
                             <div key={row.model} style={styles.pinRow}>
@@ -2456,7 +2471,8 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                   </>
                 )}
               </div>
-            )}
+              )
+            })()}
             {accounts.length > 0 && (() => {
               const open = visibilityOpen[id] === true
               const models = visibilityModels[id]

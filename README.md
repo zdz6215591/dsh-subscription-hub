@@ -165,6 +165,27 @@ The daily claim tolerates both upstream behaviours the web client lives with:
   card show the message, together with the note that the claim is idempotent —
   retrying later, or in the Trae client, is safe.
 
+### Model metadata comes from the official catalogs
+
+Nothing about a Cline model's context window, output cap, modalities or thinking
+levels is hard-coded any more. A discovery read merges two official sources:
+
+- **Cline's own catalog** — `GET {base}/ai/cline/models` (public, no auth). It
+  carries `context_length`, the per-provider `max_completion_tokens` cap and
+  `architecture.input_modalities` for all 443 catalog models. Its ids are the
+  underlying slugs (`z-ai/glm-5.3`), so a `cline-pass/*` id is mapped onto them
+  by provider namespace (`z-ai`/`zai`, `deepseek`, `moonshotai`, `minimax`,
+  `qwen`, `alibaba`, `xiaomi`, `meta`, …), with an explicit override for the one
+  that needs it (`muse-spark-1.3-contributor` → `meta/…`).
+- **models.dev** — the community registry the reference implementations also
+  read, and the only source that publishes the per-model reasoning levels
+  (`reasoning_options[].values`). It wins where both speak.
+
+The static table is now only an offline safety net: it still supplies the id set
+when a read fails, but a live read always overrides its numbers. Where no source
+discloses a model's levels (the three newest rows), the adapter falls back to the
+gateway-wide list rather than inventing a restriction.
+
 ## Why this exists
 
 Installing several subscription plugins at once:

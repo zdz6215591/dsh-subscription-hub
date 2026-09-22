@@ -132,6 +132,21 @@ CN 目录读取自官方 remote 目录（`solo.trae.cn/api/remote/v1/models`）�
   重新读取今日状态 —— 因此「响应说打满、实际已经签到成功」的情况仍会如实报成功。只有重试预算用尽后
   卡片才显示该消息，并附带「签到是幂等的」提示：稍后再试、或直接在 Trae 客户端签到都安全。
 
+### Cline 模型元数据取自官方目录
+
+Cline 模型的上下文窗口、输出上限、模态与思考等级**不再写死**，一次发现读取会合并两个官方来源：
+
+- **Cline 自家目录** —— `GET {base}/ai/cline/models`（公开、免鉴权），带 `context_length`、
+  各家 provider 的 `max_completion_tokens` 上限与 `architecture.input_modalities`，共 443 个模型。
+  它的 id 是底层 slug（`z-ai/glm-5.3`），所以 `cline-pass/*` 会按 provider 命名空间映射到它
+  （`z-ai`/`zai`、`deepseek`、`moonshotai`、`minimax`、`qwen`、`alibaba`、`xiaomi`、`meta`…），
+  对唯一需要特殊处理的 `muse-spark-1.3-contributor` → `meta/…` 用显式覆写。
+- **models.dev** —— 参考实现同样读取的社区注册表，也是**唯一**公布逐模型思考等级
+  （`reasoning_options[].values`）的来源；两者都有时以它为准。
+
+静态表退化为纯离线兜底：读取失败时仍提供 id 集合，但只要读到线上数据就一律以线上为准。
+对于没有任何来源公布等级的三个最新模型，适配器回退到网关全量列表，而不是臆造限制。
+
 ## 安装
 
 ```sh

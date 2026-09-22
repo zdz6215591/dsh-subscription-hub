@@ -243,9 +243,9 @@ function usageOf(payload: Record<string, unknown>): TokenUsage | undefined {
   }
 }
 
-/** Wrap a wire model id list into harness model-info entries. */
-function toInfos(ids: readonly string[], provider: string): LlmModelInfo[] {
-  return ids.map(id => toClineModelInfo(clineModel(id), provider))
+/** Wrap resolved catalog rows into harness model-info entries. */
+function toInfos(models: readonly ClineModel[], provider: string): LlmModelInfo[] {
+  return models.map(model => toClineModelInfo(model, provider))
 }
 
 /** Adapter dependencies. */
@@ -266,7 +266,7 @@ export interface ClineAdapterOptions {
 
 /** Cline provider adapter. */
 export class ClineAdapter extends LlmAdapter {
-  private readonly catalogs = new Map<string, { at: number; ids: string[] }>()
+  private readonly catalogs = new Map<string, { at: number; models: ClineModel[] }>()
   private readonly fetchFn: FetchFn
 
   constructor(private readonly options: ClineAdapterOptions) {
@@ -293,14 +293,26 @@ export class ClineAdapter extends LlmAdapter {
     return (this.options.defaultBaseUrl ?? CLINE_BASE_URL).replace(/\/+$/, '')
   }
 
+  /** The live catalog row for one model, when a discovery read already ran. */
+  private catalogEntry(model: string): ClineModel | undefined {
+    for (const cached of this.catalogs.values()) {
+      const hit = cached.models.find(entry => entry.id === model)
+      if (hit !== undefined) return hit
+    }
+    return undefined
+  }
+
   async resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     const configured = this.options.models.find(entry => entry.id === model)
-    const catalog = clineModel(model)
-    // All seven levels are offered gateway-wide (the reference does the same):
-    // the vendor restricts some models, but a per-model list is not published,
-    // so hiding levels would hide ones that do work.
+    const catalog = this.catalogEntry(model) ?? clineModel(model)
+    // The level set comes from the official catalog when it publishes one.
+    // Only when no source discloses it do we fall back to the gateway-wide
+    // list, because hiding levels would hide ones that do work.
     const efforts = catalog.reasoning
-      ? CLINE_EFFORTS.map(effort => ({ id: ReasoningEffortId(effort), name: effortDisplayName(effort) }))
+      ? (catalog.efforts ?? CLINE_EFFORTS).map(effort => ({
+          id: ReasoningEffortId(effort),
+          name: effortDisplayName(effort),
+        }))
       : []
     const override = this.options.defaultEffortOf?.(model)
     const defaultEffort = override !== undefined && efforts.some(effort => effort.id === ReasoningEffortId(override))
@@ -333,7 +345,7 @@ export class ClineAdapter extends LlmAdapter {
       const accounts = (await this.options.tokens.list()).map(entry => entry.key)
       if (accounts.length === 0) return []
       const cached = this.catalogs.get(accounts[0]!)
-      if (cached !== undefined && Date.now() - cached.at < CATALOG_TTL_MS) return toInfos(cached.ids, provider)
+      if (cached !== undefined && Date.now() - cached.at < CATALOG_TTL_MS) return toInfos(cached.models, provider)
       try {
         return await this.listOwnModels(provider, accounts[0], signal)
       } catch {
@@ -349,16 +361,14 @@ export class ClineAdapter extends LlmAdapter {
       }, provider))
     }
     const cached = this.catalogs.get(account)
-    if (cached !== undefined && Date.now() - cached.at < CATALOG_TTL_MS) return toInfos(cached.ids, provider)
+    if (cached !== undefined && Date.now() - cached.at < CATALOG_TTL_MS) return toInfos(cached.models, provider)
     try {
       const session = await this.options.tokens.session(account)
       const models = await discoverClineModels(session.accessToken, this.baseUrl(session), signal, this.fetchFn)
-      const ids = models.map(model => model.id)
-      if (ids.length > 0) this.catalogs.set(account, { at: Date.now(), ids })
-      if (ids.length === 0) return toInfos([], provider)
-      return toInfos(ids, provider)
+      if (models.length > 0) this.catalogs.set(account, { at: Date.now(), models })
+      return toInfos(models, provider)
     } catch (error) {
-      if (cached !== undefined) return toInfos(cached.ids, provider)
+      if (cached !== undefined) return toInfos(cached.models, provider)
       this.options.onWarn?.(`cline catalog failed (${error instanceof Error ? error.message : String(error)})`)
       return toInfos([], provider)
     }
