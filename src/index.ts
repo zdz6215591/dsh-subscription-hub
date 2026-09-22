@@ -198,6 +198,8 @@ import {
   sessionFromZedPaste,
 } from './providers/zed.js'
 import { filterVisible, hiddenIds, markProviderModelsRead, setModelVisible, syncDiscoveredModels } from './model-visibility.js'
+import { registerSubCommand } from './command.js'
+import type { SubCommandDeps } from './command.js'
 import { modelVendor } from './model-vendor.js'
 import { createXSearchTool } from './tools/x-search.js'
 import { createImageGenerateTool } from './tools/image-generate.js'
@@ -1427,9 +1429,10 @@ export function apply(ctx: Context, config: Config): void {
       handles.get(provider)?.replace([provider])
     },
   }
-  registerAuthRpc(ctx, new SubscriptionsAuthController(
+  const authController = new SubscriptionsAuthController(
     flows, deviceFlows, authChanged, resolveAttachments, usageFetchers, undefined, poolUsage,
-  ), speed, {
+  )
+  registerAuthRpc(ctx, authController, speed, {
     get: () => proxyGetConfig(),
     set: input => proxySetConfig(input),
     test: payload => proxyTestConnection(payload.url, payload.proxy, payload.providers),
@@ -1843,5 +1846,23 @@ export function apply(ctx: Context, config: Config): void {
         resolveLlm: () => ctx.get('llm'),
       }))
     }
+  })
+
+  registerSubCommand(ctx, {
+    providerIds: [...adapters.keys()],
+    // The adapter owns its own display name, so the report names routes exactly
+    // as the picker does.
+    providerName: id => adapters.get(id)?.providerInfo(id).name ?? String(id),
+    status: async id => ({
+      accounts: (await authController.status(id)).accounts.map(account => ({
+        key: account.key,
+        ...account.account === undefined ? {} : { label: account.account },
+        active: account.isDefault,
+      })),
+    }),
+    // No signal: the command is a one-shot read, and the usage endpoint's own
+    // timeout governs it.
+    usage: async (id, account, force) =>
+      await authController.usage(id, account, new AbortController().signal, force),
   })
 }
