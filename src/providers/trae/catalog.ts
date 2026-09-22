@@ -304,7 +304,18 @@ export async function fetchRemoteModels(
         // Max window; a row first seen in the work/coder roster keeps its
         // owner function while the richer metadata is folded in.
         if (existing.efforts === undefined && efforts !== undefined) existing.efforts = efforts
-        if (existing.contextWindow === undefined && windows.contextWindow !== undefined) existing.contextWindow = windows.contextWindow
+        // The same config_name is advertised by several directories with
+        // different windows — `Doubao-Seed-Code` is 184000 under `solo_coder`
+        // but 256000 under `solo_agent`. Taking the widest is the truthful
+        // reading: the model's own window does not shrink per entry point, and
+        // first-seen would silently bake in whichever group happened to be
+        // read first.
+        if (windows.contextWindow !== undefined && (existing.contextWindow === undefined || windows.contextWindow > existing.contextWindow)) {
+          existing.contextWindow = windows.contextWindow
+        }
+        if (windows.maxContextWindow !== undefined && (existing.maxContextWindow === undefined || windows.maxContextWindow > existing.maxContextWindow)) {
+          existing.maxContextWindow = windows.maxContextWindow
+        }
         if (existing.maxContextWindow === undefined && windows.maxContextWindow !== undefined) existing.maxContextWindow = windows.maxContextWindow
       }
     }

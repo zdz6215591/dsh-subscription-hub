@@ -490,7 +490,15 @@ export interface DiscoveredModel {
   copilotResponses?: boolean
 }
 
-/** Display name for a wire reasoning-effort identifier. */
+/**
+ * Display name for a wire reasoning-effort identifier.
+ *
+ * Every id in the hub's vocabulary capitalizes correctly except `xhigh`, so
+ * that one is spelled out and the rest are title-cased. Note `max` stays "Max":
+ * it is the vendors' own label (Anthropic, xAI, Vercel) and the spelling the
+ * CommandCode table already uses, so "Maximum" would be a gratuitous
+ * divergence.
+ */
 export function effortDisplayName(effort: string): string {
   return effort === 'xhigh' ? 'Extra High' : effort.charAt(0).toUpperCase() + effort.slice(1)
 }

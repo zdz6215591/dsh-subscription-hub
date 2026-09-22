@@ -312,7 +312,7 @@ export const Config: z<Config> = z.object({
 })
 
 /** Built-in catalogs used when the config does not override a provider's models. */
-const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
+export const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
   codex: [
     { id: 'gpt-5.1-codex', name: 'GPT-5.1 Codex' },
     { id: 'gpt-5.1-codex-mini', name: 'GPT-5.1 Codex Mini' },
@@ -322,12 +322,18 @@ const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
     { id: 'claude-opus-5', name: 'Claude Opus 5', maxTokens: 128_000, contextWindow: 1_000_000 },
     { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', maxTokens: 128_000, contextWindow: 1_000_000 },
     { id: 'claude-fable-5', name: 'Claude Fable 5', maxTokens: 128_000, contextWindow: 1_000_000 },
-    { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5', maxTokens: 64_000 },
+    { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5', maxTokens: 64_000, contextWindow: 200_000 },
   ],
+  // Static fallback only: the live CLI catalog (`cli-chat-proxy.grok.com`) is
+  // authoritative and wins whenever discovery succeeds. The ids below are the
+  // roster that catalog actually serves (verified live), each with its real
+  // 500000-token window, so an offline start cannot offer retired ids or make
+  // the harness compact to the old 256000 fallback.
   grok: [
-    { id: 'grok-4', name: 'Grok 4' },
-    { id: 'grok-4-fast-reasoning', name: 'Grok 4 Fast Reasoning' },
-    { id: 'grok-code-fast-1', name: 'Grok Code Fast 1' },
+    { id: 'grok-4.7', name: 'Grok 4.7', contextWindow: 500_000, maxTokens: 32_000, inputModalities: ['text', 'image'] },
+    { id: 'grok-4.7-build-fast', name: 'Grok 4.7 Fast', contextWindow: 500_000, maxTokens: 32_000, inputModalities: ['text', 'image'] },
+    { id: 'grok-4.6', name: 'Grok 4.6', contextWindow: 500_000, maxTokens: 32_000, inputModalities: ['text', 'image'] },
+    { id: 'grok-4.5', name: 'Grok 4.5', contextWindow: 500_000, maxTokens: 32_000, inputModalities: ['text', 'image'] },
   ],
   // Static fallback only: the live /models catalog (with per-model vision
   // flags and context windows) wins whenever discovery succeeds.

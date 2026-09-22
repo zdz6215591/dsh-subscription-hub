@@ -344,6 +344,10 @@ test('fetchRemoteModels unions every directory function and drops uncallable con
             { name: 'glm-5.3', display_name: 'GLM-5.3', max_mode: true, context_window_tokens: { dev: 200_000, max: 1_000_000 } },
             // IDE-only: the SOLO chat endpoint rejects it with 4001, so it must not be listed.
             { name: 'deepseek-v4.1-flash', display_name: 'DeepSeek-V4.1-Flash' },
+            // The same config_name advertised narrower here than in the agent
+            // directory below — the live directory does exactly this for
+            // Doubao-Seed-Code (184000 under solo_coder, 256000 under solo_agent).
+            { name: 'Doubao-Seed-Code', display_name: 'Seed-Code', context_window_tokens: { dev: 184_000, max: 0 } },
           ],
         },
         {
@@ -356,7 +360,12 @@ test('fetchRemoteModels unions every directory function and drops uncallable con
               context_window_tokens: { dev: 200_000, max: 1_000_000 },
               reasoning_effort_config: { support_thinking: true, options: ['light', 'high', 'extra_high'], default_level: 'high' },
             },
-            { name: 'Doubao-Seed-Code', display_name: 'Seed-Code', context_window_tokens: { dev: 184_000, max: 0 } },
+            {
+              name: 'Doubao-Seed-Code',
+              display_name: 'Seed-Code',
+              context_window_tokens: { dev: 256_000, max: 0 },
+              reasoning_effort_config: { support_thinking: true, options: ['light', 'high'], default_level: 'high' },
+            },
           ],
         },
         {
@@ -390,6 +399,14 @@ test('fetchRemoteModels unions every directory function and drops uncallable con
   assert.equal(glm53?.maxContextWindow, 1_000_000)
   // A row whose max window merely repeats dev exposes no budget switch.
   assert.equal(byId.get('glm-5')?.maxContextWindow, undefined)
+
+  // Several directories advertise the same config_name with different windows.
+  // The widest wins regardless of read order: the model's own window does not
+  // shrink per entry point, and taking the first-seen 184000 would under-report
+  // it (the live Doubao-Seed-Code case).
+  const doubao = byId.get('Doubao-Seed-Code')
+  assert.equal(doubao?.contextWindow, 256_000)
+  assert.deepEqual(doubao?.efforts, ['none', 'low', 'high'])
 })
 
 test('parseTraeUsage derives available/consumed and per-pack remainders', () => {

@@ -13,6 +13,15 @@ export interface CatalogModel {
   name: string
   contextLength: number
   maxOutputTokens: number
+  /**
+   * The model reasons internally. This is NOT the same as exposing a level
+   * picker: it is informational and deliberately not read by
+   * `resolveAgyModel`, which keys the effort list off {@link thinking} only.
+   * `gemini-2.5-pro` carries `true` while having no selector, because the
+   * Antigravity `thinkingLevel` axis is a Gemini-3+ feature — its thinking is
+   * a fixed token budget instead, so offering low/medium/high would send a
+   * parameter the model does not accept.
+   */
   supportsReasoning?: boolean
   supportsVision?: boolean
   toolCalling?: boolean
@@ -80,10 +89,22 @@ export function catalogModel(modelId: string): CatalogModel | undefined {
   return undefined
 }
 
-/** Level-thinking models: single id + selectable low/medium/high via thinkingLevel. */
+/**
+ * Level-thinking models: one id + selectable low/medium/high via `thinkingLevel`.
+ *
+ * The pinned catalog is authoritative for every model it describes. A row
+ * without the {@link CatalogModel.thinking} marker must NOT get a level picker
+ * even when its id looks like a thinking model: `gemini-3.1-flash-lite` is a
+ * catalog row with no thinking support, and the old order below (marker check,
+ * then an unconditional prefix guess) handed it a low/medium/high selector —
+ * sending `thinkingLevel` to a model that does not accept it is a 400.
+ *
+ * The prefix guess is kept only for ids the catalog does not know, i.e. a model
+ * the endpoint ships after this pin was captured.
+ */
 export function isLevelThinkingModel(modelId: string): boolean {
   const cat = catalogModel(modelId)
-  if (cat?.thinking === 'level') return true
+  if (cat !== undefined) return cat.thinking === 'level'
   const lower = modelId.toLowerCase()
   return lower.startsWith('gemini-3') || lower.startsWith('claude-') || lower.startsWith('gpt-oss')
 }

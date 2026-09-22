@@ -147,6 +147,31 @@ Cline 模型的上下文窗口、输出上限、模态与思考等级**不再写
 静态表退化为纯离线兜底：读取失败时仍提供 id 集合，但只要读到线上数据就一律以线上为准。
 对于没有任何来源公布等级的三个最新模型，适配器回退到网关全量列表，而不是臆造限制。
 
+### 元数据审计
+
+`scripts/manual/audit-model-metadata.mjs` 会用本插件已存的凭据，把每个 provider 的上下文窗口与
+思考等级重新和它自己的端点对一遍。任何时候怀疑清单或窗口有问题就跑它：
+
+```sh
+node scripts/manual/audit-model-metadata.mjs
+```
+
+它会并排打印 `LIVE`（服务商自己的回答）与 `HUB`（本插件解析出的值），把所有不一致列在
+`PROBLEMS` 下，并在发现不一致时以非零码退出。查不了的 provider —— Codex CLI token 过期、
+本机没有 Copilot 凭据 —— 会明确报 `SKIPPED`，而不是静默当作通过。
+
+最近一次运行查出并修掉了三个真实错误：
+
+| Provider | 原值 | 现值 | 原因 |
+|---|---|---|---|
+| Trae | `Doubao-Seed-Code` = 184000 | 256000 | 同一个 `config_name` 被多个目录用不同窗口广告；"先到先得"让较窄的 `solo_coder` 行锁死了较宽的 `solo_agent` 行。现在取最宽者。 |
+| AGY | `gemini-3.1-flash-lite` 带 low/medium/high 选择器 | 无选择器 | id 前缀启发式（`gemini-3*`）覆盖了目录，而该行在目录里并没有 thinking 支持。给它发 `thinkingLevel` 会 400。现在目录对它收录的每一行拥有最终决定权，前缀猜测只兜底目录不认识的新 id。 |
+| Grok | 兜底窗口 256000、三个已退役模型 id | 500000 与线上现役四个 id | 线上 CLI 目录提供 `grok-4.5/4.6/4.7` 与 `grok-4.7-build-fast`，窗口均为 500000。旧的兜底会让离线启动低报窗口，并提供没人再服务的 id。 |
+
+另有两条**核查后确认正确、并非 bug**：`gemini-2.5-pro` 会推理但没有等级选择器（Antigravity 的
+`thinkingLevel` 轴是 Gemini-3+ 特性，2.5 走固定思考预算）；以及 effort 命名用的
+`charAt(0).toUpperCase()` —— `max` 正是各家自己的标签（"Max"），写成 "Maximum" 反而是无谓的偏离。
+
 ## 安装
 
 ```sh

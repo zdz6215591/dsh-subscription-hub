@@ -13,7 +13,8 @@ import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, Message } from '@deepseek-ai/dsh-llm'
 import { messagesToCommandCode, messagesToOpenAI, parseCommandCodeAuthFile, parseCommandCodeCredits, parseCommandCodeOpenAIStream, parseCommandCodeStream, sessionFromCommandCodePaste, COMMANDCODE_KNOWN_EFFORTS, looksLikeMissingEffortEntry } from '../src/providers/commandcode.js'
 import { extractAgyProjectId } from '../src/providers/agy.js'
-import { parseAgyQuotaUsage } from '../src/providers/agy/models.js'
+import { catalogModelList, parseAgyQuotaUsage } from '../src/providers/agy/models.js'
+import { AGY_PUBLIC_MODELS, isLevelThinkingModel } from '../src/providers/agy/catalog.js'
 import { isAgyUnusableEndpoint } from '../src/providers/agy/constants.js'
 import { countryCodeToEmoji, providerForHostname } from '../src/http.js'
 import { toAgyRequestBody } from '../src/providers/agy/translate.js'
@@ -707,6 +708,51 @@ describe('commandcode reasoning efforts', () => {
     assert.equal(looksLikeMissingEffortEntry('zai-org/GLM-5.2-Fast'), false)
     assert.equal(looksLikeMissingEffortEntry('Qwen/Qwen3.8-Omni-Flash'), false)
     assert.equal(looksLikeMissingEffortEntry('moonshotai/Kimi-K2.7-Code'), false)
+  })
+})
+
+describe('agy level-thinking map', () => {
+  it('only offers a thinking-level picker to models the catalog marks as level-thinking', () => {
+    // The catalog is authoritative for every model it lists. A row without the
+    // `thinking: 'level'` marker must not get a picker, even when its id looks
+    // like a thinking model: sending `thinkingLevel` to a model that does not
+    // accept it is a 400. `gemini-3.1-flash-lite` regressed exactly this way.
+    assert.equal(isLevelThinkingModel('gemini-3.1-flash-lite'), false)
+    // Gemini 2.x takes a fixed thinking budget, not the level axis.
+    assert.equal(isLevelThinkingModel('gemini-2.5-pro'), false)
+    assert.equal(isLevelThinkingModel('gemini-2.5-flash'), false)
+    // The marked rows, and the aliases that resolve onto them, keep it.
+    for (const id of [
+      'gemini-3.8-flash-tiered',
+      'gemini-3.7-flash-tiered',
+      'gemini-3.6-flash-tiered',
+      'gemini-3.5-flash-low',
+      'gemini-pro-agent',
+      'claude-sonnet-4-6',
+      'claude-opus-4-6-thinking',
+      'gpt-oss-120b-medium',
+      // Aliases: they must land on a marked row.
+      'gemini-3.6-flash-high',
+      'gemini-3.1-pro',
+      'gemini-3.5-flash',
+    ]) {
+      assert.equal(isLevelThinkingModel(id), true, `${id} should expose a level picker`)
+    }
+    // A model the pin does not know yet still falls back to the id heuristic,
+    // so a model shipped after the catalog was captured is not left behind.
+    assert.equal(isLevelThinkingModel('gemini-3.9-flash-tiered'), true)
+  })
+
+  it('every catalog row declares a window and an output cap', () => {
+    for (const model of AGY_PUBLIC_MODELS) {
+      assert.ok(model.contextLength > 0, `${model.id} needs a positive context window`)
+      assert.ok(model.maxOutputTokens > 0, `${model.id} needs a positive output cap`)
+    }
+    // The adapter serves the resolved shape, so its rows carry the window too.
+    for (const model of catalogModelList()) {
+      assert.equal(typeof model.id, 'string')
+      assert.ok(model.inputModalities !== undefined && model.inputModalities.length > 0)
+    }
   })
 })
 

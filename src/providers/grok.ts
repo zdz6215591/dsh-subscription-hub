@@ -58,7 +58,16 @@ export const GROK_DISCOVERY_URL = 'https://auth.x.ai/.well-known/openid-configur
 export const GROK_API_URL = 'https://api.x.ai/v1/responses'
 const GROK_SCOPE = 'openid profile email offline_access grok-cli:access api:access'
 const GROK_CALLBACK_PATH = '/callback'
-const GROK_CONTEXT_WINDOW = 256_000
+/**
+ * Fallback window for a model the live CLI catalog does not describe.
+ *
+ * The live catalog (`cli-chat-proxy.grok.com/v1/models`) reports 500000 for
+ * every model it serves (grok-4.5/4.6/4.7 and the build-fast variant), so the
+ * offline fallback must match it: the old 256000 made the harness compact a
+ * conversation to half the window the model actually accepts. Discovery
+ * overrides this whenever it succeeds.
+ */
+const GROK_CONTEXT_WINDOW = 500_000
 const GROK_DEFAULT_MAX_TOKENS = 32_000
 /** Refresh when the access token has less than this much life left. */
 export const GROK_PREEMPT_MS = 2 * 60_000

@@ -186,6 +186,36 @@ when a read fails, but a live read always overrides its numbers. Where no source
 discloses a model's levels (the three newest rows), the adapter falls back to the
 gateway-wide list rather than inventing a restriction.
 
+### Auditing the metadata
+
+`scripts/manual/audit-model-metadata.mjs` re-checks every provider's context
+windows and thinking levels against its own endpoint, using the credentials the
+hub already stores. Run it whenever a roster or a window is in question:
+
+```sh
+node scripts/manual/audit-model-metadata.mjs
+```
+
+It prints `LIVE` (the provider's own answer) beside `HUB` (what this plugin
+resolves), lists anything that disagrees under `PROBLEMS`, and exits non-zero
+when it finds one. Providers it cannot check — an expired Codex CLI token, a
+Copilot credential that is not on this machine — are reported as `SKIPPED`
+rather than quietly passing.
+
+The last run found and fixed three real errors:
+
+| Provider | Was | Now | Why |
+|---|---|---|---|
+| Trae | `Doubao-Seed-Code` = 184000 | 256000 | Several directories advertise one `config_name` with different windows; first-seen won, so the narrower `solo_coder` row locked out the wider `solo_agent` one. The widest now wins. |
+| AGY | `gemini-3.1-flash-lite` had a low/medium/high picker | no picker | The id-prefix guess (`gemini-3*`) overrode the catalog, which marks this row as having no thinking support. Sending `thinkingLevel` to it is a 400. The catalog is now authoritative for every row it lists; the prefix guess only covers ids the pin does not know. |
+| Grok | fallback window 256000, three retired model ids | 500000 and the live four ids | The live CLI catalog serves `grok-4.5/4.6/4.7` + `grok-4.7-build-fast`, each with a 500000-token window. The stale fallback made an offline start under-report the window and offer ids nobody serves. |
+
+Two findings were **checked and found correct**, not bugs: `gemini-2.5-pro`
+reasons without a level picker (the Antigravity `thinkingLevel` axis is a
+Gemini-3+ feature; 2.5 takes a fixed thinking budget), and the plain
+`charAt(0).toUpperCase()` effort naming — `max` is the vendors' own label
+("Max"), so "Maximum" would have been a gratuitous divergence.
+
 ## Why this exists
 
 Installing several subscription plugins at once:

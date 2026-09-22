@@ -19,6 +19,48 @@ import { AccountTokenManager } from '../src/providers/accounts.js'
 import type { CatalogPersistence, CatalogSnapshot, FetchFn } from '../src/providers/common.js'
 import type { ClaudeSession, CodexSession, CopilotSession, GrokSession } from '../src/auth/store.js'
 import { withTimeout } from '../src/providers/common.js'
+import { DEFAULT_MODELS } from '../src/index.js'
+
+// ---------------------------------------------------------------------------
+// The built-in catalogs must describe the roster each provider actually serves.
+// These are the tables an offline start (or a failed discovery) falls back to,
+// so a retired id or a wrong window here is the error the user sees.
+// ---------------------------------------------------------------------------
+
+test('the built-in grok catalog matches the live CLI roster and its window', () => {
+  // Verified live against cli-chat-proxy.grok.com/v1/models: exactly these four
+  // ids, each advertising context_window 500000.
+  assert.deepEqual(
+    DEFAULT_MODELS.grok.map(entry => entry.id),
+    ['grok-4.7', 'grok-4.7-build-fast', 'grok-4.6', 'grok-4.5'],
+  )
+  for (const entry of DEFAULT_MODELS.grok) {
+    assert.equal(entry.contextWindow, 500_000, `${entry.id} must carry the live window`)
+    assert.equal(entry.maxTokens, 32_000)
+    assert.deepEqual(entry.inputModalities, ['text', 'image'])
+  }
+})
+
+test('a catalog entry that needs a window carries one, so no row falls back to a wrong default', () => {
+  // Every provider whose adapter resolves `configured?.contextWindow ?? <provider constant>`
+  // must state the window per model: otherwise a model with a larger real window
+  // silently inherits the smaller provider-level constant.
+  const mustCarryWindow: ProviderWithWindow[] = ['claude', 'grok', 'cline', 'trae']
+  for (const provider of mustCarryWindow) {
+    for (const entry of DEFAULT_MODELS[provider]) {
+      assert.ok(
+        typeof entry.contextWindow === 'number' && entry.contextWindow > 0,
+        `${provider}/${entry.id} needs an explicit contextWindow`,
+      )
+    }
+  }
+  // claude's rows differ per model, which is exactly why the constant is wrong.
+  const claude = new Map(DEFAULT_MODELS.claude.map(entry => [entry.id, entry]))
+  assert.equal(claude.get('claude-opus-5')?.contextWindow, 1_000_000)
+  assert.equal(claude.get('claude-haiku-4-5-20251001')?.contextWindow, 200_000)
+})
+
+type ProviderWithWindow = keyof typeof DEFAULT_MODELS
 
 const STATIC_CODEX = [{ id: 'gpt-5.1-codex', name: 'GPT-5.1 Codex' }]
 const STATIC_CLAUDE = [{ id: 'claude-opus-4-5', name: 'Claude Opus 4.5' }]
@@ -631,10 +673,11 @@ test('grok discovery merges CLI-catalog reasoning metadata by model id', async (
   const g45 = await adapter.resolveModel('grok', 'grok-4.5')
   assert.deepEqual(g45.reasoning?.efforts.map(effort => effort.id), ['high', 'medium', 'low'])
 
-  // A model the CLI catalog does not cover exposes no efforts.
+  // A model the CLI catalog does not cover exposes no efforts, and falls back
+  // to the family window the live catalog reports for every model it serves.
   const build = await adapter.resolveModel('grok', 'grok-build-0.1')
   assert.equal(build.reasoning, undefined)
-  assert.equal(build.context?.contextWindow, 256_000)
+  assert.equal(build.context?.contextWindow, 500_000)
 })
 
 test('grok discovery survives a CLI catalog failure with a warning', async () => {
@@ -878,7 +921,9 @@ test('grok resolveModel survives discovery failure with no persisted catalog', a
   })
   const resolved = await adapter.resolveModel('grok', 'grok-4.6')
   assert.equal(resolved.reasoning, undefined)
-  assert.equal(resolved.context?.contextWindow, 256_000)
+  // With nothing discovered the family window still applies, not the retired
+  // 256000 the constant used to carry.
+  assert.equal(resolved.context?.contextWindow, 500_000)
 })
 
 test('grok discovery writes the fetched catalog through to the store', async () => {
