@@ -1,5 +1,11 @@
 # Reference-project audit — findings and dispositions
 
+> **Status of the adoption round.** Landed so far: **F1, F2, F3, F6, F8, A3** and
+> the new model-list surface (vendor marks, modality icons, Agent Arena scores).
+> Still open from the user's list: **F4, F5, F7, B1**. Each landed item's own
+> commit message carries its evidence; the entries below keep the original
+> analysis rather than being rewritten to match the outcome.
+
 This document records one full pass over every reference project this hub is a
 derivative of, comparing it against the hub's own implementation and recording
 each difference as **adopted / adapted / deliberately skipped**.
