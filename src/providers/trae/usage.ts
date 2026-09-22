@@ -22,6 +22,7 @@ import { proxiedFetch } from '../../http.js'
 import type { ProviderUsage, UsageWindow } from '../common.js'
 import { TRAE_PAY_BASE, traeHeaders } from './protocol.js'
 import { traeIdentityFor } from './identity.js'
+import { gatewaysFor } from './region.js'
 import type { TraeEdition } from './identity.js'
 
 /** Usage endpoints (all POST, all read-only). */
@@ -184,7 +185,7 @@ async function postJson(
    */
   edition: TraeEdition = 'cn',
 ): Promise<unknown> {
-  const response = await fetchFn(`${TRAE_PAY_BASE}${path}`, {
+  const response = await fetchFn(`${gatewaysFor({ edition }).pay}${path}`, {
     method: 'POST',
     headers: {
       ...traeHeaders(accessToken, userId, await traeIdentityFor(edition, userId)),
@@ -206,9 +207,11 @@ export async function fetchTraeUsage(
   userId: string,
   signal?: AbortSignal,
   fetchFn: typeof proxiedFetch = proxiedFetch,
+  /** Which edition's pay base to use; the read is region-scoped. */
+  edition: TraeEdition = 'cn',
 ): Promise<ProviderUsage> {
   try {
-    const payload = await postJson(accessToken, userId, TRAE_USAGE_PATH, { require_usage: true }, signal, fetchFn)
+    const payload = await postJson(accessToken, userId, TRAE_USAGE_PATH, { require_usage: true }, signal, fetchFn, edition)
     const snapshot = parseTraeUsage(payload)
     if (snapshot === undefined) return { supported: false }
     return traeUsageToProviderUsage(snapshot)

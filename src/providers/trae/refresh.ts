@@ -39,17 +39,27 @@ interface TraeRefreshContract {
  * Per-edition refresh contract.
  *
  * `sg` shares the CN contract because the international DESKTOP app does; only
- * `solo-sg` diverges. Keeping the table keyed by edition (rather than assuming
- * one shape) is what lets the international editions be added without touching
- * this flow again.
+ * `solo-sg` diverges, was verified separately on the newer `/trae/api/v3/oauth/`
+ * path with its own client id, and sends a `DeviceInfo` body. Keeping the table
+ * keyed by edition (rather than assuming one shape) is what lets the
+ * international editions be served without touching this flow again.
  */
 export const TRAE_REFRESH_CONTRACT: Readonly<Record<TraeEdition, TraeRefreshContract>> = Object.freeze({
   cn: { path: '/cloudide/api/v3/trae/oauth/ExchangeToken', clientId: 'ono9krqynydwx5', deviceInfo: false },
+  sg: { path: '/cloudide/api/v3/trae/oauth/ExchangeToken', clientId: 'ono9krqynydwx5', deviceInfo: false },
   solo: { path: '/cloudide/api/v3/trae/oauth/ExchangeToken', clientId: 'ono9krqynydwx5', deviceInfo: false },
+  // Transcribed from the reference's evidence; the CN contract above is the one
+  // this hub has probed live.
+  'solo-sg': { path: '/trae/api/v3/oauth/ExchangeToken', clientId: 'en1oxy7wnw8j9n', deviceInfo: true },
 })
 
 /** How long a token endpoint may take before the refresh is abandoned. */
 const TRAE_REFRESH_TIMEOUT_MS = 30_000
+
+/** Whether a stored edition label is one this build knows a contract for. */
+export function isTraeEdition(value: unknown): value is TraeEdition {
+  return value === 'cn' || value === 'sg' || value === 'solo' || value === 'solo-sg'
+}
 
 /**
  * A refresh failure that means the credential is permanently dead.
@@ -125,8 +135,9 @@ export async function refreshTraeSession(
   session: TraeSession,
   signal?: AbortSignal,
   fetchFn: typeof proxiedFetch = proxiedFetch,
+  device?: { deviceId: string; machineId: string },
 ): Promise<TraeSession> {
-  const edition: TraeEdition = session.edition === 'solo' ? 'solo' : 'cn'
+  const edition: TraeEdition = isTraeEdition(session.edition) ? session.edition : 'cn'
   const contract = TRAE_REFRESH_CONTRACT[edition]
   if (contract === undefined) throw new Error(`Trae ${edition} refresh contract is not verified`)
   const refreshToken = session.refreshToken
@@ -141,6 +152,12 @@ export async function refreshTraeSession(
     ClientSecret: '-',
     RefreshToken: refreshToken,
     UserID: session.userId ?? '',
+  }
+  // Only the editions whose official client sends a DeviceInfo body get one, and
+  // it is omitted rather than sent empty when the identity could not be resolved.
+  if (contract.deviceInfo) {
+    const identity = device === undefined ? undefined : traeDeviceInfo(device.deviceId, device.machineId)
+    if (identity !== undefined) body['DeviceInfo'] = identity
   }
   const response = await fetchFn(`${refreshHost(session.host)}${contract.path}`, {
     method: 'POST',

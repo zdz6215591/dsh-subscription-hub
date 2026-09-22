@@ -1210,8 +1210,11 @@ export function apply(ctx: Context, config: Config): void {
         })
         accountTokens.set('trae', tokens as unknown as AccountTokenManager<StoredSession>)
         usageFetchers.trae = async (account, signal) => {
-          const session = await tokens.session(account)
-          return fetchTraeUsage(session.accessToken, session.userId ?? '', signal, proxiedFetch)
+          const session = await tokens.session(account) as TraeSession
+          // The edition picks the region's PAY base. Omitting it would send an
+          // international account's usage read to the CN dashboard, which cannot
+          // answer for it.
+          return fetchTraeUsage(session.accessToken, session.userId ?? '', signal, proxiedFetch, session.edition)
         }
         const adapter = new TraeAdapter({
           models: catalog.trae,

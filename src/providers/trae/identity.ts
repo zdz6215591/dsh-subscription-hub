@@ -30,13 +30,20 @@ import { cpus, homedir, release } from 'node:os'
 import { readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
-/** The editions whose install layout this module knows. */
-export type TraeEdition = 'cn' | 'solo'
+/**
+ * The editions whose install layout this module knows.
+ *
+ * `sg` is the international Trae desktop app and `solo-sg` is TRAE SOLO
+ * international; both belong to the `ai` region (see `region.ts`).
+ */
+export type TraeEdition = 'cn' | 'sg' | 'solo' | 'solo-sg'
 
 /** Install directory name per edition, used for identity discovery. */
 const APP_NAME_BY_EDITION: Readonly<Record<TraeEdition, string>> = {
   cn: 'Trae CN',
+  sg: 'Trae',
   solo: 'TRAE SOLO CN',
+  'solo-sg': 'TRAE SOLO',
 }
 
 /** Resolved device identity as the client would report it. */

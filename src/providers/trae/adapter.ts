@@ -46,6 +46,7 @@ import {
 } from './protocol.js'
 import type { TraeMessage } from './protocol.js'
 import { traeIdentityFor } from './identity.js'
+import { gatewaysFor } from './region.js'
 import { fetchTraeModels, mergeTraeModels, toTraeModelInfo } from './catalog.js'
 import type { TraeModel } from './catalog.js'
 
@@ -344,7 +345,7 @@ export class TraeAdapter extends LlmAdapter {
 
       let response: Response
       try {
-        response = await fetchFn(traeEndpoint(TRAE_CHAT_BASE, TRAE_CHAT_PATH), {
+        response = await fetchFn(traeEndpoint(gatewaysFor(credential).chat, TRAE_CHAT_PATH), {
           method: 'POST',
           headers: traeHeaders(
             credential.accessToken,

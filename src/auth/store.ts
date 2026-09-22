@@ -181,12 +181,22 @@ export interface TraeSession {
   userId?: string
   /** Which Trae product surface this credential came from. */
   channel: 'solo' | 'ide'
-  /** Routing bucket; this plugin supports the CN region only. */
-  region: 'cn'
-  /** Credential host, e.g. `https://api.trae.cn` (falls back to the CN gateway). */
+  /**
+   * Routing bucket, derived from the credential's own claim (see
+   * `providers/trae/region.ts`). Stored so a restored session keeps routing to
+   * the gateway it was authenticated against.
+   */
+  region: 'cn' | 'ai'
+  /** Credential host, e.g. `https://api.trae.cn` (falls back to the region's pay base). */
   host: string
-  /** Edition label the credential was discovered under, for diagnostics. */
-  edition: 'cn' | 'solo'
+  /** Which install the credential was discovered under, for diagnostics. */
+  edition: 'cn' | 'sg' | 'solo' | 'solo-sg'
+  /**
+   * The raw `userRegion` claim the storage document carried, when it had one.
+   * Kept because it is the authoritative region signal and outranks both the
+   * host suffix and the edition label.
+   */
+  userRegion?: string
 }
 
 /** One provider's accounts: account key → session, plus the default account. */

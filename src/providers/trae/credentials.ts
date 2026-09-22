@@ -22,14 +22,18 @@ import { createDecipheriv, createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import type { TraeEdition } from './identity.js'
 
 /** Storage key holding the encrypted/plaintext auth document. */
 export const TRAE_AUTH_STORAGE_KEY = 'iCubeAuthInfo://icube.cloudide'
 
 /**
- * The two CN channels this plugin serves. Both are ByteDance Trae products on
- * the same CN gateway, but they expose different model rosters and are separate
- * sign-ins, so each is imported and listed independently.
+ * The Trae products this plugin serves.
+ *
+ * A "channel" is a FUNCTION FAMILY, not a region: `solo` and `ide` decide which
+ * SOLO/IDE directory functions to ask, and both regions expose the same wire
+ * shapes, so the same two families serve an international install. The region is
+ * a separate axis carried on the credential — see `region.ts`.
  */
 export type TraeChannel = 'solo' | 'ide'
 
@@ -41,16 +45,29 @@ export interface TraeChannelDefinition {
   appName: string
   /** Linux config directory spellings probed in order. */
   linuxAppNames: readonly string[]
+  /** Which install this is, which is what decides the region and refresh contract. */
+  edition: TraeEdition
 }
 
+/**
+ * Every local install probed, CN first.
+ *
+ * The two international installs carry their own app-data names (`Trae`,
+ * `TRAE SOLO`) and belong to the `ai` region, so they are separate candidates
+ * rather than aliases of the CN ones — importing the wrong label would route the
+ * account at the wrong gateway.
+ */
 export const TRAE_CHANNELS: readonly TraeChannelDefinition[] = [
-  { id: 'solo', label: 'TRAE SOLO CN', appName: 'TRAE SOLO CN', linuxAppNames: ['trae-solo-cn', 'TRAE SOLO CN'] },
-  { id: 'ide', label: 'Trae CN IDE', appName: 'Trae CN', linuxAppNames: ['trae-cn', 'Trae CN', 'trae', 'Trae'] },
+  { id: 'solo', label: 'TRAE SOLO CN', appName: 'TRAE SOLO CN', linuxAppNames: ['trae-solo-cn', 'TRAE SOLO CN'], edition: 'solo' },
+  { id: 'ide', label: 'Trae CN IDE', appName: 'Trae CN', linuxAppNames: ['trae-cn', 'Trae CN', 'trae', 'Trae'], edition: 'cn' },
+  { id: 'solo', label: 'TRAE SOLO', appName: 'TRAE SOLO', linuxAppNames: ['trae-solo', 'TRAE SOLO'], edition: 'solo-sg' },
+  { id: 'ide', label: 'Trae', appName: 'Trae', linuxAppNames: ['trae'], edition: 'sg' },
 ]
 
 /** CLI home directory names, mapped to the channel whose roster they serve. */
-const TRAE_CLI_HOMES: readonly { name: string; channel: TraeChannel }[] = [
-  { name: '.trae-cn', channel: 'ide' },
+const TRAE_CLI_HOMES: readonly { name: string; channel: TraeChannel; edition: TraeEdition }[] = [
+  { name: '.trae-cn', channel: 'ide', edition: 'cn' },
+  { name: '.trae', channel: 'ide', edition: 'sg' },
 ]
 
 /** Basename of the CLI's persisted bare JWT. */
@@ -62,15 +79,15 @@ export type TraeCredentialSource = 'desktop' | 'cli'
 /** One candidate credential location, tried in order. */
 export interface TraeCandidate {
   channel: TraeChannel
-  edition: 'cn' | 'solo'
+  edition: TraeEdition
   path: string
   source: TraeCredentialSource
 }
 
-function channelOf(definition: TraeChannelDefinition): { channel: TraeChannel; edition: 'cn' | 'solo' } {
-  return definition.id === 'solo'
-    ? { channel: 'solo', edition: 'solo' }
-    : { channel: 'ide', edition: 'cn' }
+function channelOf(definition: TraeChannelDefinition): { channel: TraeChannel; edition: TraeEdition } {
+  // The channel supplies the function family; the DEFINITION supplies which
+  // install (and therefore which region) this credential came from.
+  return { channel: definition.id, edition: definition.edition }
 }
 
 /**
@@ -288,8 +305,17 @@ export interface TraeCredential {
   account?: string
   host: string
   channel: TraeChannel
-  edition: 'cn' | 'solo'
+  edition: TraeEdition
   source: TraeCredentialSource
+  /**
+   * The raw `userRegion` claim, when the storage document carried one.
+   *
+   * It is the AUTHORITATIVE region signal (it outranks both the host suffix and
+   * the edition label), so it is kept verbatim rather than converted here — the
+   * region module owns the interpretation, and keeping the raw value means a
+   * claim this build does not recognise is visible instead of silently lost.
+   */
+  userRegion?: string
 }
 
 /** Host used for CLI tokens, which carry no host claim of their own. */
@@ -312,7 +338,7 @@ function timeToMs(value: unknown): number | undefined {
 export function normalizeTraeCredential(
   raw: unknown,
   channel: TraeChannel,
-  edition: 'cn' | 'solo',
+  edition: TraeEdition,
   source: TraeCredentialSource,
 ): TraeCredential | undefined {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
@@ -324,6 +350,14 @@ export function normalizeTraeCredential(
     : undefined
   const accountName = optionalString(account?.username)
   const refreshExpiresAt = timeToMs(value.refreshExpiredAt ?? value.refreshExpiresAt)
+  // The desktop storage spells the region as an object; the app logs spell it
+  // bare. Both shapes are carried through so the region module can read either.
+  const regionClaim = value['userRegion'] ?? value['user_region']
+  const userRegion = typeof regionClaim === 'string'
+    ? regionClaim
+    : typeof regionClaim === 'object' && regionClaim !== null && !Array.isArray(regionClaim)
+      ? optionalString((regionClaim as Record<string, unknown>)['region'])
+      : undefined
   return {
     accessToken,
     refreshToken: optionalString(value.refreshToken) ?? '',
@@ -335,6 +369,7 @@ export function normalizeTraeCredential(
     channel,
     edition,
     source,
+    ...userRegion === undefined ? {} : { userRegion },
   }
 }
 

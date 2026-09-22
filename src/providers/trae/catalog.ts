@@ -29,6 +29,7 @@ import {
 import type { TraeChannel } from './credentials.js'
 import { traeIdentityFor } from './identity.js'
 import type { TraeEdition } from './identity.js'
+import { REGION_GATEWAYS, regionOfEdition } from './region.js'
 
 /** One callable model with the directory function that owns it. */
 export interface TraeModel {
@@ -85,7 +86,7 @@ async function fetchConfigList(
   edition: TraeEdition,
 ): Promise<unknown[] | undefined> {
   try {
-    const response = await fetchFn(traeEndpoint(TRAE_CHAT_BASE, TRAE_MODELS_PATH), {
+    const response = await fetchFn(traeEndpoint(REGION_GATEWAYS[regionOfEdition(edition)].chat, TRAE_MODELS_PATH), {
       method: 'POST',
       headers: {
         ...traeHeaders(accessToken, userId, await traeIdentityFor(edition, userId)),
@@ -230,6 +231,8 @@ export async function fetchRemoteModels(
   accessToken: string,
   signal: AbortSignal | undefined,
   fetchFn: FetchFn,
+  /** Which region's remote directory to ask; the skeleton is region-scoped. */
+  edition: TraeEdition = 'cn',
 ): Promise<TraeModel[] | undefined> {
   const headers = {
     Authorization: `Cloud-IDE-JWT ${accessToken}`,
@@ -240,7 +243,7 @@ export async function fetchRemoteModels(
     Referer: 'https://solo.trae.cn/',
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
   }
-  const url = `https://solo.trae.cn/api/remote/v1/models?functions=${TRAE_REMOTE_DIRECTORY_FUNCTIONS.join(',')}`
+  const url = `/models?functions=${TRAE_REMOTE_DIRECTORY_FUNCTIONS.join(',')}`
   try {
     const response = await fetchFn(url, { headers, signal: signal ?? AbortSignal.timeout(DISCOVERY_TIMEOUT_MS) })
     if (!response.ok) return undefined
@@ -482,9 +485,10 @@ export async function fetchTraeModels(
   channel: TraeChannel,
   signal?: AbortSignal,
   fetchFn: FetchFn = proxiedFetch,
+  edition: TraeEdition = channel === 'solo' ? 'solo' : 'cn',
 ): Promise<TraeModel[]> {
   const [remote, wire] = await Promise.all([
-    fetchRemoteModels(accessToken, signal, fetchFn),
+    fetchRemoteModels(accessToken, signal, fetchFn, edition),
     fetchWireRoster(accessToken, userId, channel, signal, fetchFn),
   ])
   if (wire === undefined) {

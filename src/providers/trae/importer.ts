@@ -10,6 +10,7 @@
 import type { TraeSession } from '../../auth/store.js'
 import { discoverTraeCredentials, traeCandidates } from './credentials.js'
 import type { TraeChannel } from './credentials.js'
+import { regionOfCredential } from './region.js'
 
 /** One candidate path that yielded no account, for the import diagnostic. */
 export interface TraeImportFailure {
@@ -45,9 +46,17 @@ export async function importTraeAccounts(): Promise<TraeImportResult> {
         account,
         ...credential.userId === '' ? {} : { userId: credential.userId },
         channel: credential.channel,
-        region: 'cn',
+        // Derived from the credential's OWN facts, never assumed: the region
+        // decides which gateway serves this account, and a CN credential pointed
+        // at an international gateway simply fails.
+        region: regionOfCredential({
+          edition: credential.edition,
+          host: credential.host,
+          ...credential.userRegion === undefined ? {} : { userRegion: credential.userRegion },
+        }),
         host: credential.host,
         edition: credential.edition,
+        ...credential.userRegion === undefined ? {} : { userRegion: credential.userRegion },
       },
     })
   }

@@ -132,18 +132,22 @@ test('parseTraeCliToken reads data.user_id and exp from a bare JWT', () => {
   assert.throws(() => parseTraeCliToken('not-a-jwt'), /three-part JWT/)
 })
 
-test('traeCandidates enumerates the CN channels on Windows and carries no SG paths', () => {
+test('traeCandidates enumerates every install, CN first, with its own edition', () => {
   const candidates = traeCandidates('win32', 'C:\\Users\\tester', { APPDATA: 'C:\\Users\\tester\\AppData\\Roaming' })
   const desktop = candidates.filter(candidate => candidate.source === 'desktop')
   const paths = desktop.map(candidate => candidate.path)
   assert.equal(paths.some(p => p.includes('TRAE SOLO CN')), true, 'TRAE SOLO CN must be probed')
   assert.equal(paths.some(p => p.includes('Trae CN')), true, 'Trae CN IDE must be probed')
-  // The international installs route through gateways this plugin does not
-  // support, so they must not be discovered at all.
-  assert.equal(paths.some(p => /[\\/]Trae[\\/]User/.test(p)), false, 'Trae (intl) must not be probed')
-  assert.equal(paths.some(p => p.includes('TRAE SOLO\\User')), false, 'TRAE SOLO (intl) must not be probed')
-  // Channels are labeled for the account key.
+  // The international installs are probed too, and each is a SEPARATE candidate
+  // carrying its own edition: importing the wrong label would route the account
+  // at the wrong gateway.
+  assert.equal(paths.some(p => /[\\/]Trae[\\/]User/.test(p)), true, 'Trae (intl) must be probed')
+  assert.equal(paths.some(p => p.includes('TRAE SOLO\\User')), true, 'TRAE SOLO (intl) must be probed')
+  // The CN installs come first, so an existing user's account keys do not move.
+  assert.deepEqual(desktop.slice(0, 2).map(c => c.edition), ['solo', 'cn'])
+  // Both channel families are represented, and every edition appears once.
   assert.deepEqual([...new Set(desktop.map(c => c.channel))].sort(), ['ide', 'solo'])
+  assert.deepEqual(desktop.map(c => c.edition).sort(), ['cn', 'sg', 'solo', 'solo-sg'])
 })
 
 test('discoverTraeCredentials imports both channels and reports misses', async () => {
