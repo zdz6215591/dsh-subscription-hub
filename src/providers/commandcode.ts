@@ -26,6 +26,7 @@ import type { ProviderId } from '../auth/store.js'
 import { proxiedFetch } from '../http.js'
 import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from './accounts.js'
 import { httpLlmError, idleWatchdog, mapFetchFailure } from './common.js'
+import { readCommandCodeCatalog, writeCommandCodeCatalog } from './commandcode-catalog-cache.js'
 import type { FetchFn, ModelEntry, ProviderUsage } from './common.js'
 import type { PoolAdapter } from './pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, subscriptionRetryPolicy } from './rate-limit.js'
@@ -1252,6 +1253,11 @@ export interface CommandCodeAdapterOptions {
   fetchFn?: FetchFn
   resolveAttachments?: () => AttachmentStore | undefined
   rateLimit?: RateLimitWait
+  /**
+   * Override the durable catalog cache path. Tests point it at a scratch file;
+   * production uses the plugin's own state directory.
+   */
+  catalogCachePath?: string
 }
 
 const COMMANDCODE_CATALOG_TTL_MS = 5 * 60_000
@@ -1270,6 +1276,18 @@ export class CommandCodeAdapter extends LlmAdapter {
 
   /** Catalog ids already warned about a missing effort-table entry (one warning each). */
   private readonly warnedEffortGaps = new Set<string>()
+
+  /**
+   * The durable catalog read, memoized. `undefined` means nothing usable was
+   * stored; the read itself never throws.
+   */
+  private durableRead: Promise<CommandCodeCatalogModel[] | undefined> | undefined
+
+  /** The last catalog this machine actually read, for a failed live fetch. */
+  private durableCatalog(): Promise<CommandCodeCatalogModel[] | undefined> {
+    this.durableRead ??= readCommandCodeCatalog(this.options.catalogCachePath).catch(() => undefined)
+    return this.durableRead
+  }
 
   /** The live catalog entry for a model from any account, preferring the most recent snapshot. */
   private catalogModel(model: string): CommandCodeCatalogModel | undefined {
@@ -1315,6 +1333,14 @@ export class CommandCodeAdapter extends LlmAdapter {
         if (accounts.length > 0) await this.listOwnModels(provider, accounts[0])
         live = this.catalogModel(model)
       } catch { /* best-effort warm */ }
+    }
+    if (live === undefined) {
+      // The warm-up may have failed. A mid-conversation resolve must still size
+      // the request from the last roster this machine read rather than from an
+      // invented default — this is the path the harness takes for every
+      // capability lookup, so leaving it out would have kept the mis-sizing F8
+      // exists to remove.
+      live = (await this.durableCatalog())?.find(entry => entry.id === model)
     }
     if (live !== undefined) {
       return {
@@ -1366,7 +1392,11 @@ export class CommandCodeAdapter extends LlmAdapter {
     }
     try {
       const session = await this.options.tokens.session(account)
-      const response = await proxiedFetch(`${COMMANDCODE_API_BASE}/provider/v1/models`, {
+      // The configured fetcher, like every other request in this file: using
+      // `proxiedFetch` directly here made the `fetchFn` option dead for the
+      // catalog (and silently bypassed any injected/offline fetcher).
+      const fetchFn = this.options.fetchFn ?? proxiedFetch
+      const response = await fetchFn(`${COMMANDCODE_API_BASE}/provider/v1/models`, {
         headers: { authorization: `Bearer ${session.accessToken}`, accept: 'application/json', ...attributionHeaders() },
         ...signal === undefined ? {} : { signal },
       })
@@ -1382,6 +1412,11 @@ export class CommandCodeAdapter extends LlmAdapter {
         .filter((entry): entry is CommandCodeCatalogModel => entry !== undefined)
       if (rawModels.length > 0) {
         this.catalogs.set(account, { at: Date.now(), models: rawModels })
+        // Write through to the durable fallback so a later `/models` failure —
+        // or the next process — still knows every model's real window and cap
+        // instead of collapsing to the two-model static list. Fire-and-forget:
+        // durability is what is at stake, never this request.
+        void writeCommandCodeCatalog(rawModels, this.options.catalogCachePath).catch(() => undefined)
         // Snapshot-gap advisory: a newly shipped model from a family that
         // normally carries selectable efforts has no entry in
         // COMMANDCODE_KNOWN_EFFORTS, so its picker shows no thinking-level
@@ -1402,6 +1437,10 @@ export class CommandCodeAdapter extends LlmAdapter {
       }
     } catch (error) {
       if (cached !== undefined) return cached.models.map(model => toModelInfo(model, provider))
+      // No fresher answer: fall back to the last catalog this machine actually
+      // read, rather than to a two-model list that mis-sizes everything else.
+      const persisted = await this.durableCatalog()
+      if (persisted !== undefined) return persisted.map(model => toModelInfo(model, provider))
       this.options.onWarn?.(`commandcode catalog failed (${error instanceof Error ? error.message : String(error)})`)
     }
     return this.options.models.map(model => ({
