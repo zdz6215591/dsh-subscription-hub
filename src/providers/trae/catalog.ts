@@ -27,6 +27,8 @@ import {
   traeHeaders,
 } from './protocol.js'
 import type { TraeChannel } from './credentials.js'
+import { traeIdentityFor } from './identity.js'
+import type { TraeEdition } from './identity.js'
 
 /** One callable model with the directory function that owns it. */
 export interface TraeModel {
@@ -80,11 +82,15 @@ async function fetchConfigList(
   functionName: string,
   signal: AbortSignal | undefined,
   fetchFn: FetchFn,
+  edition: TraeEdition,
 ): Promise<unknown[] | undefined> {
   try {
     const response = await fetchFn(traeEndpoint(TRAE_CHAT_BASE, TRAE_MODELS_PATH), {
       method: 'POST',
-      headers: { ...traeHeaders(accessToken, userId), Accept: 'application/json' },
+      headers: {
+        ...traeHeaders(accessToken, userId, await traeIdentityFor(edition, userId)),
+        Accept: 'application/json',
+      },
       body: JSON.stringify({
         function: functionName,
         config_names: null,
@@ -360,8 +366,10 @@ export async function fetchTraeModels(
   if (remote !== undefined && remote.length > 0) return remote
 
   const byId = new Map<string, TraeModel>()
+  // The edition names the install the device identity is read from.
+  const edition: TraeEdition = channel === 'solo' ? 'solo' : 'cn'
   for (const functionName of directoryFunctions(channel)) {
-    const list = await fetchConfigList(accessToken, userId, functionName, signal, fetchFn)
+    const list = await fetchConfigList(accessToken, userId, functionName, signal, fetchFn, edition)
     if (list === undefined) continue
     for (const raw of list) {
       if (typeof raw !== 'object' || raw === null) continue

@@ -11,7 +11,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { hostname } from 'node:os'
+import { release } from 'node:os'
 
 /** CN chat gateway (shared by the Trae CN IDE and TRAE SOLO CN channels). */
 export const TRAE_CHAT_BASE = 'https://trae-api-cn.mchost.guru'
@@ -44,14 +44,19 @@ export const TRAE_SOLO_FUNCTION = 'solo_work_lite'
 /** Directory functions probed for the IDE channel. */
 export const TRAE_IDE_DIRECTORY_FUNCTIONS: readonly string[] = ['inline_chat', 'chat']
 
-/** Stable per-process device identity (device-stable values the upstream validates). */
-const DEVICE_MACHINE_ID = randomUUID().replace(/-/g, '')
-const DEVICE_ID = createDeviceId(DEVICE_MACHINE_ID)
-
-function createDeviceId(machineId: string): string {
-  // The client derives the device id as a 32-char hash of the machine id.
-  // Node's createHash is imported lazily below to keep this module fetch-safe.
-  return machineId.slice(0, 32)
+/**
+ * Device identity the headers carry. Resolved from the installed app when one is
+ * present (see `identity.ts`), and derived per account otherwise.
+ */
+export interface TraeDeviceIdentity {
+  machineId: string
+  deviceId: string
+  /** The app version the real client reports; falls back to the pinned constant. */
+  appVersion?: string
+  /** `Windows 10.0.26100`, not `win32 <hostname>`. */
+  osVersion?: string
+  /** `mac` / `windows` / `linux`. */
+  deviceType?: string
 }
 
 /** The `reasoning_effort` values Trae's client sends on the wire. */
@@ -61,10 +66,26 @@ export const TRAE_WIRE_EFFORTS: Readonly<Record<string, string>> = Object.freeze
   xhigh: 'extra_high',
 })
 
-/** Build the header set every authenticated Trae endpoint shares. */
-export function traeHeaders(accessToken: string, userId: string): Record<string, string> {
+/**
+ * Build the header set every authenticated Trae endpoint shares.
+ *
+ * `identity` carries the device values read from the installed app. It is
+ * required rather than defaulted: the previous module-level constants were one
+ * `randomUUID()` per process whose first 32 characters served as BOTH
+ * `x-machine-id` and `x-device-id`, so the plugin presented a brand-new device
+ * on every restart and sent two headers that no real client ever sends equal.
+ * @param accessToken - the account's access token.
+ * @param userId - the Trae user id.
+ * @param identity - the resolved device identity.
+ */
+export function traeHeaders(
+  accessToken: string,
+  userId: string,
+  identity: TraeDeviceIdentity,
+): Record<string, string> {
   const requestId = randomUUID()
   const traceId = requestId.replace(/-/g, '')
+  const clientVersion = identity.appVersion ?? TRAE_CLIENT_VERSION
   return {
     Authorization: `Cloud-IDE-JWT ${accessToken}`,
     'X-Ide-Token': accessToken,
@@ -72,16 +93,16 @@ export function traeHeaders(accessToken: string, userId: string): Record<string,
     'x-uid': userId,
     'x-app-id': TRAE_APP_ID,
     'x-plugin-channel': TRAE_PLUGIN_CHANNEL,
-    'User-Agent': `Trae/${TRAE_CLIENT_VERSION}`,
-    'x-app-version': TRAE_CLIENT_VERSION,
-    'x-ide-version': TRAE_CLIENT_VERSION,
+    'User-Agent': `Trae/${clientVersion}`,
+    'x-app-version': clientVersion,
+    'x-ide-version': clientVersion,
     'x-app-version-code': TRAE_VERSION_CODE,
     'x-ide-version-code': TRAE_VERSION_CODE,
     'x-ide-version-type': 'stable',
-    'x-machine-id': DEVICE_MACHINE_ID,
-    'x-device-id': DEVICE_ID,
-    'x-device-type': process.platform === 'darwin' ? 'mac' : process.platform === 'win32' ? 'windows' : 'linux',
-    'x-os-version': `${process.platform} ${hostname()}`,
+    'x-machine-id': identity.machineId,
+    'x-device-id': identity.deviceId,
+    'x-device-type': identity.deviceType ?? (process.platform === 'darwin' ? 'mac' : process.platform === 'win32' ? 'windows' : 'linux'),
+    'x-os-version': identity.osVersion ?? `${process.platform} ${release()}`,
     'x-request-id': requestId,
     'x-trae-request-id': requestId,
     'x-custom-trace-id': traceId.slice(0, 32),

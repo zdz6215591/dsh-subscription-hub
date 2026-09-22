@@ -21,6 +21,8 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { proxiedFetch } from '../../http.js'
 import type { ProviderUsage, UsageWindow } from '../common.js'
 import { TRAE_PAY_BASE, traeHeaders } from './protocol.js'
+import { traeIdentityFor } from './identity.js'
+import type { TraeEdition } from './identity.js'
 
 /** Usage endpoints (all POST, all read-only). */
 const TRAE_USAGE_PATH = '/trae/api/v2/pay/web_user_ent_usage'
@@ -175,11 +177,17 @@ async function postJson(
   body: Record<string, unknown>,
   signal: AbortSignal | undefined,
   fetchFn: typeof proxiedFetch,
+  /**
+   * Which install's device identity to send. The pay endpoints are CN-only
+   * today, so this defaults there; it exists so the international editions can
+   * pass their own without another signature change.
+   */
+  edition: TraeEdition = 'cn',
 ): Promise<unknown> {
   const response = await fetchFn(`${TRAE_PAY_BASE}${path}`, {
     method: 'POST',
     headers: {
-      ...traeHeaders(accessToken, userId),
+      ...traeHeaders(accessToken, userId, await traeIdentityFor(edition, userId)),
       Accept: 'application/json',
       // The pay endpoints are the web dashboard's own; they expect its Origin.
       Origin: 'https://www.trae.cn',

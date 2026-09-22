@@ -177,7 +177,11 @@ test('discoverTraeCredentials imports both channels and reports misses', async (
 // ---------------------------------------------------------------------------
 
 test('traeHeaders carries the identity, version and trace contract', () => {
-  const headers = traeHeaders('token-abc', 'user-9')
+  // The device pair now comes from the resolved identity. It is passed in rather
+  // than generated per process, and the two fields are deliberately different
+  // values: the old code sent the SAME 32-char string for both.
+  const identity = { machineId: 'f'.repeat(64), deviceId: 'a'.repeat(32) }
+  const headers = traeHeaders('token-abc', 'user-9', identity)
   assert.equal(headers.Authorization, 'Cloud-IDE-JWT token-abc')
   assert.equal(headers['X-Ide-Token'], 'token-abc')
   assert.equal(headers['X-Cloudide-Token'], 'token-abc')
