@@ -10,6 +10,7 @@
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import type { TraeSession } from '../../auth/store.js'
 import { traeCandidates } from './credentials.js'
+import { refreshTraeSession } from './refresh.js'
 
 export { TraeAdapter, TRAE_PREEMPT_MS, toTraeMessages } from './adapter.js'
 export type { TraeAdapterOptions } from './adapter.js'
@@ -89,21 +90,25 @@ export { importTraeAccounts, traeImportFailureMessage } from './importer.js'
 export type { TraeImportFailure, TraeImportResult } from './importer.js'
 
 /**
- * Trae credentials are read from the local Trae installs, so there is no OAuth
- * refresh grant to run: the desktop app owns the token's lifetime and re-reading
- * `storage.json` picks up whatever it last persisted. Returning the session
- * unchanged keeps the shared token manager's contract (it only calls `refresh`
- * once the token is inside the preempt window) while making the import path
- * idempotent.
+ * Refresh a Trae credential through the official ExchangeToken grant.
+ *
+ * This replaced a no-op whose comment claimed "the desktop app owns the token's
+ * lifetime and re-reading `storage.json` picks up whatever it last persisted" —
+ * false, because only a manual import re-reads that file. The consequence was
+ * that a few hours after an import, chat, credits and check-in all failed with
+ * upstream auth errors, never self-healed, and the card still reported the
+ * account as signed in. See `refresh.ts` for the per-edition contract.
+ * @param session - the stored session to renew.
+ * @returns the same session with a fresh access token.
+ * @throws {TraeRefreshRejected} when the grant is permanently refused.
  */
 export async function refreshTrae(session: TraeSession): Promise<TraeSession> {
-  return session
+  // The token manager applies its own preempt window, so reaching here means the
+  // access token is inside it; a missing refresh token is the real "cannot renew".
+  return await refreshTraeSession(session)
 }
 
-/** A Trae credential never becomes permanently invalid from a refresh failure. */
-export function isTraePermanentRefreshError(_error: unknown): boolean {
-  return false
-}
+export { isTraePermanentRefreshError } from './refresh.js'
 
 /**
  * Throw the diagnostic error for a machine with no Trae install, naming the
