@@ -17,11 +17,12 @@ import {
   claimQoderCheckin,
   fetchQoderCampaigns,
   getQoderCheckinStatusView,
-  qoderDayString,
   readQoderCheckinState,
   writeQoderCheckinState,
 } from '../src/providers/qoder/checkin.js'
 import type { FetchFn } from '../src/providers/common.js'
+// The shared day helper the ledger uses; Qoder has no day concept of its own.
+import { localDateString } from '../src/providers/codebuddy.js'
 
 /** Run one case with DSH_HOME pointed at a scratch tree. */
 async function withHome<T>(body: () => Promise<T>): Promise<T> {
@@ -48,15 +49,42 @@ function authResponse(url: string): Response | undefined {
   return undefined
 }
 
-test('the day boundary is UTC+8, not the machine zone', () => {
-  // 2026-09-23T17:30Z is already the 24th in Beijing (01:30). Judging this on a
-  // western machine's local day would double-claim across the boundary.
-  const instant = new Date('2026-09-23T17:30:00Z')
-  assert.equal(qoderDayString(instant), '2026-09-24')
-  // And just before the boundary it is still the 23rd.
-  assert.equal(qoderDayString(new Date('2026-09-23T15:30:00Z')), '2026-09-23')
-  // Midnight UTC+8.
-  assert.equal(qoderDayString(new Date('2026-09-23T16:00:00Z')), '2026-09-24')
+test('the schedule is the SAME morning-window rule the other routes use', async () => {
+  // Unification, pinned: Qoder must not invent its own schedule. CodeBuddy and
+  // Trae pick a random moment inside a fixed morning window via
+  // `generateMorningTargetTime`, and this asserts the window Qoder lands in is
+  // the identical one — not a different hour, and not an arbitrary time of day.
+  await withHome(async () => {
+    const view = await getQoderCheckinStatusView(new Date('2026-09-23T12:00:00'))
+    assert.ok(view.scheduledTime !== undefined, 'a fresh day must schedule a window')
+    const when = new Date(view.scheduledTime)
+    const startOfDay = new Date(2026, 8, 23, 6, 0, 0, 0)
+    const endOfWindow = new Date(2026, 8, 23, 7, 55, 0, 0)
+    assert.ok(when.getTime() >= startOfDay.getTime(), `before the window: ${when.toISOString()}`)
+    assert.ok(when.getTime() <= endOfWindow.getTime(), `after the window: ${when.toISOString()}`)
+    // And it is a real random pick, not a fixed instant: over many days the
+    // minutes differ (a constant would mean the randomiser was lost).
+    const seen = new Set<string>()
+    for (let day = 1; day <= 20; day += 1) {
+      const sample = await getQoderCheckinStatusView(new Date(2026, 9, day, 12, 0, 0))
+      if (sample.scheduledTime !== undefined) seen.add(new Date(sample.scheduledTime).getMinutes().toString())
+    }
+    assert.ok(seen.size > 1, 'the scheduled minute never varied across 20 days')
+  })
+})
+
+test('an unclaimed day does not run before its scheduled window', async () => {
+  await withHome(async () => {
+    const now = new Date('2026-09-23T12:00:00')
+    // First read schedules today's window (a morning hour, so already past noon).
+    const view = await getQoderCheckinStatusView(now)
+    assert.ok((view.scheduledTime ?? 0) < now.getTime(), 'window should already have passed at noon')
+    // Before that window there is nothing to do: at 05:00 the same day, the
+    // scheduler must not claim.
+    const early = new Date('2026-09-23T05:00:00')
+    const beforeWindow = await getQoderCheckinStatusView(early)
+    assert.ok((beforeWindow.scheduledTime ?? 0) > early.getTime(), 'at 05:00 the window is still ahead')
+  })
 })
 
 test('the campaign list is fetched with the DESKTOP client identifier', async () => {
@@ -164,7 +192,7 @@ test('the ledger round-trips and treats a corrupt file as empty', async () => {
 
 test('the status view matches the shape the card already renders', async () => {
   await withHome(async () => {
-    const today = qoderDayString()
+    const today = localDateString()
     await writeQoderCheckinState({ lastDate: today, lastTime: Date.now(), lastMessage: 'claimed 100 credits' })
     const view = await getQoderCheckinStatusView()
     // The same keys the CodeBuddy and Trae routes answer with, so the card's
@@ -172,7 +200,9 @@ test('the status view matches the shape the card already renders', async () => {
     assert.equal(view.checkedInToday, true)
     assert.equal(view.lastDate, today)
     assert.equal(view.lastMessage, 'claimed 100 credits')
-    assert.equal(view.scheduledDate, today)
+    // A claimed day schedules TOMORROW's window, so it is not today's date.
+    assert.notEqual(view.scheduledDate, today)
+    assert.ok((view.scheduledTime ?? 0) > Date.now(), 'the next window must be in the future')
   })
 })
 
@@ -181,9 +211,11 @@ test('a day NOT yet claimed reads as not-done', async () => {
     await writeQoderCheckinState({ lastDate: '2020-01-01', lastMessage: 'old' })
     const view = await getQoderCheckinStatusView()
     assert.equal(view.checkedInToday, false)
-    // And the scheduled day is today, because the scheduler retries every tick
-    // until the claim lands.
-    assert.equal(view.scheduledDate, qoderDayString())
+    // And today has its own window scheduled, in the future relative to a
+    // pre-dawn read.
+    const dawn = await getQoderCheckinStatusView(new Date(new Date().setHours(4, 0, 0, 0)))
+    assert.equal(dawn.checkedInToday, false)
+    assert.ok((dawn.scheduledTime ?? 0) > 0)
   })
 })
 

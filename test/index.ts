@@ -47,6 +47,7 @@ import './cline.spec.js'
 // agy thoughtSignature tests silently never ran in the directory run.
 import './agy-signature.spec.js'
 import './image-request.spec.js'
+import './config-providers.spec.js'
 import './commandcode-catalog-cache.spec.js'
 import './commandcode.spec.js'
 import './trae-identity.spec.js'

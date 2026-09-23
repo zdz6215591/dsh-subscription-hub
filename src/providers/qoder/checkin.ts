@@ -28,6 +28,9 @@ import { dirname } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { proxiedFetch } from '../../http.js'
+// The SAME schedule helpers the CodeBuddy and Trae routes use, so all three
+// check-ins pick a random morning time by one rule rather than three.
+import { generateMorningTargetTime, localDateString } from '../codebuddy.js'
 import type { QoderRegion } from './region.js'
 import { getQoderCampaignsUrl, getQoderClaimCampaignUrl, resolveQoderEndpoints } from './region.js'
 import { openApiJsonRequest } from './request.js'
@@ -70,22 +73,6 @@ export interface QoderCheckinOutcome {
   status: 'claimed' | 'already' | 'none' | 'error'
   message: string
   amount?: number
-}
-
-/**
- * The UTC+8 calendar day for an instant.
- *
- * Deliberately not the machine's local day: the upstream's reset is 10:00
- * Beijing, so the ledger has to agree with the vendor's clock or it will
- * double-claim on one side of the boundary and skip on the other.
- * @param now - the instant to classify.
- * @returns `YYYY-MM-DD` in UTC+8.
- */
-export function qoderDayString(now = new Date()): string {
-  const shifted = new Date(now.getTime() + (now.getTimezoneOffset() + 480) * 60_000)
-  const month = String(shifted.getMonth() + 1).padStart(2, '0')
-  const day = String(shifted.getDate()).padStart(2, '0')
-  return `${String(shifted.getFullYear())}-${month}-${day}`
 }
 
 /** Read the ledger; any failure answers an empty one rather than throwing. */
@@ -240,14 +227,26 @@ export async function claimQoderCheckin(
 /**
  * Run the daily check-in for every account, once per UTC+8 day.
  *
- * Mirrors the hub's Trae and CodeBuddy schedulers: it records the day the claim
- * landed and refuses to claim twice, so a 60-second poll is harmless. A day
- * whose attempt failed is NOT recorded as claimed, so the next tick retries
- * rather than silently skipping the whole day.
+ * Structurally IDENTICAL to the CodeBuddy and Trae schedulers — the same
+ * `localDateString` day key, the same `generateMorningTargetTime` window, the same
+ * `lastDate`/`scheduledDate`/`scheduledTime` ledger and the same
+ * schedule-then-wait shape — because a per-provider check-in that behaves
+ * differently from the other two is a bug in waiting, not a feature.
+ *
+ * Three behaviours the schedule alone does not give you, all deliberate:
+ *
+ * - The day is recorded ONLY when a claim actually succeeded. An attempt that
+ *   finds no campaign yet (the benefit can become claimable later than the window
+ *   opens) leaves the ledger untouched, so the next tick retries instead of
+ *   silently losing that day's credits.
+ * - `already` counts as done: the day's credits exist whether this process minted
+ *   them or another client did.
+ * - A day that is already claimed schedules TOMORROW's window, so the random time
+ *   exists in advance rather than being chosen at the moment it fires.
  * @param accounts - the accounts to claim for, with their PATs and regions.
  * @param fetchFn - injectable fetcher for tests.
- * @param now - the instant to judge the day against.
- * @returns the last outcome, for the caller's log line.
+ * @param now - the instant to judge the day and the window against.
+ * @returns the last outcome when an attempt ran, undefined otherwise.
  */
 export async function autoCheckinQoder(
   accounts: readonly { pat: string; region: QoderRegion }[],
@@ -255,22 +254,39 @@ export async function autoCheckinQoder(
   now = new Date(),
 ): Promise<QoderCheckinOutcome | undefined> {
   if (accounts.length === 0) return undefined
-  const today = qoderDayString(now)
+  const todayStr = localDateString(now)
   const state = await readQoderCheckinState()
-  if (state.lastDate === today) return undefined
+
+  if (state.lastDate === todayStr) {
+    const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
+    const tomorrowStr = localDateString(tomorrow)
+    if (state.scheduledDate !== tomorrowStr || state.scheduledTime === undefined) {
+      state.scheduledDate = tomorrowStr
+      state.scheduledTime = generateMorningTargetTime(tomorrow)
+      await writeQoderCheckinState(state)
+    }
+    return undefined
+  }
+  if (state.scheduledDate !== todayStr || state.scheduledTime === undefined) {
+    state.scheduledDate = todayStr
+    state.scheduledTime = generateMorningTargetTime(now)
+    await writeQoderCheckinState(state)
+  }
+  // The randomly chosen moment has not arrived yet.
+  if (now.getTime() < state.scheduledTime) return undefined
 
   let last: QoderCheckinOutcome | undefined
   let ok = false
   for (const account of accounts) {
     const outcome = await claimQoderCheckin(account.pat, account.region, fetchFn)
     last = outcome
-    // `already` counts as done: the day's credits exist whether this process
-    // minted them or another client did.
+    // `already` counts as done: the day's credits exist either way.
     if (outcome.ok) ok = true
   }
   if (ok) {
     await writeQoderCheckinState({
-      lastDate: today,
+      ...state,
+      lastDate: todayStr,
       lastTime: now.getTime(),
       ...last?.message === undefined ? {} : { lastMessage: last.message },
     })
@@ -296,22 +312,62 @@ export interface QoderCheckinStatusView {
 }
 
 /**
+ * Record a check-in the USER triggered, on the shared ledger.
+ *
+ * Mirrors `recordTraeCheckin` exactly, including scheduling tomorrow's window in
+ * the same write: a manual claim has to leave the ledger in the state an
+ * automatic one would, or the two disagree about what is done and the next tick
+ * re-claims (harmless upstream, but a lie in the card).
+ * @param message - what to show as the last outcome.
+ * @param now - the instant the claim landed.
+ */
+export async function recordQoderCheckin(message: string, now = new Date()): Promise<void> {
+  const todayStr = localDateString(now)
+  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
+  const previous = await readQoderCheckinState()
+  await writeQoderCheckinState({
+    ...previous,
+    lastDate: todayStr,
+    lastTime: now.getTime(),
+    lastMessage: message,
+    scheduledDate: localDateString(tomorrow),
+    scheduledTime: generateMorningTargetTime(tomorrow),
+  })
+}
+
+/**
  * The check-in status the Settings card renders.
- * @param now - the instant to judge the day against.
+ *
+ * Mirrors the CodeBuddy and Trae views exactly, including the side effect of
+ * scheduling the day's window on read: the card asks for the status before the
+ * scheduler has necessarily run, and a view that reported no
+ * `scheduledTime` there would show "no schedule" for a day that has one.
+ * @param now - the instant to judge the day and the window against.
  * @returns the ledger's public face, in the shared view shape.
  */
 export async function getQoderCheckinStatusView(now = new Date()): Promise<QoderCheckinStatusView> {
+  const todayStr = localDateString(now)
   const state = await readQoderCheckinState()
-  const today = qoderDayString(now)
+  if (state.lastDate === todayStr) {
+    const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
+    const tomorrowStr = localDateString(tomorrow)
+    if (state.scheduledDate !== tomorrowStr || state.scheduledTime === undefined) {
+      state.scheduledDate = tomorrowStr
+      state.scheduledTime = generateMorningTargetTime(tomorrow)
+      await writeQoderCheckinState(state)
+    }
+  } else if (state.scheduledDate !== todayStr || state.scheduledTime === undefined) {
+    state.scheduledDate = todayStr
+    state.scheduledTime = generateMorningTargetTime(now)
+    await writeQoderCheckinState(state)
+  }
   return {
     ...state.lastDate === undefined ? {} : { lastDate: state.lastDate },
     ...state.lastTime === undefined ? {} : { lastTime: state.lastTime },
     ...state.lastMessage === undefined ? {} : { lastMessage: state.lastMessage },
-    // The scheduler retries every tick until the day's claim lands, so the day it
-    // is working on IS the scheduled one — there is no separate future slot to
-    // report, unlike the CodeBuddy/Trae routes that aim at a specific morning time.
-    scheduledDate: state.lastDate === today ? state.lastDate : today,
-    checkedInToday: state.lastDate === today,
+    ...state.scheduledDate === undefined ? {} : { scheduledDate: state.scheduledDate },
+    ...state.scheduledTime === undefined ? {} : { scheduledTime: state.scheduledTime },
+    checkedInToday: state.lastDate === todayStr,
   }
 }
 

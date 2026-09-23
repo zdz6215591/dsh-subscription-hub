@@ -100,8 +100,8 @@ export {
   claimQoderCheckin,
   fetchQoderCampaigns,
   getQoderCheckinStatusView,
+  recordQoderCheckin,
   qoderCheckinStatePath,
-  qoderDayString,
   readQoderCheckinState,
   writeQoderCheckinState,
 } from './checkin.js'

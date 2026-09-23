@@ -205,7 +205,7 @@ import { QoderAdapter, isQoderPermanentRefreshError, probeQoderPat } from './pro
 import { QODER_PREEMPT_MS } from './providers/qoder/index.js'
 import { qoderSessionFromPaste } from './providers/qoder-session.js'
 import { writeRegisteredProviders } from './startup-diagnostics.js'
-import { autoCheckinQoder, claimQoderCheckin, getQoderCheckinStatusView, qoderDayString, writeQoderCheckinState } from './providers/qoder/checkin.js'
+import { autoCheckinQoder, claimQoderCheckin, getQoderCheckinStatusView, recordQoderCheckin } from './providers/qoder/checkin.js'
 import type { QoderRegion } from './providers/qoder/index.js'
 import { modelVendor } from './model-vendor.js'
 import { createXSearchTool } from './tools/x-search.js'
@@ -300,7 +300,19 @@ const poolMemberSchema: z<PoolMemberRef> = z.object({
 })
 
 export const Config: z<Config> = z.object({
-  providers: z.array(providerIdSchema).default(['codex', 'claude', 'grok', 'agy', 'commandcode', 'cline', 'codebuddy', 'trae', 'copilot', 'zed']),
+  /**
+   * DERIVED from {@link PROVIDER_IDS}, never a literal.
+   *
+   * This was a hardcoded array of the provider ids, and schemastery INJECTS a
+   * declared default whenever the field is omitted — so the literal silently
+   * became the route list for every user who never set `providers` explicitly,
+   * and the `?? [...PROVIDER_IDS]` fallback at the use site never fired at all.
+   * Adding a route therefore meant editing the id union, the schema, the switch,
+   * the catalogs, the client tables AND this array; forgetting the last one
+   * produced a route that was fully implemented and never registered, with the
+   * only symptom being an empty model list and no error anywhere.
+   */
+  providers: z.array(providerIdSchema).default([...PROVIDER_IDS]),
   streamIdleTimeoutMs: z.number().min(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   rateLimit: z.object({
     wait: z.boolean().default(true),
@@ -1558,12 +1570,11 @@ export function apply(ctx: Context, config: Config): void {
         const outcome = await claimQoderCheckin(session.refreshToken, session.region)
         // The ledger is only advanced on a real claim, so a manual attempt that
         // finds the day already claimed does not rewrite the recorded message.
+        // Written through the SAME helper the scheduler uses, so a manual claim
+        // leaves the ledger exactly as an automatic one would: same day key,
+        // same next window.
         if (outcome.status === 'claimed') {
-          await writeQoderCheckinState({
-            lastDate: qoderDayString(),
-            lastTime: Date.now(),
-            lastMessage: outcome.message,
-          }).catch(() => undefined)
+          await recordQoderCheckin(outcome.message).catch(() => undefined)
         }
         return { ok: outcome.ok, message: outcome.message }
       }
