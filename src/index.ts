@@ -62,6 +62,7 @@ import type {
   ClineSession,
   CodexSession,
   CodeBuddySession,
+  QoderSession,
   CommandCodeSession,
   CopilotSession,
   GrokSession,
@@ -200,6 +201,9 @@ import {
 import { filterVisible, hiddenIds, markProviderModelsRead, setModelVisible, syncDiscoveredModels } from './model-visibility.js'
 import { registerSubCommand } from './command.js'
 import type { SubCommandDeps } from './command.js'
+import { QoderAdapter, isQoderPermanentRefreshError, probeQoderPat } from './providers/qoder/index.js'
+import { QODER_PREEMPT_MS } from './providers/qoder/index.js'
+import { qoderSessionFromPaste } from './providers/qoder-session.js'
 import { modelVendor } from './model-vendor.js'
 import { createXSearchTool } from './tools/x-search.js'
 import { createImageGenerateTool } from './tools/image-generate.js'
@@ -214,6 +218,7 @@ export type {
   ClaudeSession,
   CodexSession,
   CodeBuddySession,
+  QoderSession,
   CommandCodeSession,
   CopilotSession,
   GrokSession,
@@ -249,6 +254,7 @@ export interface Config {
     commandcode?: ModelEntry[]
     cline?: ModelEntry[]
     codebuddy?: ModelEntry[]
+    qoder?: ModelEntry[]
     trae?: ModelEntry[]
     zed?: ModelEntry[]
   }
@@ -271,7 +277,7 @@ export interface Config {
   }
 }
 
-const providerIdSchema = z.union(['codex', 'claude', 'grok', 'copilot', 'agy', 'commandcode', 'cline', 'codebuddy', 'trae', 'zed'])
+const providerIdSchema = z.union(['codex', 'claude', 'grok', 'copilot', 'agy', 'commandcode', 'cline', 'codebuddy', 'qoder', 'trae', 'zed'])
 const modelEntrySchema: z<ModelEntry> = z.object({
   id: z.string().required(),
   name: z.string(),
@@ -306,6 +312,7 @@ export const Config: z<Config> = z.object({
     commandcode: z.array(modelEntrySchema),
     cline: z.array(modelEntrySchema),
     codebuddy: z.array(modelEntrySchema),
+    qoder: z.array(modelEntrySchema),
     trae: z.array(modelEntrySchema),
     zed: z.array(modelEntrySchema),
   }),
@@ -371,6 +378,18 @@ export const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
   codebuddy: [
     { id: 'auto', name: 'CodeBuddy Auto' },
   ],
+  // Static fallback only: the live `model/list` roster wins whenever discovery
+  // succeeds. Qoder's ids are SERVER-SIDE POOL names rather than vendor model
+  // ids — `auto` and `ultimate` are routed pools the upstream decides — which is
+  // why they carry no vendor attribution in the model list.
+  qoder: [
+    { id: 'cmodel', name: 'Cantus (Qoder)', contextWindow: 1_000_000 },
+    { id: 'auto', name: 'Qoder Auto', contextWindow: 180_000 },
+    { id: 'ultimate', name: 'Qoder Ultimate', contextWindow: 1_000_000 },
+    { id: 'performance', name: 'Qoder Performance', contextWindow: 1_000_000 },
+    { id: 'efficient', name: 'Qoder Efficient', contextWindow: 180_000 },
+    { id: 'lite', name: 'Qoder Lite', contextWindow: 180_000 },
+  ],
   // Static fallback only: the live get_detail_param roster wins whenever
   // discovery succeeds. Every entry needs a positive contextWindow or the
   // whole provider catalog is rejected as INVALID_MODEL_CONTEXT.
@@ -402,6 +421,7 @@ function resolveCatalog(models: Config['models']): Record<ProviderId, ModelEntry
     commandcode: resolve('commandcode'),
     cline: resolve('cline'),
     codebuddy: resolve('codebuddy'),
+    qoder: resolve('qoder'),
     trae: resolve('trae'),
     zed: resolve('zed'),
   }
@@ -770,6 +790,7 @@ export class SubscriptionsAuthController implements AuthController {
       case 'commandcode':
       case 'cline':
       case 'codebuddy':
+      case 'qoder':
       case 'trae':
       case 'zed':
         return Promise.reject(new Error(`${provider} does not use the authorization-code exchange`))
@@ -816,6 +837,13 @@ export class SubscriptionsAuthController implements AuthController {
       await this.persist('cline', session)
       this.lastError.delete('cline')
       this.onAuthChanged('cline', accountKeyOf('cline', session))
+      return
+    }
+    if (provider === 'qoder') {
+      const session = await qoderSessionFromPaste(input)
+      await this.persist('qoder', session)
+      this.lastError.delete('qoder')
+      this.onAuthChanged('qoder', accountKeyOf('qoder', session))
       return
     }
     const attempt = this.flows.pending(provider)
@@ -1193,6 +1221,50 @@ export function apply(ctx: Context, config: Config): void {
           pool: () => poolAdapter,
         })
         registerTrackedAdapter('codebuddy', adapter)
+        break
+      }
+      case 'qoder': {
+        // One route, two deployments: the region belongs to the CREDENTIAL, not
+        // the adapter, because a PAT minted on qoder.com is refused by the China
+        // gateway and vice versa. So `region` is a resolver read off the session,
+        // and the adapter holds a separate token/catalog/usage service per region
+        // so the two can never cross-contaminate.
+        const tokens = new AccountTokenManager<QoderSession>({
+          provider: 'qoder',
+          displayName: 'Qoder',
+          makeOptions: () => ({
+            preemptMs: QODER_PREEMPT_MS,
+            // The PAT is the durable secret, so a refresh re-derives a job token
+            // from it. The adapter also re-derives per request through its own
+            // cache, which makes this level redundant rather than load-bearing —
+            // a stale stored job token cannot break a chat.
+            refresh: async (session: QoderSession): Promise<QoderSession> => {
+              const probe = await probeQoderPat(session.refreshToken, session.region)
+              return {
+                ...session,
+                accessToken: probe.jobToken,
+                expiresAt: probe.expiresAt,
+                ...probe.userId === undefined ? {} : { userId: probe.userId },
+                ...probe.name === undefined ? {} : { account: probe.name },
+              }
+            },
+            isPermanent: isQoderPermanentRefreshError,
+          }),
+          onAccountRemoved: account => { authChanged('qoder', account) },
+        })
+        accountTokens.set('qoder', tokens as AccountTokenManager<StoredSession>)
+        const adapter = new QoderAdapter({
+          models: catalog.qoder,
+          streamIdleTimeoutMs,
+          rateLimit,
+          region: async (account?: string) => (await tokens.session(account)).region,
+          personalToken: async (account?: string) => (await tokens.session(account)).refreshToken,
+          discovery: !overridden.has('qoder'),
+          onWarn,
+          resolveAttachments,
+        })
+        usageFetchers.qoder = async (account, signal) => adapter.readUsage(signal, account)
+        registerTrackedAdapter('qoder', adapter)
         break
       }
       case 'trae': {

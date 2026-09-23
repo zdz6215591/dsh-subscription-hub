@@ -39,7 +39,7 @@ const MODEL_FILTER_THRESHOLD = 8
 const MODEL_LIST_MAX_HEIGHT = 260
 
 /** Subscription provider ids, fixed by the node half's OAuth adapters. */
-export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'agy' | 'commandcode' | 'cline' | 'codebuddy' | 'trae' | 'zed'
+export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'agy' | 'commandcode' | 'cline' | 'codebuddy' | 'qoder' | 'trae' | 'zed'
 
 /** One logged-in account as answered by the `status` endpoint. */
 export interface AccountStatus {
@@ -272,6 +272,7 @@ const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [  { id
   { id: 'commandcode', name: 'Command Code Go' },
   { id: 'cline', name: 'Cline' },
   { id: 'codebuddy', name: 'CodeBuddy' },
+  { id: 'qoder', name: 'Qoder' },
   { id: 'trae', name: 'Trae' },
   { id: 'copilot', name: 'GitHub Copilot' },
   { id: 'zed', name: 'Zed Pro' },
@@ -986,7 +987,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [statuses, setStatuses] = useState<Partial<Record<SubscriptionProvider, ProviderStatus>>>({})
   const [errors, setErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
-    codex: '', claude: '', grok: '', copilot: '', agy: '', commandcode: '', cline: '', codebuddy: '', trae: '', zed: '',
+    codex: '', claude: '', grok: '', copilot: '', agy: '', commandcode: '', cline: '', codebuddy: '', qoder: '', trae: '', zed: '',
   })
   /** Pending device-flow codes (copilot), shown while the attempt polls. */
   const [deviceCodes, setDeviceCodes] = useState<Partial<Record<SubscriptionProvider, { userCode: string; verificationUrl: string }>>>({})
@@ -1016,7 +1017,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [proxyBypass, setProxyBypass] = useState('')
   const [proxyProviders, setProxyProviders] = useState<Record<SubscriptionProvider, boolean>>({
     codex: true, claude: true, grok: true, copilot: true,
-    agy: true, commandcode: true, cline: true, codebuddy: true, trae: true, zed: true,
+    agy: true, commandcode: true, cline: true, codebuddy: true, qoder: true, trae: true, zed: true,
   })
   const [proxySaving, setProxySaving] = useState(false)
   const [proxyTesting, setProxyTesting] = useState(false)
@@ -1496,7 +1497,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const login = useCallback(async (provider: SubscriptionProvider, method?: 'oauth' | 'keychain' | 'import'): Promise<void> => {
     if (rpc === undefined) return
     setProviderError(provider, undefined)
-    if (provider === 'cline') {
+    // Cline and Qoder have no OAuth or device flow: the credential IS something
+    // the user pastes, so the paste field is the sign-in and there is nothing to
+    // call on the host yet.
+    if (provider === 'cline' || provider === 'qoder') {
       setManualOpen(prev => ({ ...prev, [provider]: true }))
       return
     }
@@ -1714,6 +1718,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       commandcode: proxy.providers.commandcode !== false,
       cline: proxy.providers.cline !== false,
       codebuddy: proxy.providers.codebuddy !== false,
+      qoder: proxy.providers.qoder !== false,
       trae: proxy.providers.trae !== false,
       zed: proxy.providers.zed !== false,
     })
@@ -2872,6 +2877,29 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                       style={styles.manualInput}
                       value={manualDrafts[id]}
                       placeholder={t('clineKeyPlaceholder')}
+                      autoComplete="off"
+                      onChange={event => setManualDrafts(prev => ({ ...prev, [id]: event.target.value }))}
+                    />
+                    <button type="button" style={styles.buttonSmall} onClick={() => { void submitManual(id) }}>
+                      {t('submit')}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Qoder's only login is a pasted Personal Access Token: no OAuth,
+                  no device flow, so the paste field IS the sign-in. The region is
+                  not asked for — the token is tried against both deployments and
+                  recorded from whichever accepts it, with an optional `<region>:`
+                  prefix for a user who knows. */}
+              {!busy && id === 'qoder' && manualOpen[id] && (
+                <div style={styles.manualBox}>
+                  <p style={styles.statusLine}>{t('qoderPasteHint')}</p>
+                  <div style={styles.manualRow}>
+                    <input
+                      style={styles.manualInput}
+                      value={manualDrafts[id]}
+                      placeholder={t('qoderPatPlaceholder')}
                       autoComplete="off"
                       onChange={event => setManualDrafts(prev => ({ ...prev, [id]: event.target.value }))}
                     />

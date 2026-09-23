@@ -28,6 +28,7 @@ export type ProviderId =
   | 'commandcode'
   | 'cline'
   | 'codebuddy'
+  | 'qoder'
   | 'trae'
   | 'zed'
 
@@ -40,6 +41,7 @@ export const PROVIDER_IDS: readonly ProviderId[] = [
   'commandcode',
   'cline',
   'codebuddy',
+  'qoder',
   'trae',
   'copilot',
   'zed',
@@ -199,6 +201,35 @@ export interface TraeSession {
   userRegion?: string
 }
 
+/**
+ * Stored Qoder subscription session.
+ *
+ * Qoder authenticates with a **Personal Access Token** (PAT), not OAuth: the PAT
+ * is exchanged for a short-lived *job token*, and the gateway then authenticates
+ * with that. So the fields map onto the shared token manager's contract directly
+ * — `refreshToken` IS the PAT (the durable secret a refresh exchanges) and
+ * `accessToken` IS the job token (what a request sends) — which keeps this
+ * session shaped like every other route instead of a special case.
+ */
+export interface QoderSession {
+  /** The exchanged job token; this is what a request authenticates with. */
+  accessToken: string
+  /** The Personal Access Token. Durable, and what a job-token refresh exchanges. */
+  refreshToken: string
+  /** Epoch ms the job token expires, so a refresh can be preempted. */
+  expiresAt: number
+  /** Upstream user id, from `/api/v1/userinfo`. */
+  userId?: string
+  /** Upstream display name / email, for the account row. */
+  account?: string
+  /**
+   * Which Qoder deployment this PAT belongs to. A token minted on `qoder.com`
+   * does NOT work against the China deployment and vice versa, so the region is
+   * a property of the credential rather than a global setting.
+   */
+  region: 'global' | 'china'
+}
+
 /** One provider's accounts: account key → session, plus the default account. */
 export interface ProviderAccounts<S> {
   /** Key of the account direct (non-pool) routes serve; the first login wins. */
@@ -216,6 +247,7 @@ export interface SessionMap {
   commandcode?: ProviderAccounts<CommandCodeSession>
   cline?: ProviderAccounts<ClineSession>
   codebuddy?: ProviderAccounts<CodeBuddySession>
+  qoder?: ProviderAccounts<QoderSession>
   trae?: ProviderAccounts<TraeSession>
   zed?: ProviderAccounts<ZedSession>
 }
@@ -230,6 +262,7 @@ export type StoredSession =
   | CommandCodeSession
   | ClineSession
   | CodeBuddySession
+  | QoderSession
   | TraeSession
   | ZedSession
 
@@ -277,6 +310,15 @@ export function accountKeyOf(provider: ProviderId, session: StoredSession): stri
       return (session as ClineSession).account ?? tokenHash(session.refreshToken)
     case 'codebuddy':
       return (session as CodeBuddySession).uid
+    case 'qoder': {
+      // The user id comes from `/api/v1/userinfo`, so it is absent until the PAT
+      // has been exchanged once. The region is part of the identity because the
+      // two deployments are separate services: one person may hold a token on
+      // each, and they must not collapse onto a single account.
+      const qoder = session as QoderSession
+      const identity = qoder.userId ?? qoder.account ?? tokenHash(qoder.refreshToken)
+      return `${qoder.region}:${identity}`
+    }
     case 'trae': {
       // Channel is part of the identity: the CN IDE and TRAE SOLO CN installs
       // are separate sign-ins on the same ByteDance account, so they must not

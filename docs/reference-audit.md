@@ -7,6 +7,43 @@
 > own commit message carries its evidence; the entries below keep the original
 > analysis rather than being rewritten to match the outcome.
 >
+> **Qoder route (added after this pass, from `masknull/dsh-qoder-connect`).** A new
+> `qoder` subscription route, placed between `codebuddy` and `trae`. It is a
+> **PAT** route (no OAuth, no device flow), so the paste field IS the sign-in. The
+> whole upstream protocol is ported into `src/providers/qoder/`: the `Encode=1` WAF
+> body codec, the COSY RSA+AES+MD5 signature headers, the `agent_chat_generation`
+> envelope and its SSE, the `model/list` catalog with per-model `context_config`,
+> and the `quota/usage` + `user/plan` + `user/status` credit views.
+>
+> Three things were decided rather than transcribed:
+>
+> - **One route, region per credential.** Qoder runs two independent deployments
+>   (`qoder.com`, `qoder.com.cn`) and a token minted on one is refused by the
+>   other, so `region` is a resolver read off the session — the same shape the Trae
+>   route uses. The adapter holds a separate token/catalog/usage service per region
+>   so the two cannot cross-contaminate.
+> - **The region is discovered, not asked for.** The token is tried against both
+>   deployments and the region recorded from whichever accepted it, with an
+>   optional `global:` / `china:` prefix. Making the user choose is worse: the
+>   deployment is not written on the token, and choosing wrong produces an `AUTH`
+>   rejection that reads as "your token is bad".
+> - **A quota-exhaustion 403 is `QUOTA`, not `AUTH`.** The reference maps every
+>   401/403 to `AUTH` while its own comment notes the real reason sits in the
+>   envelope body; classifying that as `AUTH` tells the user to re-mint a working
+>   token. Diverged deliberately, and it is the one place the port knowingly does
+>   not match the reference's fixtures.
+>
+> Reference defects found while porting, recorded so they are not re-derived: the
+> reference has **no response-decode path at all** (its SSE parses plain JSON, so
+> `Encode=1` is request-side only — the inverse was derived and proved by round
+> trip, and is gated behind a flag left OFF because no observed traffic is
+> encoded); it assumes a **24-hour job-token lifetime** when the exchange discloses
+> neither `expires_at` nor `expires_in`, which nothing observed supports;
+> `Cosy-Bodylength`/`Cosy-Bodyhash` are computed over the WAF-encoded body for chat
+> but over the raw length for image upload (deliberate, and undocumented at the
+> signature site); and `normalizeQoderQuota` reads `percentage <= 1 && total > 1`
+> as a 0–1 ratio, so a genuine 0.5% on a 3000-credit pool renders as 50%.
+>
 > **F5's verification boundary:** the international gateways are transcribed from
 > the reference's evidence, not probed from here (no international credential).
 > They are only selected for a credential that claims the `ai` region, so a CN

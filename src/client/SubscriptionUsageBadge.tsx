@@ -65,6 +65,7 @@ const PROVIDER_NAMES: Record<SubscriptionProvider, string> = {
   commandcode: 'Command Code',
   cline: 'Cline',
   codebuddy: 'CodeBuddy',
+  qoder: 'Qoder',
   trae: 'Trae',
   zed: 'Zed',
 }

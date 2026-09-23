@@ -199,6 +199,10 @@ export const en = {
   clinePinReset: 'Back to auto',
   clinePasteHint: 'Paste a Cline Pass API key (sk_…) from app.cline.bot. Cline has no browser sign-in, so the key itself is the login.',
   clineKeyPlaceholder: 'sk_…',
+  qoderPasteHint:
+    'Qoder signs in with a Personal Access Token: mint one on your Qoder account page (qoder.com, or qoder.com.cn for the China deployment), then paste it here. '
+    + 'The token is tried against both deployments and whichever accepts it is recorded, so the region does not need choosing — prefix it with "global:" or "china:" to pin one instead.',
+  qoderPatPlaceholder: 'Personal Access Token',
   zedPasteHint: 'Zed has no credentials.json. One-click import reads Windows Credential Manager target “zed:url=https://zed.dev”. If that fails, fill the two fields: userId is the numeric User name of that credential (e.g. 1047718); token is its password. Control Panel → Credential Manager → Windows Credentials → Generic Credentials.',
   zedUserIdPlaceholder: 'Zed userId',
   zedTokenPlaceholder: 'Zed token',
@@ -404,6 +408,10 @@ export const zh = {
   clinePinReset: '恢复自动',
   clinePasteHint: '粘贴 app.cline.bot 控制台里的 Cline Pass API Key（sk_…）。Cline 没有浏览器登录，Key 本身就是登录凭据。',
   clineKeyPlaceholder: 'sk_…',
+  qoderPasteHint:
+    'Qoder 使用「个人访问令牌」(Personal Access Token) 登录：在 Qoder 账号页面（国内版 qoder.com.cn，国际版 qoder.com）生成后粘贴到这里。'
+    + '令牌会依次在两个部署上验证，并记住接受它的那个，所以无需自己选区域——若确知区域，可用 "global:" 或 "china:" 前缀直接指定。',
+  qoderPatPlaceholder: '个人访问令牌',
   zedPasteHint: 'Zed 客户端里没有 credentials.json。一键导入会读 Windows「凭据管理器」里目标为 zed:url=https://zed.dev 的通用凭据。失败时在下面两栏填：userId 是该凭据的用户名（一串数字，例如 1047718），token 是密码。路径：控制面板 → 凭据管理器 → Windows 凭据 → 普通凭据。',
   zedUserIdPlaceholder: 'Zed userId',
   zedTokenPlaceholder: 'Zed token',

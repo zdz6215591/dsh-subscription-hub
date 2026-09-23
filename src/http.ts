@@ -161,6 +161,10 @@ export const PROVIDER_PROBE_TARGETS: Readonly<Record<ProviderId, { url: string; 
   commandcode: { url: 'https://api.commandcode.ai', method: 'GET' },
   cline: { url: 'https://api.cline.bot', method: 'GET' },
   codebuddy: { url: 'https://copilot.tencent.com', method: 'GET' },
+  // The GLOBAL deployment's gateway. Qoder's two deployments are separate
+  // services, but the probe exists to test the machine's routing, and this is the
+  // one a PAT is most often minted against.
+  qoder: { url: 'https://api3.qoder.sh', method: 'GET' },
   trae: { url: 'https://api.trae.cn', method: 'GET' },
   zed: { url: 'https://cloud.zed.dev', method: 'GET' },
 })
@@ -309,6 +313,11 @@ const PROVIDER_HOST_SUFFIXES: ReadonlyArray<readonly [string, ProviderId]> = [
   ['workbuddy.ai', 'codebuddy'],
   ['commandcode.ai', 'commandcode'],
   ['cline.bot', 'cline'],
+  // Qoder's two deployments. Without these entries `providerForHostname` returns
+  // undefined for every Qoder call, so the per-provider proxy toggle silently
+  // stops applying and the global switch is used instead.
+  ['qoder.sh', 'qoder'],
+  ['qoder.com.cn', 'qoder'],
   ['api.trae.cn', 'trae'],
   ['trae.cn', 'trae'],
   ['trae-api-cn.mchost.guru', 'trae'],
