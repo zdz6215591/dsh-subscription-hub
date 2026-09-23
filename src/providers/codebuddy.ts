@@ -414,6 +414,39 @@ export interface CodeBuddyAdapterOptions {
 
 const CATALOG_TTL_MS = 5 * 60_000
 
+  /**
+ * The thinking-level picker for one catalog model, from what the catalog NAMED.
+ *
+ * Only disclosed levels become a picker. This used to fall back to a hardcoded
+ * `['low', 'medium', 'high']` whenever a model merely declared
+ * `supportsReasoning`, which guesses at a vocabulary the provider never
+ * disclosed — and a `reasoning_effort` the gateway does not accept is a rejected
+ * turn. Sending no `reasoning_effort` at all is always valid and leaves the
+ * provider's own default in force, so a model with unstated levels gets NO picker
+ * rather than a guessed one.
+ *
+ * Exported as a pure function so the rule is testable without an adapter.
+ * @param reasoning - the catalog entry's reasoning block, when it published one.
+ * @returns the reasoning info, or undefined when no levels were disclosed.
+ */
+export function codebuddyReasoning(
+  reasoning: { supportedEfforts?: readonly string[]; defaultEffort?: string; effort?: string } | undefined,
+): { efforts: { id: ReasoningEffortId; name: string }[]; defaultEffort?: ReasoningEffortId } | undefined {
+  const supported = reasoning?.supportedEfforts
+  if (supported === undefined || supported.length === 0) return undefined
+  const efforts = supported.map(eff => ({
+    id: ReasoningEffortId(eff.toLowerCase()),
+    name: effortDisplayName(eff),
+  }))
+  const declared = reasoning?.defaultEffort ?? reasoning?.effort
+  const defaultEffort = declared !== undefined && efforts.some(e => e.id === ReasoningEffortId(declared.toLowerCase()))
+    ? ReasoningEffortId(declared.toLowerCase())
+    : efforts[0]?.id
+  return {
+    efforts,
+    ...defaultEffort === undefined ? {} : { defaultEffort },
+  }
+}
 export class CodeBuddyAdapter extends LlmAdapter {
   private readonly catalogs = new Map<string, { at: number; models: CodeBuddyModel[] }>()
 
@@ -447,6 +480,7 @@ export class CodeBuddyAdapter extends LlmAdapter {
     }
   }
 
+
   async resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     if ([...this.catalogs.values()].every(entry => entry.models.length === 0)) {
       await this.listOwnModels(provider)
@@ -459,22 +493,7 @@ export class CodeBuddyAdapter extends LlmAdapter {
     const maxTokens = entry?.maxOutputTokens !== undefined && entry.maxOutputTokens > 0
       ? entry.maxOutputTokens
       : configured?.maxTokens ?? 8_192
-    let reasoning: { efforts: { id: ReasoningEffortId; name: string }[]; defaultEffort?: ReasoningEffortId } | undefined
-    if (entry?.supportsReasoning === true || entry?.reasoning !== undefined) {
-      const supported = entry?.reasoning?.supportedEfforts ?? ['low', 'medium', 'high']
-      const efforts = supported.map(eff => ({
-        id: ReasoningEffortId(eff.toLowerCase()),
-        name: effortDisplayName(eff),
-      }))
-      const def = entry?.reasoning?.defaultEffort ?? entry?.reasoning?.effort
-      const defaultEffort = def !== undefined && efforts.some(e => e.id === ReasoningEffortId(def.toLowerCase()))
-        ? ReasoningEffortId(def.toLowerCase())
-        : efforts[0]?.id
-      reasoning = {
-        efforts,
-        ...defaultEffort !== undefined ? { defaultEffort } : {},
-      }
-    }
+    const reasoning = codebuddyReasoning(entry?.reasoning)
     const mergedReasoning = mergeReasoning(this.options.defaultEffortOf?.(model), reasoning)
     return {
       provider,

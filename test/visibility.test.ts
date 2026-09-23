@@ -11,7 +11,8 @@ import { sessionFromZedPaste, parseZedModels, ndjsonToSse, parseZedUsage, buildZ
 import { parseMeterUsage } from '../src/providers/codebuddy-lib/usage.js'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, Message } from '@deepseek-ai/dsh-llm'
-import { messagesToCommandCode, messagesToOpenAI, parseCommandCodeAuthFile, parseCommandCodeCredits, parseCommandCodeOpenAIStream, parseCommandCodeStream, sessionFromCommandCodePaste, COMMANDCODE_KNOWN_EFFORTS, looksLikeMissingEffortEntry } from '../src/providers/commandcode.js'
+import { messagesToCommandCode, messagesToOpenAI, parseCommandCodeAuthFile, parseCommandCodeCredits, parseCommandCodeOpenAIStream, parseCommandCodeStream, sessionFromCommandCodePaste, commandCodePublishedEfforts, isUnpublishedModel } from '../src/providers/commandcode.js'
+import { COMMANDCODE_MODELS_VERSION, COMMANDCODE_PUBLISHED_MODELS } from '../src/providers/commandcode-models.js'
 import { extractAgyProjectId } from '../src/providers/agy.js'
 import { catalogModelList, parseAgyQuotaUsage } from '../src/providers/agy/models.js'
 import { AGY_PUBLIC_MODELS, isLevelThinkingModel } from '../src/providers/agy/catalog.js'
@@ -19,7 +20,7 @@ import { isAgyUnusableEndpoint } from '../src/providers/agy/constants.js'
 import { countryCodeToEmoji, providerForHostname } from '../src/http.js'
 import { toAgyRequestBody } from '../src/providers/agy/translate.js'
 import { parseSseDataLine } from '../src/providers/agy/parse.js'
-import { checkinCodeBuddy, generateMorningTargetTime, localDateString } from '../src/providers/codebuddy.js'
+import { checkinCodeBuddy, codebuddyReasoning, generateMorningTargetTime, localDateString } from '../src/providers/codebuddy.js'
 
 const TEMP_DIRS: string[] = []
 after(() => {
@@ -679,40 +680,72 @@ describe('commandcode OpenAI transport', () => {
 })
 
 describe('commandcode reasoning efforts', () => {
-  it('exposes selectable effort levels for models the CLI table lists', () => {
-    // Mirrors Mars-Sea/dsh-commandcode-provider's KNOWN_EFFORTS snapshot.
-    assert.deepEqual(COMMANDCODE_KNOWN_EFFORTS['z-ai/glm-5.3-flash'], ['low', 'high', 'max'])
-    assert.deepEqual(COMMANDCODE_KNOWN_EFFORTS['deepseek/deepseek-v4.1-flash'], ['low', 'high', 'max'])
-    assert.deepEqual(COMMANDCODE_KNOWN_EFFORTS['google/gemini-3.8-flash'], ['low', 'medium', 'high'])
-    assert.deepEqual(COMMANDCODE_KNOWN_EFFORTS['claude-sonnet-5'], ['low', 'medium', 'high', 'xhigh', 'max'])
+  it('covers the models the vendor publishes with selectable levels', () => {
+    assert.deepEqual(commandCodePublishedEfforts('z-ai/glm-5.3-flash'), ['low', 'high', 'max'])
+    assert.deepEqual(commandCodePublishedEfforts('deepseek/deepseek-v4.1-flash'), ['low', 'high', 'max'])
+    assert.deepEqual(commandCodePublishedEfforts('google/gemini-3.8-flash'), ['low', 'medium', 'high'])
+    assert.deepEqual(commandCodePublishedEfforts('claude-sonnet-5'), ['low', 'medium', 'high', 'xhigh', 'max'])
   })
 
-  it('omits selectable efforts for models that reason automatically', () => {
-    // Tencent Hy3 / GLM-5 / GLM-5.1 / GLM-5.2-Fast think at a fixed depth:
-    // the official CLI sends no reasoning_effort, so the picker must not offer
-    // a selector for them.
-    assert.equal(COMMANDCODE_KNOWN_EFFORTS['tencent/hy3'], undefined)
-    assert.equal(COMMANDCODE_KNOWN_EFFORTS['zai-org/GLM-5'], undefined)
-    assert.equal(COMMANDCODE_KNOWN_EFFORTS['zai-org/GLM-5.1'], undefined)
-    assert.equal(COMMANDCODE_KNOWN_EFFORTS['zai-org/GLM-5.2-Fast'], undefined)
+  it('gives a newly shipped model its levels without anyone editing a table', () => {
+    // THE REGRESSION. `gpt-6-luna` shipped with five selectable levels, and the
+    // hand-maintained map this replaced had no entry for it — so the model had no
+    // thinking-level selector at all. Nothing here was hand-edited: the table is
+    // generated from the vendor's own published model list.
+    assert.deepEqual(commandCodePublishedEfforts('gpt-6-luna'), ['low', 'medium', 'high', 'xhigh', 'max'])
+    assert.deepEqual(commandCodePublishedEfforts('gpt-6-sol'), ['low', 'medium', 'high', 'xhigh', 'max'])
+    assert.deepEqual(commandCodePublishedEfforts('gpt-6-astra'), ['low', 'medium', 'high', 'xhigh', 'max'])
+    // And it is a published model, not an unpublished gap.
+    assert.equal(isUnpublishedModel('gpt-6-luna'), false)
   })
 
-  it('flags a likely snapshot gap for newly shipped family members only', () => {
-    // A table-covered model never warns.
-    assert.equal(looksLikeMissingEffortEntry('z-ai/glm-5.3-flashx'), false)
-    // A hypothetical new member of a family that ships selectable levels warns.
-    assert.equal(looksLikeMissingEffortEntry('deepseek/deepseek-v4.2-flash'), true)
-    assert.equal(looksLikeMissingEffortEntry('z-ai/glm-5.4-flash'), true)
-    assert.equal(looksLikeMissingEffortEntry('claude-opus-6'), true)
-    // A family known to reason at a fixed depth stays silent — including every
-    // member of the live catalog, so the advisory has zero false positives.
-    assert.equal(looksLikeMissingEffortEntry('tencent/hy3'), false)
-    assert.equal(looksLikeMissingEffortEntry('zai-org/GLM-5.1'), false)
-    assert.equal(looksLikeMissingEffortEntry('stepfun/Step-3.7-Flash'), false)
-    assert.equal(looksLikeMissingEffortEntry('claude-haiku-4-5-20251001'), false)
-    assert.equal(looksLikeMissingEffortEntry('zai-org/GLM-5.2-Fast'), false)
-    assert.equal(looksLikeMissingEffortEntry('Qwen/Qwen3.8-Omni-Flash'), false)
-    assert.equal(looksLikeMissingEffortEntry('moonshotai/Kimi-K2.7-Code'), false)
+  it('omits levels for a model the vendor publishes WITHOUT them', () => {
+    // Tencent Hy3 / GLM-5 / GLM-5.1 / GLM-5.2-Fast / MiMo V2.5 think at a depth
+    // the CLI drives and publish `—` for Efforts. That is a FACT recorded in the
+    // table, which is what distinguishes it from an unpublished model below.
+    //
+    // Note `tencent/hy3-paid`, not `tencent/hy3`: the hand-maintained list this
+    // replaced named two ids the vendor does not publish at all, so it was wrong
+    // in both directions.
+    for (const id of ['tencent/hy3-paid', 'zai-org/GLM-5', 'zai-org/GLM-5.1', 'zai-org/GLM-5.2-Fast', 'xiaomi/mimo-v2.5']) {
+      assert.deepEqual(commandCodePublishedEfforts(id), [], id)
+      // Published, so NOT a stale-snapshot gap.
+      assert.equal(isUnpublishedModel(id), false, id)
+    }
+    // And the ids the old list invented are genuinely not in the roster.
+    assert.equal(isUnpublishedModel('tencent/hy3'), true)
+    assert.equal(isUnpublishedModel('meituan/LongCat-2.0:free'), true)
+  })
+
+  it('distinguishes an unpublished model from one published without levels', () => {
+    // This is the distinction the old regex heuristic tried to guess at, and it
+    // is now exact: absent from the table means nobody has re-run the sync.
+    assert.equal(isUnpublishedModel('deepseek/deepseek-v4.2-flash'), true)
+    assert.equal(isUnpublishedModel('claude-opus-6'), true)
+    // A model whose id an old family pattern would NOT have matched is still
+    // handled, because nothing matches on the id any more.
+    assert.equal(isUnpublishedModel('some-new-vendor/brand-new-model'), true)
+    assert.equal(isUnpublishedModel('gpt-6-luna'), false)
+  })
+
+  it('carries the full published roster, so a broken parse cannot pass silently', () => {
+    const ids = Object.keys(COMMANDCODE_PUBLISHED_MODELS)
+    // command-code@1.64.0 publishes 80 models, 51 of them with selectable
+    // levels. The floor guard is here so a parse that silently drops rows fails
+    // the suite instead of quietly shrinking the roster.
+    assert.ok(ids.length >= 80, `only ${String(ids.length)} models in the table`)
+    const withEfforts = ids.filter(id => commandCodePublishedEfforts(id).length > 0)
+    assert.ok(withEfforts.length >= 51, `only ${String(withEfforts.length)} models with levels`)
+    for (const id of ids) {
+      const entry = COMMANDCODE_PUBLISHED_MODELS[id]!
+      assert.ok(entry.name.length > 0, `${id} has no published name`)
+      assert.ok(Array.isArray(entry.efforts), `${id} has no efforts array`)
+      // Levels are the vendor's own spellings, deduplicated.
+      assert.equal(new Set(entry.efforts).size, entry.efforts.length, `${id} repeats a level`)
+    }
+    // The version the table was generated from is recorded, so a stale snapshot
+    // is diagnosable from the log line rather than needing a re-derivation.
+    assert.match(COMMANDCODE_MODELS_VERSION, /^\d+\.\d+\.\d+$/)
   })
 })
 
@@ -815,5 +848,30 @@ describe('agy request body EOTP', () => {
     assert.equal(countryCodeToEmoji('JP'), '🇯🇵')
     assert.equal(countryCodeToEmoji(''), '')
     assert.equal(countryCodeToEmoji('USA'), '')
+  })
+})
+
+describe('codebuddy thinking levels', () => {
+  it('offers only the levels the catalog NAMED', () => {
+    const reasoning = codebuddyReasoning({ supportedEfforts: ['low', 'medium', 'high'], effort: 'high' })
+    assert.deepEqual(reasoning?.efforts.map(effort => String(effort.id)), ['low', 'medium', 'high'])
+    // The declared default is honoured when it is one of the named levels.
+    assert.equal(String(reasoning?.defaultEffort), 'high')
+  })
+
+  it('falls back to the first named level when the declared default is not one of them', () => {
+    const reasoning = codebuddyReasoning({ supportedEfforts: ['medium', 'high'], effort: 'low' })
+    assert.equal(String(reasoning?.defaultEffort), 'medium')
+  })
+
+  it('gives NO picker when the catalog never named the levels', () => {
+    // THE FIX. This used to answer a hardcoded ['low','medium','high'] whenever a
+    // model merely declared that it reasons — guessing at a vocabulary the
+    // provider never disclosed, where a level the gateway does not accept is a
+    // rejected turn. Sending no reasoning_effort is always valid and leaves the
+    // provider's own default in force.
+    assert.equal(codebuddyReasoning(undefined), undefined)
+    assert.equal(codebuddyReasoning({}), undefined)
+    assert.equal(codebuddyReasoning({ supportedEfforts: [] }), undefined)
   })
 })

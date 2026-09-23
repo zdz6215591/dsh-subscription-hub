@@ -276,6 +276,92 @@ test('an ordinary 400 is NOT retried on the other transport', async () => {
   }
 })
 
+// ---------------------------------------------------------------------------
+// A newly shipped model: context from the live catalog, levels from the table
+// ---------------------------------------------------------------------------
+
+/** The exact rows the live catalog returns for the GPT-6 family. */
+const LIVE_GPT6_ROWS = [
+  { id: 'gpt-6-astra', object: 'model', created: 1790126711, owned_by: 'command-code', name: 'GPT-6 Astra', context_length: 1_050_000, supported_endpoints: ['/chat/completions', '/responses'] },
+  { id: 'gpt-6-sol', object: 'model', created: 1790126711, owned_by: 'command-code', name: 'GPT-6 Sol', context_length: 1_050_000, supported_endpoints: ['/chat/completions', '/responses'] },
+  { id: 'gpt-6-luna', object: 'model', created: 1790126711, owned_by: 'command-code', name: 'GPT-6 Luna', context_length: 1_050_000, supported_endpoints: ['/chat/completions', '/responses'] },
+]
+
+test('a newly shipped model gets its context from the live catalog and its levels from the table', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cc-gpt6-'))
+  try {
+    // The live catalog is the authority for CONTEXT: it reports exact tokens the
+    // moment a model ships, where the vendored table rounds (`1.05M`).
+    const fetchFn = (async () => new Response(JSON.stringify({ object: 'list', data: LIVE_GPT6_ROWS }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })) as unknown as FetchFn
+    const adapter = harness(join(dir, 'absent.json'), fetchFn)
+
+    const resolved = await adapter.resolveModel('commandcode', 'gpt-6-luna')
+    assert.equal(resolved.context?.contextWindow, 1_050_000)
+    // THE REGRESSION: this returned no reasoning block at all while the effort
+    // table was hand-maintained, so the picker offered no thinking-level selector
+    // for a model that has five.
+    assert.equal(resolved.reasoning?.efforts.length, 5)
+    assert.deepEqual(resolved.reasoning?.efforts.map(effort => String(effort.id)), ['low', 'medium', 'high', 'xhigh', 'max'])
+
+    // The same for its siblings, neither of which was in the hand-kept map.
+    for (const id of ['gpt-6-sol', 'gpt-6-astra']) {
+      const sibling = await adapter.resolveModel('commandcode', id)
+      assert.equal(sibling.context?.contextWindow, 1_050_000, id)
+      assert.equal(sibling.reasoning?.efforts.length, 5, id)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a published model with NO levels gets no picker, and no stale-snapshot warning', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cc-gpt6-'))
+  try {
+    const warnings: string[] = []
+    const fetchFn = (async () => new Response(JSON.stringify({
+      object: 'list',
+      data: [{ id: 'tencent/hy3-paid', object: 'model', name: 'Tencent Hy3', context_length: 262_000 }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as FetchFn
+    const adapter = new CommandCodeAdapter({
+      models: [], streamIdleTimeoutMs: 10_000, tokens: tokens(), discovery: true,
+      fetchFn, catalogCachePath: join(dir, 'absent.json'), onWarn: message => warnings.push(message),
+    })
+    await adapter.listModels('commandcode')
+    const resolved = await adapter.resolveModel('commandcode', 'tencent/hy3-paid')
+    // Published without levels: no selector, which is a fact rather than a gap.
+    assert.equal(resolved.reasoning, undefined)
+    assert.equal(warnings.some(message => message.includes('absent from the vendored model table')), false,
+      JSON.stringify(warnings))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('an UNPUBLISHED model warns that the snapshot needs regenerating', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cc-gpt6-'))
+  try {
+    const warnings: string[] = []
+    const fetchFn = (async () => new Response(JSON.stringify({
+      object: 'list',
+      data: [{ id: 'brand/new-model-9', object: 'model', name: 'Brand New', context_length: 500_000 }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as FetchFn
+    const adapter = new CommandCodeAdapter({
+      models: [], streamIdleTimeoutMs: 10_000, tokens: tokens(), discovery: true,
+      fetchFn, catalogCachePath: join(dir, 'absent.json'), onWarn: message => warnings.push(message),
+    })
+    await adapter.listModels('commandcode')
+    // The warning names the remedy, because the fix is a command the operator runs.
+    const warning = warnings.find(message => message.includes('brand/new-model-9'))
+    assert.ok(warning !== undefined, JSON.stringify(warnings))
+    assert.match(warning, /sync-commandcode-models\.mjs/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('a Messages-only model discovered from the live catalog skips the doomed request', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'cc-f2-'))
   const path = join(dir, 'commandcode-models.json')

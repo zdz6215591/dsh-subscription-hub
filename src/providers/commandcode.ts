@@ -27,6 +27,7 @@ import { proxiedFetch } from '../http.js'
 import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from './accounts.js'
 import { httpLlmError, idleWatchdog, mapFetchFailure } from './common.js'
 import { readCommandCodeCatalog, writeCommandCodeCatalog } from './commandcode-catalog-cache.js'
+import { COMMANDCODE_MODELS_VERSION, COMMANDCODE_PUBLISHED_MODELS } from './commandcode-models.js'
 import type { FetchFn, ModelEntry, ProviderUsage } from './common.js'
 import type { PoolAdapter } from './pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, subscriptionRetryPolicy } from './rate-limit.js'
@@ -1115,65 +1116,21 @@ function coercePositiveNumber(value: unknown): number | undefined {
 }
 
 /**
- * Selectable reasoning-effort levels per Command Code catalog id, mirroring the
- * official CLI's bundled model table (`dist/cli.mjs`) exactly — the Provider API
- * exposes no reasoning metadata, so this snapshot is the source of truth.
+ * Selectable reasoning-effort levels per Command Code catalog id.
  *
- * Models absent here either reason automatically at a fixed depth (the CLI omits
- * `reasoning_effort` for them, so the picker must not offer a selector) or take
- * no reasoning at all.
+ * DERIVED, not hand-maintained. This used to be a literal map transcribed from
+ * the reference plugin, and that is exactly what broke: Command Code shipped
+ * `gpt-6-luna` with five selectable levels, the map had no entry, and the model
+ * had no thinking-level selector at all. A map somebody has to remember to edit
+ * rots silently; `scripts/sync-commandcode-models.mjs` now regenerates
+ * {@link COMMANDCODE_PUBLISHED_MODELS} from the vendor's own published table,
+ * and `--check` fails when the live roster has a model the table lacks.
  *
- * Adapted from Mars-Sea/dsh-commandcode-provider (MIT) `KNOWN_EFFORTS`.
- * Keep in sync with the official registry when new models ship.
+ * A model PRESENT with an empty `efforts` reasons automatically at a depth the
+ * CLI drives — the CLI then sends no `reasoning_effort`, so the picker must not
+ * offer a selector. A model ABSENT from the table is a stale snapshot, which is a
+ * different thing and is reported as such.
  */
-export const COMMANDCODE_KNOWN_EFFORTS: Readonly<Record<string, readonly string[]>> = Object.freeze({
-  'Qwen/Qwen3.8-Max': ['low', 'medium', 'xhigh'],
-  'Qwen/Qwen3.8-Max-0902': ['low', 'medium', 'xhigh'],
-  'Qwen/Qwen3.8-27B': ['low', 'medium', 'xhigh'],
-  'Qwen/Qwen3.8-Flash': ['low', 'medium', 'xhigh'],
-  'claude-fable-5-1': ['low', 'medium', 'high', 'xhigh', 'max'],
-  'claude-fable-5': ['low', 'medium', 'high', 'xhigh', 'max'],
-  'claude-opus-4-7': ['low', 'medium', 'high', 'xhigh', 'max'],
-  'claude-opus-4-8': ['low', 'medium', 'high', 'xhigh', 'max'],
-  'claude-opus-5': ['low', 'medium', 'high', 'xhigh', 'max'],
-  'claude-sonnet-4-6': ['low', 'medium', 'high', 'xhigh', 'max'],
-  'claude-sonnet-5': ['low', 'medium', 'high', 'xhigh', 'max'],
-  'deepseek/deepseek-v4-flash-fast': ['low', 'high', 'max'],
-  'deepseek/deepseek-v4.1-flash': ['low', 'high', 'max'],
-  'deepseek/deepseek-v4-flash': ['high', 'max'],
-  'deepseek/deepseek-v4-flash-vision-exp': ['high', 'max'],
-  'deepseek/deepseek-v4-pro': ['high', 'max'],
-  'google/gemini-3.1-flash-lite': ['low', 'medium', 'high'],
-  'google/gemini-3.5-flash': ['low', 'medium', 'high'],
-  'google/gemini-3.5-flash-lite': ['low', 'medium', 'high'],
-  'google/gemini-3.6-flash': ['low', 'medium', 'high'],
-  'google/gemini-3.7-flash': ['low', 'medium', 'high'],
-  'google/gemini-3.8-flash': ['low', 'medium', 'high'],
-  'gpt-5.3-codex': ['low', 'medium', 'high', 'xhigh'],
-  'gpt-5.4': ['low', 'medium', 'high', 'xhigh'],
-  'gpt-5.4-mini': ['low', 'medium', 'high'],
-  'gpt-5.5': ['low', 'medium', 'high', 'xhigh'],
-  'gpt-5.6-luna': ['low', 'medium', 'high', 'xhigh', 'max'],
-  'gpt-5.6-sol': ['low', 'medium', 'high', 'xhigh', 'max'],
-  'gpt-5.6-terra': ['low', 'medium', 'high', 'xhigh', 'max'],
-  'gpt-6-astra': ['low', 'medium', 'high', 'xhigh', 'max'],
-  'moonshotai/Kimi-K3': ['low', 'high', 'max'],
-  'sakana/fugu-ultra': ['high', 'xhigh'],
-  'tencent/hy4-preview': ['low', 'medium', 'high'],
-  'xai/grok-4.5': ['low', 'medium', 'high'],
-  'xai/grok-4.6': ['low', 'medium', 'high', 'xhigh'],
-  'z-ai/glm-5.3-flash': ['low', 'high', 'max'],
-  'z-ai/glm-5.3-flashx': ['low', 'high', 'max'],
-  'zai-org/GLM-5.2': ['high', 'max'],
-  'zai-org/GLM-5.3': ['low', 'high', 'max'],
-  'meta/muse-spark-1.1': ['low', 'medium', 'high', 'xhigh'],
-  'meta/muse-spark-1.2': ['low', 'medium', 'high', 'xhigh'],
-  'meta/muse-spark-1.2-contributor': ['low', 'medium', 'high', 'xhigh'],
-  'meta/muse-spark-1.3': ['low', 'medium', 'high', 'xhigh', 'max'],
-  'meta/muse-spark-1.3-contributor': ['low', 'medium', 'high', 'xhigh'],
-  'MiniMaxAI/MiniMax-M3': ['low', 'medium', 'high'],
-})
-
 /** Display names for Command Code effort ids. */
 const COMMANDCODE_EFFORT_NAMES: Readonly<Record<string, string>> = Object.freeze({
   low: 'Low',
@@ -1185,8 +1142,8 @@ const COMMANDCODE_EFFORT_NAMES: Readonly<Record<string, string>> = Object.freeze
 
 /** The `reasoning` block for a model, or undefined when it has no selectable levels. */
 function commandCodeReasoning(model: string): LlmResolvedModelInfo['reasoning'] | undefined {
-  const efforts = COMMANDCODE_KNOWN_EFFORTS[model]
-  if (efforts === undefined || efforts.length === 0) return undefined
+  const efforts = commandCodePublishedEfforts(model)
+  if (efforts.length === 0) return undefined
   return {
     efforts: efforts.map(effort => ({
       id: ReasoningEffortId(effort),
@@ -1196,66 +1153,37 @@ function commandCodeReasoning(model: string): LlmResolvedModelInfo['reasoning'] 
 }
 
 /**
- * Models the official CLI marks `reasoning: true` but defines NO selectable
- * `reasoning_effort` levels for: they think automatically at a depth Command
- * Code drives, so the CLI sends no `reasoning_effort` and the picker must not
- * offer a selector. Mirrors Mars-Sea/dsh-commandcode-provider (MIT)
- * `KNOWN_THINKING_MODELS`.
+ * The published selectable levels for one model.
  *
- * Not surfaced in the picker — it exists so {@link looksLikeMissingEffortEntry}
- * does not report these as snapshot gaps.
+ * A model the table does not list at all answers `[]` here, which the picker
+ * reads as "no levels" — the same as a model published with none. That is
+ * deliberate: the two are indistinguishable at the wire level (neither sends a
+ * `reasoning_effort` the gateway would accept), and inventing a selector on a
+ * guess risks a rejected turn. The difference that MATTERS is reported by
+ * {@link isUnpublishedModel}, which is what tells an operator the snapshot is
+ * stale rather than the model being level-less.
+ * @param model - the wire model id.
+ * @returns the levels in the vendor's published order.
  */
-export const COMMANDCODE_AUTO_REASONING_MODELS: ReadonlySet<string> = new Set([
-  'Qwen/Qwen3.6-Max-Preview',
-  'Qwen/Qwen3.6-Plus',
-  'Qwen/Qwen3.7-Flash',
-  'Qwen/Qwen3.7-Max',
-  'Qwen/Qwen3.7-Plus',
-  'Qwen/Qwen3.8-Omni-Flash',
-  'moonshotai/Kimi-K2.5',
-  'moonshotai/Kimi-K2.6',
-  'moonshotai/Kimi-K2.7-Code',
-  'moonshotai/Kimi-K2.7-Code-Highspeed',
-  'stepfun/Step-3.5-Flash',
-  'stepfun/Step-3.7-Flash',
-  'tencent/hy3',
-  'tencent/hy3-paid',
-  'nvidia/nemotron-3-ultra-550b-a55b',
-  'thinkingmachines/inkling',
-  'thinkingmachines/inkling-small',
-  'poolside/laguna-s-2.1-free',
-  'meituan/LongCat-2.0',
-  'meituan/LongCat-2.0:free',
-  'inclusionai/ling-3.0-flash-sante:free',
-  'zai-org/GLM-5',
-  'zai-org/GLM-5.1',
-  'zai-org/GLM-5.2-Fast',
-  'MiniMaxAI/MiniMax-M2.5',
-  'MiniMaxAI/MiniMax-M2.7',
-  'xiaomi/mimo-v2.5',
-  'xiaomi/mimo-v2.5-pro',
-])
+export function commandCodePublishedEfforts(model: string): readonly string[] {
+  return COMMANDCODE_PUBLISHED_MODELS[model]?.efforts ?? []
+}
 
 /**
- * Heuristic: does this catalog id look like a model the effort table should
- * cover but does not? Families that ship selectable levels are recognizable
- * from the id, so a newly released member is a likely snapshot gap rather than
- * a genuinely fixed-depth model.
+ * Whether this model is absent from the published table.
  *
- * Advisory only — it drives a one-line warning so the gap is visible in the
- * logs, never a guessed selector: a `reasoning_effort` the CLI would not send
- * is rejected by the gateway, so offering a level on a guess risks a failed
- * turn. Verified to report zero false positives against the live 71-model
- * catalog.
+ * This replaces a hand-kept "auto reasoning" set AND a regex that guessed which
+ * id families "should" carry levels, purely to decide whether to log a warning.
+ * Both were maintenance the vendor's own table makes unnecessary: a model it
+ * publishes with no levels is a fact (`efforts: []`), and a model it does not
+ * publish at all is a stale snapshot. Only the second is worth warning about —
+ * and it is now an exact lookup rather than a heuristic that had to be re-tuned
+ * whenever upstream shipped an id the pattern did not recognize.
+ * @param model - the wire model id.
+ * @returns whether the snapshot needs regenerating to cover this model.
  */
-export function looksLikeMissingEffortEntry(model: string): boolean {
-  if (COMMANDCODE_KNOWN_EFFORTS[model] !== undefined) return false
-  if (COMMANDCODE_AUTO_REASONING_MODELS.has(model)) return false
-  const id = model.toLowerCase()
-  // `-fast` / `omni` / `haiku` variants reason automatically or take none.
-  if (id.endsWith('-fast') || id.includes('omni') || id.includes('haiku')) return false
-  // Families whose shipped members all carry selectable levels.
-  return /^(claude-(sonnet|opus|fable)-|gpt-5\.[3-9]|gpt-6|qwen\/qwen3\.[89]-(max|flash|\d+b)|deepseek\/deepseek-v4|google\/gemini-3\.[5-9]|xai\/grok-4\.[5-9]|moonshotai\/kimi-k3|zai-org\/glm-5\.[2-9]|z-ai\/glm-5\.[3-9]|meta\/muse-spark|minimaxai\/minimax-m[3-9]|tencent\/hy[4-9])/.test(id)
+export function isUnpublishedModel(model: string): boolean {
+  return COMMANDCODE_PUBLISHED_MODELS[model] === undefined
 }
 
 /** Project a sized catalog model into the harness model-info shape. */
@@ -1514,20 +1442,20 @@ export class CommandCodeAdapter extends LlmAdapter {
         // instead of collapsing to the two-model static list. Fire-and-forget:
         // durability is what is at stake, never this request.
         void writeCommandCodeCatalog(rawModels, this.options.catalogCachePath).catch(() => undefined)
-        // Snapshot-gap advisory: a newly shipped model from a family that
-        // normally carries selectable efforts has no entry in
-        // COMMANDCODE_KNOWN_EFFORTS, so its picker shows no thinking-level
-        // selector until the table is updated. Warned once per model so the
-        // gap is discoverable in the logs rather than silently shipped.
+        // Stale-snapshot advisory: a model in the live roster that the published
+        // table does not list means nobody has re-run the sync, so its picker
+        // shows no thinking-level selector. Exact rather than heuristic — a
+        // model the table DOES list with no levels is a fact, not a gap — and
+        // warned once per model so it is discoverable in the logs.
         for (const model of rawModels) {
-          if (!looksLikeMissingEffortEntry(model.id)) continue
-          const key = `efforts:${model.id}`
+          if (!isUnpublishedModel(model.id)) continue
+          const key = `unpublished:${model.id}`
           if (this.warnedEffortGaps.has(key)) continue
           this.warnedEffortGaps.add(key)
           this.options.onWarn?.(
-            `commandcode model "${model.id}" looks like it should carry selectable reasoning`
-            + ' levels but is absent from COMMANDCODE_KNOWN_EFFORTS; its picker will show no'
-            + ' thinking-level selector until the table is synced with the official CLI bundle.',
+            `commandcode model "${model.id}" is absent from the vendored model table`
+            + ` (command-code@${COMMANDCODE_MODELS_VERSION}); its picker will show no`
+            + ' thinking-level selector until `node scripts/sync-commandcode-models.mjs` is run.',
           )
         }
         return rawModels.map(model => toModelInfo(model, provider))
