@@ -95,6 +95,17 @@ export {
 export type { OpenApiJsonRequestOptions } from './request.js'
 
 export { probeQoderPat, QoderAuthService } from './auth.js'
+export {
+  autoCheckinQoder,
+  claimQoderCheckin,
+  fetchQoderCampaigns,
+  getQoderCheckinStatusView,
+  qoderCheckinStatePath,
+  qoderDayString,
+  readQoderCheckinState,
+  writeQoderCheckinState,
+} from './checkin.js'
+export type { QoderCampaign, QoderCheckinOutcome, QoderCheckinState, QoderCheckinStatusView } from './checkin.js'
 export type { QoderAuthServiceOptions, QoderJobToken, QoderPatProbe } from './auth.js'
 
 export {

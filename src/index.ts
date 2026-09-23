@@ -204,6 +204,9 @@ import type { SubCommandDeps } from './command.js'
 import { QoderAdapter, isQoderPermanentRefreshError, probeQoderPat } from './providers/qoder/index.js'
 import { QODER_PREEMPT_MS } from './providers/qoder/index.js'
 import { qoderSessionFromPaste } from './providers/qoder-session.js'
+import { writeRegisteredProviders } from './startup-diagnostics.js'
+import { autoCheckinQoder, claimQoderCheckin, getQoderCheckinStatusView, qoderDayString, writeQoderCheckinState } from './providers/qoder/checkin.js'
+import type { QoderRegion } from './providers/qoder/index.js'
 import { modelVendor } from './model-vendor.js'
 import { createXSearchTool } from './tools/x-search.js'
 import { createImageGenerateTool } from './tools/image-generate.js'
@@ -444,6 +447,9 @@ function accountOf(provider: ProviderId, session: StoredSession | undefined): st
     case 'commandcode': return (session as CommandCodeSession).account
     case 'cline': return (session as ClineSession).account
     case 'codebuddy': return (session as CodeBuddySession).account
+    // ccount is the upstream display name (iqoog), which is what a reader
+    // recognizes; falling back to the id keeps an account row labeled anyway.
+    case 'qoder': return (session as QoderSession).account ?? (session as QoderSession).userId
     case 'trae': return (session as TraeSession).account ?? (session as TraeSession).userId
     case 'zed': return (session as ZedSession).account ?? (session as ZedSession).userId
   }
@@ -460,6 +466,9 @@ function planOf(provider: ProviderId, session: StoredSession): string | undefine
     case 'commandcode': return undefined
     case 'cline': return undefined
     case 'codebuddy': return undefined
+    // The upstream reports the plan (Pro Trial), and it is a real signal: it is
+    // what tells a reader whether the daily credits are on trial or paid.
+    case 'qoder': return undefined
     // The channel IS the plan distinction for Trae: the two CN surfaces are
     // separate products with their own rosters.
     case 'trae': return (session as TraeSession).channel === 'solo' ? 'TRAE SOLO CN' : 'Trae CN IDE'
@@ -1342,6 +1351,17 @@ export function apply(ctx: Context, config: Config): void {
     adapter.listModels = async (id: string) => filterVisible(provider, await original(id))
   }
 
+  // Record which routes actually registered.
+  //
+  // This exists because a route can be present in the AUTH STORE — so the card
+  // honestly says "connected" — while its adapter never reached `adapters`: the
+  // credential and the adapter are registered by different code, and the failure
+  // is invisible from every other surface. `visibility` answers an empty list,
+  // the picker shows nothing, and nothing raises an error. Diagnosis then needs
+  // the one fact no other file exposes, so it is written down. Best-effort: a
+  // failure to write it must never take the plugin down.
+  void writeRegisteredProviders([...adapters.keys()], providers).catch(() => undefined)
+
   // Same-subscription account pools: a catalog model with ≥2 accounts of
   // that provider is served through the pool (same id, same picker group).
   // Configured tiers are extra picker rows. Built whenever enabled; a
@@ -1531,10 +1551,27 @@ export function apply(ctx: Context, config: Config): void {
         if (res.ok) await recordTraeCheckin(res.message).catch(() => undefined)
         return { ok: res.ok, message: res.message }
       }
-      return { ok: false, message: 'Check-in is only available for CodeBuddy and Trae' }
+      if (provider === 'qoder') {
+        const tokens = accountTokens.get('qoder') as AccountTokenManager<QoderSession> | undefined
+        if (tokens === undefined) return { ok: false, message: 'Qoder is not registered' }
+        const session = await tokens.session(account)
+        const outcome = await claimQoderCheckin(session.refreshToken, session.region)
+        // The ledger is only advanced on a real claim, so a manual attempt that
+        // finds the day already claimed does not rewrite the recorded message.
+        if (outcome.status === 'claimed') {
+          await writeQoderCheckinState({
+            lastDate: qoderDayString(),
+            lastTime: Date.now(),
+            lastMessage: outcome.message,
+          }).catch(() => undefined)
+        }
+        return { ok: outcome.ok, message: outcome.message }
+      }
+      return { ok: false, message: 'Check-in is only available for CodeBuddy, Trae and Qoder' }
     },
     async checkinStatus(provider) {
       if (provider === 'trae') return getTraeCheckinStatusView()
+      if (provider === 'qoder') return getQoderCheckinStatusView()
       return getCodeBuddyCheckinStatus()
     },
     async visibility(provider) {
@@ -1884,6 +1921,35 @@ export function apply(ctx: Context, config: Config): void {
     runTraeCheckin()
     const traeCheckinTimer = setInterval(runTraeCheckin, 60_000)
     ctx.effect(() => () => { clearInterval(traeCheckinTimer) }, 'dsh-subscription-hub: trae auto check-in')
+  }
+
+  // Qoder's daily benefit: the upstream grants it as a CLAIM_BENEFIT campaign,
+  // so claiming is a two-call flow, and the day boundary is UTC+8 — the vendor's
+  // own reset clock, not this machine's zone. `autoCheckinQoder` records the
+  // UTC+8 day a claim succeeded on and refuses to claim twice, which is what
+  // makes a 60-second poll harmless; a FAILED day is deliberately not recorded,
+  // so the next tick retries rather than silently skipping the day's credits.
+  const qoderTokens = accountTokens.get('qoder') as AccountTokenManager<QoderSession> | undefined
+  if (qoderTokens !== undefined) {
+    const tokens = qoderTokens
+    const runQoderCheckin = (): void => {
+      void tokens.list().then(async (accounts) => {
+        const sessions: { pat: string; region: QoderRegion }[] = []
+        for (const { key } of accounts) {
+          try {
+            const session = await tokens.session(key)
+            sessions.push({ pat: session.refreshToken, region: session.region })
+          } catch { /* skip an account whose PAT cannot be read */ }
+        }
+        const outcome = await autoCheckinQoder(sessions)
+        if (outcome !== undefined && !outcome.ok && outcome.status === 'error') {
+          onWarn(`qoder check-in failed: ${outcome.message}`)
+        }
+      }).catch(() => undefined)
+    }
+    runQoderCheckin()
+    const qoderCheckinTimer = setInterval(runQoderCheckin, 60_000)
+    ctx.effect(() => () => { clearInterval(qoderCheckinTimer) }, 'dsh-subscription-hub: qoder auto check-in')
   }
 
   // Proactively keep keychain-bound Claude accounts synced with Claude Code's

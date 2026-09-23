@@ -1,0 +1,319 @@
+/**
+ * Qoder's daily benefit check-in.
+ *
+ * Qoder grants a daily credit allowance as a *campaign*: the account lists its
+ * campaigns, one of them carries `actionType: 'CLAIM_BENEFIT'`, and claiming it
+ * mints the day's credits. So the flow is two calls — list, then claim — against
+ * the region's OpenAPI host.
+ *
+ * ## Two upstream rules the reference established, both load-bearing
+ *
+ * 1. **The campaign family gates on the DESKTOP client identifier.** Measured
+ *    upstream: `/sash/api/v1/me/campaigns` answers HTTP 200 with an EMPTY
+ *    `campaigns` array when the caller sends the generic client type, and the
+ *    real list only for the desktop one. A check-in built on the wrong
+ *    identifier therefore looks perfectly healthy at the transport layer — 200,
+ *    no error — while reporting "no campaign today" forever. That is the worst
+ *    possible failure shape, so the identifier is sent explicitly here.
+ *
+ * 2. **The day boundary is UTC+8**, not the machine's zone: the upstream resets
+ *    at 10:00 Beijing, so "already claimed today" has to be judged on that clock.
+ *    A machine in another zone would otherwise double-claim or skip a day.
+ *
+ * @module dsh-subscription-hub/providers/qoder/checkin
+ */
+
+import { readFile, writeFile, mkdir, rename } from 'node:fs/promises'
+import { dirname } from 'node:path'
+import { randomBytes } from 'node:crypto'
+import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
+import { proxiedFetch } from '../../http.js'
+import type { QoderRegion } from './region.js'
+import { getQoderCampaignsUrl, getQoderClaimCampaignUrl, resolveQoderEndpoints } from './region.js'
+import { openApiJsonRequest } from './request.js'
+import { isQoderAuthRejection, qoderError } from './errors.js'
+import { QoderAuthService } from './auth.js'
+import { qoderDesktopClientType } from './cosy.js'
+
+/** Where the check-in ledger lives, beside the hub's other provider state. */
+export function qoderCheckinStatePath(): string {
+  return dshHomePath('plugins', 'subscriptions', 'qoder-checkin.json')
+}
+
+/** The persisted check-in ledger. */
+export interface QoderCheckinState {
+  /** UTC+8 day the last successful claim belongs to (`YYYY-MM-DD`). */
+  lastDate?: string
+  /** Epoch ms of that claim. */
+  lastTime?: number
+  /** What the upstream said, for the card. */
+  lastMessage?: string
+  /** The UTC+8 day the next attempt is scheduled for. */
+  scheduledDate?: string
+  /** Epoch ms at which to attempt it. */
+  scheduledTime?: number
+}
+
+/** One campaign as the account lists it. */
+export interface QoderCampaign {
+  campaignId: string
+  campaignKey?: string
+  actionType?: string
+  claimStatus?: string
+  benefit?: { kind?: string; amount?: number }
+}
+
+/** The outcome of one check-in attempt. */
+export interface QoderCheckinOutcome {
+  ok: boolean
+  /** `claimed` / `already` / `none` / `error`. */
+  status: 'claimed' | 'already' | 'none' | 'error'
+  message: string
+  amount?: number
+}
+
+/**
+ * The UTC+8 calendar day for an instant.
+ *
+ * Deliberately not the machine's local day: the upstream's reset is 10:00
+ * Beijing, so the ledger has to agree with the vendor's clock or it will
+ * double-claim on one side of the boundary and skip on the other.
+ * @param now - the instant to classify.
+ * @returns `YYYY-MM-DD` in UTC+8.
+ */
+export function qoderDayString(now = new Date()): string {
+  const shifted = new Date(now.getTime() + (now.getTimezoneOffset() + 480) * 60_000)
+  const month = String(shifted.getMonth() + 1).padStart(2, '0')
+  const day = String(shifted.getDate()).padStart(2, '0')
+  return `${String(shifted.getFullYear())}-${month}-${day}`
+}
+
+/** Read the ledger; any failure answers an empty one rather than throwing. */
+export async function readQoderCheckinState(): Promise<QoderCheckinState> {
+  try {
+    const raw = JSON.parse(await readFile(qoderCheckinStatePath(), 'utf8')) as Record<string, unknown>
+    if (typeof raw !== 'object' || raw === null) return {}
+    const state: QoderCheckinState = {}
+    if (typeof raw.lastDate === 'string' && raw.lastDate.length > 0) state.lastDate = raw.lastDate
+    if (typeof raw.lastTime === 'number' && Number.isFinite(raw.lastTime)) state.lastTime = raw.lastTime
+    if (typeof raw.lastMessage === 'string') state.lastMessage = raw.lastMessage
+    if (typeof raw.scheduledDate === 'string') state.scheduledDate = raw.scheduledDate
+    if (typeof raw.scheduledTime === 'number' && Number.isFinite(raw.scheduledTime)) state.scheduledTime = raw.scheduledTime
+    return state
+  } catch {
+    return {}
+  }
+}
+
+/** Persist the ledger atomically, through a random-named temp file. */
+export async function writeQoderCheckinState(state: QoderCheckinState): Promise<void> {
+  const path = qoderCheckinStatePath()
+  await mkdir(dirname(path), { recursive: true })
+  const tmp = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
+  try {
+    await writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+    await rename(tmp, path)
+  } catch (error) {
+    await import('node:fs/promises').then(fs => fs.rm(tmp, { force: true })).catch(() => undefined)
+    throw error
+  }
+}
+
+/** List the account's campaigns for one region. */
+export async function fetchQoderCampaigns(
+  token: string,
+  region: QoderRegion,
+  fetchFn: typeof proxiedFetch = proxiedFetch,
+  signal?: AbortSignal,
+): Promise<QoderCampaign[]> {
+  const data = await openApiJsonRequest<{ campaigns?: unknown }>(fetchFn, {
+    url: getQoderCampaignsUrl(region),
+    token,
+    // THE identifier that makes the endpoint answer at all; see the module note.
+    headers: { 'cosy-clienttype': qoderDesktopClientType },
+    ...signal === undefined ? {} : { signal },
+    operation: 'Campaigns',
+  })
+  const list = Array.isArray(data?.campaigns) ? data.campaigns : []
+  return list.filter((entry): entry is QoderCampaign => typeof entry === 'object' && entry !== null)
+}
+
+/** Claim one campaign. */
+async function claimCampaign(
+  token: string,
+  region: QoderRegion,
+  campaignId: string,
+  fetchFn: typeof proxiedFetch,
+  signal?: AbortSignal,
+): Promise<{ status?: string; replayed?: boolean; benefit?: { amount?: number } }> {
+  const { openApiUrl } = resolveQoderEndpoints(region)
+  return await openApiJsonRequest(fetchFn, {
+    url: getQoderClaimCampaignUrl(region, campaignId),
+    method: 'POST',
+    token,
+    headers: { origin: openApiUrl, 'cosy-clienttype': qoderDesktopClientType },
+    ...signal === undefined ? {} : { signal },
+    operation: 'ClaimCampaign',
+  })
+}
+
+/**
+ * Claim today's benefit for one Personal Access Token.
+ *
+ * A rejected job token is retried ONCE with a freshly exchanged one before the
+ * failure is reported: the stored token can have been rotated by another client
+ * between the exchange and the claim, and a one-shot retry turns that into a
+ * success rather than an error the user has to interpret.
+ * @param pat - the durable Personal Access Token.
+ * @param region - which deployment the account belongs to.
+ * @param fetchFn - injectable fetcher for tests.
+ * @param signal - optional cancellation.
+ * @param authService - reusable auth service; one is built when omitted.
+ * @returns the outcome, never thrown for an upstream refusal.
+ */
+export async function claimQoderCheckin(
+  pat: string,
+  region: QoderRegion,
+  fetchFn: typeof proxiedFetch = proxiedFetch,
+  signal?: AbortSignal,
+  authService?: QoderAuthService,
+): Promise<QoderCheckinOutcome> {
+  if (typeof pat !== 'string' || pat.trim() === '') {
+    return { ok: false, status: 'error', message: 'no Qoder PAT is stored' }
+  }
+  const auth = authService ?? new QoderAuthService({ region, fetchFn })
+  const run = async (token: string): Promise<QoderCheckinOutcome> => {
+    const campaigns = await fetchQoderCampaigns(token, region, fetchFn, signal)
+    const benefit = campaigns.find(campaign => campaign.actionType === 'CLAIM_BENEFIT')
+    if (benefit === undefined) {
+      // Either the account has no benefit today or the list came back empty for
+      // a reason the endpoint did not disclose. Both are stated as "no campaign"
+      // rather than dressed up as a success.
+      return { ok: false, status: 'none', message: 'no claimable benefit campaign for this account today' }
+    }
+    if (benefit.claimStatus === 'CLAIMED') {
+      return {
+        ok: true,
+        status: 'already',
+        message: 'already claimed today',
+        ...benefit.benefit?.amount === undefined ? {} : { amount: benefit.benefit.amount },
+      }
+    }
+    const claimed = await claimCampaign(token, region, benefit.campaignId, fetchFn, signal)
+    const amount = claimed.benefit?.amount ?? benefit.benefit?.amount
+    if (claimed.status === 'CLAIMED') {
+      const replayed = claimed.replayed === true
+      return {
+        ok: true,
+        status: replayed ? 'already' : 'claimed',
+        message: replayed
+          ? 'already claimed today'
+          : `claimed ${String(amount ?? '')} credits`.trim(),
+        ...amount === undefined ? {} : { amount },
+      }
+    }
+    return {
+      ok: false,
+      status: 'error',
+      message: `the claim returned status ${claimed.status ?? 'unknown'}`,
+    }
+  }
+
+  try {
+    const credentials = await auth.getCredentials(pat, signal)
+    try {
+      return await run(credentials.authToken)
+    } catch (error) {
+      if (!isQoderAuthRejection(error)) throw error
+      const fresh = await auth.exchangeFresh(pat, signal)
+      return await run(fresh.authToken)
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      status: 'error',
+      message: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
+
+/**
+ * Run the daily check-in for every account, once per UTC+8 day.
+ *
+ * Mirrors the hub's Trae and CodeBuddy schedulers: it records the day the claim
+ * landed and refuses to claim twice, so a 60-second poll is harmless. A day
+ * whose attempt failed is NOT recorded as claimed, so the next tick retries
+ * rather than silently skipping the whole day.
+ * @param accounts - the accounts to claim for, with their PATs and regions.
+ * @param fetchFn - injectable fetcher for tests.
+ * @param now - the instant to judge the day against.
+ * @returns the last outcome, for the caller's log line.
+ */
+export async function autoCheckinQoder(
+  accounts: readonly { pat: string; region: QoderRegion }[],
+  fetchFn: typeof proxiedFetch = proxiedFetch,
+  now = new Date(),
+): Promise<QoderCheckinOutcome | undefined> {
+  if (accounts.length === 0) return undefined
+  const today = qoderDayString(now)
+  const state = await readQoderCheckinState()
+  if (state.lastDate === today) return undefined
+
+  let last: QoderCheckinOutcome | undefined
+  let ok = false
+  for (const account of accounts) {
+    const outcome = await claimQoderCheckin(account.pat, account.region, fetchFn)
+    last = outcome
+    // `already` counts as done: the day's credits exist whether this process
+    // minted them or another client did.
+    if (outcome.ok) ok = true
+  }
+  if (ok) {
+    await writeQoderCheckinState({
+      lastDate: today,
+      lastTime: now.getTime(),
+      ...last?.message === undefined ? {} : { lastMessage: last.message },
+    })
+  }
+  return last
+}
+
+/**
+ * The card's view of the ledger.
+ *
+ * Deliberately the SAME shape the CodeBuddy and Trae routes already answer with
+ * (`checkedInToday` / `lastDate` / `lastMessage` / `scheduled*`), so the card's
+ * existing check-in section renders Qoder without a second code path and no wire
+ * change is needed.
+ */
+export interface QoderCheckinStatusView {
+  lastDate?: string
+  lastTime?: number
+  lastMessage?: string
+  scheduledDate?: string
+  scheduledTime?: number
+  checkedInToday: boolean
+}
+
+/**
+ * The check-in status the Settings card renders.
+ * @param now - the instant to judge the day against.
+ * @returns the ledger's public face, in the shared view shape.
+ */
+export async function getQoderCheckinStatusView(now = new Date()): Promise<QoderCheckinStatusView> {
+  const state = await readQoderCheckinState()
+  const today = qoderDayString(now)
+  return {
+    ...state.lastDate === undefined ? {} : { lastDate: state.lastDate },
+    ...state.lastTime === undefined ? {} : { lastTime: state.lastTime },
+    ...state.lastMessage === undefined ? {} : { lastMessage: state.lastMessage },
+    // The scheduler retries every tick until the day's claim lands, so the day it
+    // is working on IS the scheduled one — there is no separate future slot to
+    // report, unlike the CodeBuddy/Trae routes that aim at a specific morning time.
+    scheduledDate: state.lastDate === today ? state.lastDate : today,
+    checkedInToday: state.lastDate === today,
+  }
+}
+
+/** Re-exported so a caller can classify a refusal without importing errors. */
+export { qoderError }

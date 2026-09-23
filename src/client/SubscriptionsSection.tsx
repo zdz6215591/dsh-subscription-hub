@@ -279,7 +279,7 @@ const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [  { id
 ]
 
 /** Providers that offer a daily check-in (each keeps its own schedule). */
-const CHECKIN_PROVIDERS: ReadonlySet<SubscriptionProvider> = new Set<SubscriptionProvider>(['codebuddy', 'trae'])
+const CHECKIN_PROVIDERS: ReadonlySet<SubscriptionProvider> = new Set<SubscriptionProvider>(['codebuddy', 'trae', 'qoder'])
 
 /** Dot color for one Cline upstream availability verdict. */
 function verdictColor(status: string): string {
@@ -1654,6 +1654,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   useEffect(() => {
     void loadCheckinStatus('codebuddy')
     void loadCheckinStatus('trae')
+    void loadCheckinStatus('qoder')
   }, [loadCheckinStatus])
 
   const loadSavings = useCallback(async (refresh = false): Promise<void> => {
