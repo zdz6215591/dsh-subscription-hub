@@ -174,6 +174,35 @@ test('speed endpoints: per-session tier round trip and payload validation', asyn
   }
 })
 
+test('labBadges endpoint: vendored marks, and payload validation', async () => {
+  const handler = await mount()
+  const signal = new AbortController().signal
+  // A lab this build ships needs no third-party call, so this stays offline.
+  const result = await handler('labBadges', { labs: ['anthropic', 'nope'] }, signal)
+  assert.equal(result.ok, true)
+  if (result.ok) {
+    const value = result.value as { badges: Record<string, string> }
+    assert.ok(value.badges.anthropic?.startsWith('<svg'))
+    // A lab nothing can attribute a mark to is simply absent — never a stand-in.
+    assert.equal(value.badges.nope, undefined)
+  }
+  const bad = [
+    [{}, /labs/],
+    [{ labs: 'anthropic' }, /labs/],
+    [{ labs: ['../../etc/passwd'] }, /lab slugs/],
+    [{ labs: ['A'] }, /lab slugs/],
+    [{ labs: Array.from({ length: 65 }, () => 'anthropic') }, /at most/],
+  ] as const
+  for (const [payload, pattern] of bad) {
+    const denied = await handler('labBadges', payload, signal)
+    assert.equal(denied.ok, false, JSON.stringify(payload))
+    if (!denied.ok) {
+      assert.equal(denied.error.code, 'bad-request')
+      assert.match(denied.error.message, pattern)
+    }
+  }
+})
+
 test('visibility and check-in extras: empty catalog and provider gate', async () => {
   const handler = await mount()
   const signal = new AbortController().signal

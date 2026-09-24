@@ -10,6 +10,7 @@ import type { ConnectionRpcHandler, HostConnectionHandle } from '@deepseek-ai/ds
 import type { RpcResult } from '../compat.js'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import { LAB_SLUG_PATTERN } from '../lab-logo.js'
 import { PROVIDER_IDS, type ProviderId } from './store.js'
 import type { ProviderUsage } from '../providers/common.js'
 import type { ProxyConfigView, ProxyDraft, ProxyInput, ProxyTestResult } from '../http.js'
@@ -35,6 +36,7 @@ export const SUBSCRIPTIONS_AUTH_ENDPOINTS = [
   'proxyGet', 'proxySet', 'proxyTest',
   'modelDefaults', 'setModelDefault',
   'checkin', 'checkinStatus', 'visibility', 'setVisible', 'refreshModels', 'markModelsRead',
+  'labBadges',
   'poolGet', 'poolSet',
   'clinePins', 'setClinePin', 'probeClineChannels', 'validateClineChannels', 'clineAutoConfigure',
   'tokenStats',
@@ -45,6 +47,13 @@ export const SUBSCRIPTIONS_AUTH_CHANNEL = '/subscriptions-auth'
 
 /** Media types the attachment store accepts (ImageMediaType). */
 const IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const
+
+/**
+ * Most lab slugs one `labBadges` call may ask for. The hub attributes models to
+ * at most a couple of dozen labs, so this only ever bites a malformed client —
+ * and it bounds the third-party traffic one call can cause.
+ */
+const LAB_BADGE_LIMIT = 64
 
 /** Decoded image bytes returned by the `image` endpoint. */
 export interface ImageBytesResult {
@@ -137,6 +146,20 @@ export interface ModelDefaultsCatalog {
   models: ModelDefaultView[]
 }
 
+/**
+ * What the `labBadges` endpoint answers: the models.dev logo for each lab it
+ * could produce one for.
+ *
+ * A lab models.dev has no logo for is ABSENT from `badges` rather than mapped to
+ * a substitute, and the row then draws nothing. Nothing here is ever a
+ * placeholder: the host compares against what models.dev serves for a logo it
+ * does not have (see `lab-badge-store.ts`).
+ */
+export interface LabBadgesView {
+  /** Lab slug → the logo markup models.dev serves for it. */
+  badges: Record<string, string>
+}
+
 /** One model's upstream pin as the panel reads it. */
 export interface ClinePinView {
   /** Wire model id this row configures. */
@@ -174,11 +197,17 @@ export interface ExtraOps {
     visible: boolean
     unread?: boolean
     /** Owning vendor, or absent when the id names none this build knows. */
-    vendor?: { id: string; label: string; mono: string }
+    vendor?: { id: string; label: string; lab?: string }
     /** Accepted input modalities, or absent when the route never declared them. */
     inputModalities?: string[]
   }[]>
   setVisible(provider: ProviderId, model: string, visible: boolean): Promise<void>
+  /**
+   * The models.dev logos for the labs the model list is currently showing, so a
+   * lab this build has no vendored mark for still gets one without a rebuild.
+   * A lab with no logo is absent from the answer rather than substituted.
+   */
+  labBadges?(labs: readonly string[]): Promise<LabBadgesView>
   refreshModels?(provider?: ProviderId): Promise<{ ok: boolean }>
   markModelsRead?(provider: ProviderId): Promise<{ ok: boolean }>
   /** Cline's per-model upstream pins, merged with discovery state. */
@@ -459,6 +488,28 @@ function readLoginMethod(payload: unknown, provider: ProviderId): LoginMethod | 
     throw new BadRequest('payload.method "keychain" is only valid for claude')
   }
   return method
+}
+
+/**
+ * Validate the `labBadges` endpoint's lab list.
+ *
+ * The slugs are checked rather than trusted: they are interpolated into a
+ * models.dev URL, so anything that is not a lab slug is a client bug worth
+ * failing loudly on. The cap keeps one call from turning into an unbounded
+ * amount of third-party traffic.
+ */
+function readLabSlugs(payload: unknown): string[] {
+  const labs = (payload as Record<string, unknown> | null)?.labs
+  if (!Array.isArray(labs)) throw new BadRequest('payload.labs must be an array of lab slugs')
+  if (labs.length > LAB_BADGE_LIMIT) {
+    throw new BadRequest(`payload.labs must carry at most ${String(LAB_BADGE_LIMIT)} slugs`)
+  }
+  for (const lab of labs) {
+    if (typeof lab !== 'string' || !LAB_SLUG_PATTERN.test(lab)) {
+      throw new BadRequest('payload.labs must contain only models.dev lab slugs')
+    }
+  }
+  return labs as string[]
 }
 
 /** Validate the `setSpeed` endpoint's tier. */
@@ -760,6 +811,10 @@ async function dispatch(
       if (typeof visible !== 'boolean') throw new BadRequest('payload.visible must be a boolean')
       await extras.setVisible(provider, readString(payload, 'model'), visible)
       return ok({ ok: true })
+    }
+    case 'labBadges': {
+      if (extras?.labBadges === undefined) throw new BadRequest('lab badges are unavailable')
+      return ok(await extras.labBadges(readLabSlugs(payload)))
     }
     case 'refreshModels': {
       if (extras?.refreshModels === undefined) throw new BadRequest('refresh models is unavailable')

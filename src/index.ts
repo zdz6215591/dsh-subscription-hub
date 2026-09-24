@@ -208,6 +208,7 @@ import { writeRegisteredProviders } from './startup-diagnostics.js'
 import { autoCheckinQoder, claimQoderCheckin, getQoderCheckinStatusView, recordQoderCheckin } from './providers/qoder/checkin.js'
 import type { QoderRegion } from './providers/qoder/index.js'
 import { modelVendor } from './model-vendor.js'
+import { createLabBadgeStore } from './lab-badge-store.js'
 import { createXSearchTool } from './tools/x-search.js'
 import { createImageGenerateTool } from './tools/image-generate.js'
 import { createVideoGenerateTool, videosDirectory } from './tools/video-generate.js'
@@ -1542,6 +1543,10 @@ export function apply(ctx: Context, config: Config): void {
   const authController = new SubscriptionsAuthController(
     flows, deviceFlows, authChanged, resolveAttachments, usageFetchers, undefined, poolUsage,
   )
+  // One store per plugin instance, so the in-memory half (fetched marks, and the
+  // labs models.dev has no mark for at all) is shared by every call and the
+  // disk cache has a single writer.
+  const labBadges = createLabBadgeStore()
   registerAuthRpc(ctx, authController, speed, {
     get: () => proxyGetConfig(),
     set: input => proxySetConfig(input),
@@ -1611,6 +1616,13 @@ export function apply(ctx: Context, config: Config): void {
         await markProviderModelsRead(provider)
       }
       return { ok: true }
+    },
+    async labBadges(labs) {
+      // Resolved host-side so the browser makes no third-party request: the
+      // store fetches a lab's mark from models.dev once and then serves it from
+      // its cache. A lab models.dev has no logo for is simply not in the answer,
+      // and the row draws nothing — never a substitute.
+      return { badges: await labBadges.badgesFor(labs) }
     },
     async clinePins() {
       const pinned = await clinePins.allPins()

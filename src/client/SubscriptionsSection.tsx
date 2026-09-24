@@ -20,6 +20,8 @@ import type { SubscriptionsKey } from './locales.js'
 import { callSubscriptionsAuth, SubscriptionsAuthError } from './subscriptions-rpc.js'
 import { ModalityIcons, VendorMark } from './ModelIcons.js'
 import type { InputModality } from '../providers/modality.js'
+import { LAB_BADGES } from './lab-badges.js'
+import { normalizeLabLogo } from '../lab-logo.js'
 export { callSubscriptionsAuth, SubscriptionsAuthError } from './subscriptions-rpc.js'
 
 /** Poll cadence while a provider login attempt is busy. */
@@ -115,7 +117,7 @@ export interface VisibleModelView {
   visible: boolean
   unread?: boolean
   /** Owning vendor, resolved host-side; absent when the id names none. */
-  vendor?: { id: string; label: string; mono: string }
+  vendor?: { id: string; label: string; lab?: string }
   /** Accepted input modalities; absent when the route never declared them. */
   inputModalities?: InputModality[]
 }
@@ -1017,6 +1019,55 @@ export function modelDefaultsSignature(
 }
 
 /**
+ * The lab logos the rows draw from: the host's live answer over the vendored set.
+ *
+ * Called with `undefined` when the `labBadges` call failed or was never made, so
+ * the vendored snapshot is exactly what an unavailable host degrades to. A lab
+ * neither source has draws NOTHING — the point of the whole arrangement, and the
+ * reason there is no drawing to fall back to.
+ *
+ * The host validates what it sends, but this re-checks anyway: the markup is
+ * injected into the page as HTML, so a blob that is not a complete inert `<svg>`
+ * must never reach the DOM. Normalizing here also means the rows do not have to
+ * care whether a mark came from this bundle or from the host.
+ * @param remote - the host's `labBadges` answer, when it has been fetched.
+ * @returns the logos to render from.
+ */
+export function mergeLabBadges(remote: Readonly<Record<string, string>> | undefined): Readonly<Record<string, string>> {
+  const merged: Record<string, string> = { ...LAB_BADGES }
+  for (const [lab, markup] of Object.entries(remote ?? {})) {
+    const normalized = normalizeLabLogo(markup)
+    if (normalized !== undefined) merged[lab] = normalized
+  }
+  return merged
+}
+
+/**
+ * The labs the listed models are attributed to that this build has no vendored
+ * logo for, sorted and deduplicated.
+ *
+ * This is what the `labBadges` call asks the host for: a lab the bundle already
+ * carries needs no request, and a lab it does not carry is exactly the case the
+ * live fetch exists for — including a lab models.dev has no logo for today,
+ * whose mark appears by itself if models.dev publishes one.
+ * @param models - the visibility rows loaded so far, by provider.
+ * @returns the lab slugs to resolve, sorted for a stable signature.
+ */
+export function labsNeedingBadges(
+  models: Partial<Record<SubscriptionProvider, VisibleModelView[]>>,
+): string[] {
+  const labs = new Set<string>()
+  for (const list of Object.values(models)) {
+    for (const model of list ?? []) {
+      const lab = model.vendor?.lab
+      if (lab === undefined || LAB_BADGES[lab] !== undefined) continue
+      labs.add(lab)
+    }
+  }
+  return [...labs].sort()
+}
+
+/**
  * The Subscriptions settings page component.
  * @param props - the slot inject face ({@link SubscriptionsSectionInjected}).
  * @returns the section body, or a notice while the RPC face is absent.
@@ -1096,6 +1147,14 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [visibilityLoading, setVisibilityLoading] = useState<Partial<Record<SubscriptionProvider, boolean>>>({})
   const [visibilityError, setVisibilityError] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const visibilityInflightRef = useRef(new Set<SubscriptionProvider>())
+  /**
+   * The lab logos the rows draw from. Seeded with the vendored set, so a host
+   * that cannot answer still renders every mark this build ships — and nothing
+   * at all for a lab it does not.
+   */
+  const [labBadges, setLabBadges] = useState<Readonly<Record<string, string>>>(LAB_BADGES)
+  /** The lab signature the last completed `labBadges` call was answered for. */
+  const labBadgesLoadedForRef = useRef<string | undefined>(undefined)
   /**
    * Cline's per-model upstream pins. Cline is the only route with a channel
    * layer, so this state is provider-specific rather than part of the shared
@@ -1400,6 +1459,36 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       }
     }
   }, [rpc, statuses, loadVisibility, visibilityModels])
+
+  /**
+   * Fetch the logos for the labs the loaded rows name that this build has no
+   * vendored mark for. Keyed on the lab SET rather than on the rows, so a new
+   * model from a lab already listed costs no request, while a lab that appears
+   * for the first time resolves its mark without a rebuild. A lab the host
+   * cannot produce a logo for simply never arrives, and its row draws nothing.
+   */
+  const labBadgesNeeded = labsNeedingBadges(visibilityModels)
+  const labBadgesSignature = labBadgesNeeded.join(',')
+  useEffect(() => {
+    if (rpc === undefined || labBadgesSignature === '') return
+    if (labBadgesLoadedForRef.current === labBadgesSignature) return
+    labBadgesLoadedForRef.current = labBadgesSignature
+    // The signature is the request: lab slugs are comma-free by construction
+    // (models.dev's own alphabet), so splitting it back is lossless and keeps
+    // this effect from depending on a fresh array identity every render.
+    const labs = labBadgesSignature.split(',')
+    let alive = true
+    void callSubscriptionsAuth<{ badges: Record<string, string> }>(rpc, 'labBadges', { labs })
+      .then((answer) => {
+        if (alive) setLabBadges(mergeLabBadges(answer.badges))
+      })
+      .catch(() => {
+        // A mark that could not be fetched is simply absent, which is the honest
+        // rendering — an error line for a missing icon would be noise. The
+        // vendored set stays as it was, so nothing is substituted for it.
+      })
+    return () => { alive = false }
+  }, [rpc, labBadgesSignature])
 
   /** Drop the server's cached catalogs, then re-read this provider's model list. */
   /** Load Cline's per-model upstream pins plus whatever discovery knows. */
@@ -2697,7 +2786,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                                     glyphs immediately after it: the row answers
                                     "who makes this, and what does it take?" without
                                     the reader's eye crossing the whole row. */}
-                                {model.vendor !== undefined && <VendorMark vendor={model.vendor} />}
+                                {model.vendor !== undefined && <VendorMark vendor={model.vendor} badges={labBadges} />}
                                 <span style={styles.defaultEffortName} title={model.id}>
                                   {model.name}
                                   {model.unread && <span style={styles.unreadModelDot} title={t('newModelBadge')} />}

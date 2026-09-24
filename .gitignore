@@ -8,5 +8,3 @@ overlay.yml
 *.log
 .idea/
 .vscode/
-
-.vendor-badges-cache/

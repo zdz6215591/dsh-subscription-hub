@@ -111,14 +111,16 @@ test('every live hub model id resolves to a vendor', () => {
   assert.equal(modelVendor('grok-4.5')?.label, 'xAI')
 })
 
-test('every vendor carries a usable monogram and a distinct id', () => {
+test('every vendor carries a distinct id, and a lab only when models.dev has one', () => {
   const ids = new Set<string>()
   for (const id of LIVE_IDS) {
     const vendor = modelVendor(id)
     if (vendor === undefined) continue
-    // The mark shows this verbatim, so it must be present and short.
-    assert.ok(vendor.mono.length >= 1 && vendor.mono.length <= 2, `${id}: mono=${vendor.mono}`)
     assert.ok(vendor.label.length > 0)
+    // The mark is models.dev's logo or there is none at all: the hand-drawn
+    // monogram this used to carry is deleted, so nothing may reintroduce one.
+    assert.equal('mono' in vendor, false, `${id} still carries a monogram`)
+    if (vendor.lab !== undefined) assert.ok(/^[a-z0-9][a-z0-9._-]*$/.test(vendor.lab), `${id}: lab=${vendor.lab}`)
     // One vendor is one id, so the legend and the React keys stay stable.
     ids.add(vendor.id)
   }

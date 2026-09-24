@@ -28,74 +28,82 @@ export interface ModelVendor {
   /** Display name, shown as the icon's tooltip. */
   label: string
   /**
-   * One or two letters for the borderless monogram mark.
+   * The vendor's lab slug in models.dev, when models.dev publishes that lab.
    *
-   * Deliberately a monogram rather than a reproduction of each company's logo:
-   * these are third-party trademarks, and a hand-drawn lookalike that renders
-   * subtly wrong is worse than a clean initial that is always right. The mark is
-   * `aria-hidden` and the vendor's name rides the tooltip and the row's
-   * accessible name, so nothing depends on the glyph.
+   * The slug is the ATTRIBUTION fact — which lab makes the model — and it is
+   * what the icon resolves through (`https://models.dev/logos/labs/{lab}.svg`).
+   * It is not a claim that a logo exists: models.dev lists labs whose logo
+   * asset is only the generic placeholder, and for those the row renders no
+   * mark at all rather than a drawn substitute. See `lab-logo.ts` for the rule
+   * and `client/lab-badges.ts` for which slugs really have a logo.
+   *
+   * Absent for a vendor with no models.dev lab at all (`groq`, `baseten`, …) —
+   * and also for an id this table cannot attribute, which is the point: a wrong
+   * company is worse than no company.
    */
-  mono: string
+  lab?: string
 }
 
-function vendor(id: string, label: string, mono: string): ModelVendor {
-  return { id, label, mono }
+function vendor(id: string, label: string, lab?: string): ModelVendor {
+  return { id, label, ...lab === undefined ? {} : { lab } }
 }
 
 /** Vendors this hub can actually route to, keyed by the owner segment of an id. */
 const BY_OWNER: Readonly<Record<string, ModelVendor>> = Object.freeze({
-  anthropic: vendor('anthropic', 'Anthropic', 'A'),
-  openai: vendor('openai', 'OpenAI', 'O'),
-  azureopenai: vendor('openai', 'OpenAI', 'O'),
-  google: vendor('google', 'Google', 'G'),
-  googlevertex: vendor('google', 'Google', 'G'),
-  googlevertexglobal: vendor('google', 'Google', 'G'),
-  xai: vendor('xai', 'xAI', 'X'),
-  deepseek: vendor('deepseek', 'DeepSeek', 'D'),
-  qwen: vendor('qwen', 'Alibaba Qwen', 'Q'),
-  alibaba: vendor('qwen', 'Alibaba Qwen', 'Q'),
-  moonshotai: vendor('moonshot', 'Moonshot AI', 'M'),
-  moonshot: vendor('moonshot', 'Moonshot AI', 'M'),
-  'z-ai': vendor('zhipu', 'Z.ai', 'Z'),
-  zhipu: vendor('zhipu', 'Z.ai', 'Z'),
-  minimaxai: vendor('minimax', 'MiniMax', 'M'),
-  minimax: vendor('minimax', 'MiniMax', 'M'),
-  meta: vendor('meta', 'Meta', 'M'),
-  'meta-llama': vendor('meta', 'Meta', 'M'),
-  mistralai: vendor('mistral', 'Mistral AI', 'M'),
-  mistral: vendor('mistral', 'Mistral AI', 'M'),
-  inclusionai: vendor('inclusionai', 'InclusionAI', 'I'),
-  meituan: vendor('meituan', 'Meituan', 'M'),
-  longcat: vendor('meituan', 'Meituan', 'M'),
-  xiaomi: vendor('xiaomi', 'Xiaomi', 'X'),
-  mimo: vendor('xiaomi', 'Xiaomi', 'X'),
-  stepfun: vendor('stepfun', 'StepFun', 'S'),
-  bytedance: vendor('bytedance', 'ByteDance', 'B'),
-  byteplus: vendor('bytedance', 'ByteDance', 'B'),
-  doubao: vendor('bytedance', 'ByteDance', 'B'),
-  amazon: vendor('amazon', 'Amazon', 'A'),
-  nvidia: vendor('nvidia', 'NVIDIA', 'N'),
-  cohere: vendor('cohere', 'Cohere', 'C'),
-  microsoft: vendor('microsoft', 'Microsoft', 'M'),
-  tencent: vendor('tencent', 'Tencent', 'T'),
-  hunyuan: vendor('tencent', 'Tencent', 'T'),
-  baidu: vendor('baidu', 'Baidu', 'B'),
-  ernie: vendor('baidu', 'Baidu', 'B'),
-  iflytek: vendor('iflytek', 'iFlytek', 'i'),
-  spark: vendor('iflytek', 'iFlytek', 'i'),
-  zhipuai: vendor('zhipu', 'Z.ai', 'Z'),
-  kimi: vendor('moonshot', 'Moonshot AI', 'M'),
-  '01-ai': vendor('01ai', '01.AI', '0'),
-  yi: vendor('01ai', '01.AI', '0'),
-  openrouter: vendor('openrouter', 'OpenRouter', 'O'),
-  baseten: vendor('baseten', 'Baseten', 'B'),
-  groq: vendor('groq', 'Groq', 'G'),
-  together: vendor('together', 'Together AI', 'T'),
-  fireworks: vendor('fireworks', 'Fireworks', 'F'),
-  perplexity: vendor('perplexity', 'Perplexity', 'P'),
-  ai21: vendor('ai21', 'AI21 Labs', 'A'),
-  nvidia_nim: vendor('nvidia', 'NVIDIA', 'N'),
+  anthropic: vendor('anthropic', 'Anthropic', 'anthropic'),
+  openai: vendor('openai', 'OpenAI', 'openai'),
+  azureopenai: vendor('openai', 'OpenAI', 'openai'),
+  google: vendor('google', 'Google', 'google'),
+  googlevertex: vendor('google', 'Google', 'google'),
+  googlevertexglobal: vendor('google', 'Google', 'google'),
+  xai: vendor('xai', 'xAI', 'xai'),
+  deepseek: vendor('deepseek', 'DeepSeek', 'deepseek'),
+  qwen: vendor('qwen', 'Alibaba Qwen', 'alibaba'),
+  alibaba: vendor('qwen', 'Alibaba Qwen', 'alibaba'),
+  moonshotai: vendor('moonshot', 'Moonshot AI', 'moonshotai'),
+  moonshot: vendor('moonshot', 'Moonshot AI', 'moonshotai'),
+  'z-ai': vendor('zhipu', 'Z.ai', 'zhipuai'),
+  zhipu: vendor('zhipu', 'Z.ai', 'zhipuai'),
+  minimaxai: vendor('minimax', 'MiniMax', 'minimax'),
+  minimax: vendor('minimax', 'MiniMax', 'minimax'),
+  meta: vendor('meta', 'Meta', 'meta'),
+  'meta-llama': vendor('meta', 'Meta', 'meta'),
+  mistralai: vendor('mistral', 'Mistral AI', 'mistral'),
+  mistral: vendor('mistral', 'Mistral AI', 'mistral'),
+  inclusionai: vendor('inclusionai', 'InclusionAI', 'inclusionai'),
+  meituan: vendor('meituan', 'Meituan', 'meituan'),
+  longcat: vendor('meituan', 'Meituan', 'meituan'),
+  xiaomi: vendor('xiaomi', 'Xiaomi', 'xiaomi'),
+  mimo: vendor('xiaomi', 'Xiaomi', 'xiaomi'),
+  stepfun: vendor('stepfun', 'StepFun', 'stepfun'),
+  bytedance: vendor('bytedance', 'ByteDance', 'bytedance-seed'),
+  byteplus: vendor('bytedance', 'ByteDance', 'bytedance-seed'),
+  doubao: vendor('bytedance', 'ByteDance', 'bytedance-seed'),
+  amazon: vendor('amazon', 'Amazon', 'amazon'),
+  nvidia: vendor('nvidia', 'NVIDIA', 'nvidia'),
+  cohere: vendor('cohere', 'Cohere', 'cohere'),
+  microsoft: vendor('microsoft', 'Microsoft', 'microsoft'),
+  tencent: vendor('tencent', 'Tencent', 'tencent'),
+  hunyuan: vendor('tencent', 'Tencent', 'tencent'),
+  zhipuai: vendor('zhipu', 'Z.ai', 'zhipuai'),
+  kimi: vendor('moonshot', 'Moonshot AI', 'moonshotai'),
+  perplexity: vendor('perplexity', 'Perplexity', 'perplexity'),
+  ai21: vendor('ai21', 'AI21 Labs', 'ai21'),
+  nvidia_nim: vendor('nvidia', 'NVIDIA', 'nvidia'),
+  // No models.dev lab owns these, so they carry no lab slug and therefore draw no
+  // icon: attributing one of them to a lab by guesswork is exactly the failure
+  // this table exists to avoid.
+  baidu: vendor('baidu', 'Baidu'),
+  ernie: vendor('baidu', 'Baidu'),
+  iflytek: vendor('iflytek', 'iFlytek'),
+  spark: vendor('iflytek', 'iFlytek'),
+  '01-ai': vendor('01ai', '01.AI'),
+  yi: vendor('01ai', '01.AI'),
+  openrouter: vendor('openrouter', 'OpenRouter'),
+  baseten: vendor('baseten', 'Baseten'),
+  groq: vendor('groq', 'Groq'),
+  together: vendor('together', 'Together AI'),
+  fireworks: vendor('fireworks', 'Fireworks'),
 })
 
 /**
@@ -106,34 +114,34 @@ const BY_OWNER: Readonly<Record<string, ModelVendor>> = Object.freeze({
  * plugin has never seen.
  */
 const BY_PREFIX: readonly (readonly [string, ModelVendor])[] = Object.freeze([
-  ['claude', vendor('anthropic', 'Anthropic', 'A')],
-  ['gpt-', vendor('openai', 'OpenAI', 'O')],
-  ['codex', vendor('openai', 'OpenAI', 'O')],
-  ['o1-', vendor('openai', 'OpenAI', 'O')],
-  ['o3-', vendor('openai', 'OpenAI', 'O')],
-  ['o4-', vendor('openai', 'OpenAI', 'O')],
-  ['gemini', vendor('google', 'Google', 'G')],
-  ['grok', vendor('xai', 'xAI', 'X')],
-  ['deepseek', vendor('deepseek', 'DeepSeek', 'D')],
-  ['qwen', vendor('qwen', 'Alibaba Qwen', 'Q')],
-  ['glm', vendor('zhipu', 'Z.ai', 'Z')],
-  ['kimi', vendor('moonshot', 'Moonshot AI', 'M')],
-  ['moonshot', vendor('moonshot', 'Moonshot AI', 'M')],
-  ['minimax', vendor('minimax', 'MiniMax', 'M')],
-  ['doubao', vendor('bytedance', 'ByteDance', 'B')],
-  ['seed-', vendor('bytedance', 'ByteDance', 'B')],
-  ['llama', vendor('meta', 'Meta', 'M')],
-  ['mistral', vendor('mistral', 'Mistral AI', 'M')],
-  ['longcat', vendor('meituan', 'Meituan', 'M')],
-  ['mimo', vendor('xiaomi', 'Xiaomi', 'X')],
-  ['step-', vendor('stepfun', 'StepFun', 'S')],
-  ['hunyuan', vendor('tencent', 'Tencent', 'T')],
-  ['ernie', vendor('baidu', 'Baidu', 'B')],
-  ['nova-', vendor('amazon', 'Amazon', 'A')],
-  ['ling-', vendor('inclusionai', 'InclusionAI', 'I')],
-  ['muse-spark', vendor('meta', 'Meta', 'M')],
-  ['phi-', vendor('microsoft', 'Microsoft', 'M')],
-  ['command-', vendor('cohere', 'Cohere', 'C')],
+  ['claude', vendor('anthropic', 'Anthropic', 'anthropic')],
+  ['gpt-', vendor('openai', 'OpenAI', 'openai')],
+  ['codex', vendor('openai', 'OpenAI', 'openai')],
+  ['o1-', vendor('openai', 'OpenAI', 'openai')],
+  ['o3-', vendor('openai', 'OpenAI', 'openai')],
+  ['o4-', vendor('openai', 'OpenAI', 'openai')],
+  ['gemini', vendor('google', 'Google', 'google')],
+  ['grok', vendor('xai', 'xAI', 'xai')],
+  ['deepseek', vendor('deepseek', 'DeepSeek', 'deepseek')],
+  ['qwen', vendor('qwen', 'Alibaba Qwen', 'alibaba')],
+  ['glm', vendor('zhipu', 'Z.ai', 'zhipuai')],
+  ['kimi', vendor('moonshot', 'Moonshot AI', 'moonshotai')],
+  ['moonshot', vendor('moonshot', 'Moonshot AI', 'moonshotai')],
+  ['minimax', vendor('minimax', 'MiniMax', 'minimax')],
+  ['doubao', vendor('bytedance', 'ByteDance', 'bytedance-seed')],
+  ['seed-', vendor('bytedance', 'ByteDance', 'bytedance-seed')],
+  ['llama', vendor('meta', 'Meta', 'meta')],
+  ['mistral', vendor('mistral', 'Mistral AI', 'mistral')],
+  ['longcat', vendor('meituan', 'Meituan', 'meituan')],
+  ['mimo', vendor('xiaomi', 'Xiaomi', 'xiaomi')],
+  ['step-', vendor('stepfun', 'StepFun', 'stepfun')],
+  ['hunyuan', vendor('tencent', 'Tencent', 'tencent')],
+  ['ernie', vendor('baidu', 'Baidu')],
+  ['nova-', vendor('amazon', 'Amazon', 'amazon')],
+  ['ling-', vendor('inclusionai', 'InclusionAI', 'inclusionai')],
+  ['muse-spark', vendor('meta', 'Meta', 'meta')],
+  ['phi-', vendor('microsoft', 'Microsoft', 'microsoft')],
+  ['command-', vendor('cohere', 'Cohere', 'cohere')],
 ])
 
 /** The owner segment of a `vendor/model` id, lowercased and trimmed. */
