@@ -21,6 +21,7 @@ import { callSubscriptionsAuth, SubscriptionsAuthError } from './subscriptions-r
 import { ModalityIcons, VendorMark } from './ModelIcons.js'
 import type { InputModality } from '../providers/modality.js'
 import { LAB_BADGES } from './lab-badges.js'
+import { LOCAL_LAB_BADGES } from './local-lab-badges.js'
 import { normalizeLabLogo } from '../lab-logo.js'
 export { callSubscriptionsAuth, SubscriptionsAuthError } from './subscriptions-rpc.js'
 
@@ -1019,23 +1020,31 @@ export function modelDefaultsSignature(
 }
 
 /**
- * The lab logos the rows draw from: the host's live answer over the vendored set.
+ * The lab logos the rows draw from: hand-supplied over the host's live answer over the
+ * vendored set.
  *
- * Called with `undefined` when the `labBadges` call failed or was never made, so
- * the vendored snapshot is exactly what an unavailable host degrades to. A lab
- * neither source has draws NOTHING — the point of the whole arrangement, and the
- * reason there is no drawing to fall back to.
+ * Precedence, and why: a mark placed in `lab-logos/` is a deliberate human choice about
+ * a specific product, so it outranks anything fetched. The host's live answer outranks
+ * the bundle it shipped with, so a running build never regresses to an older snapshot.
  *
- * The host validates what it sends, but this re-checks anyway: the markup is
- * injected into the page as HTML, so a blob that is not a complete inert `<svg>`
- * must never reach the DOM. Normalizing here also means the rows do not have to
- * care whether a mark came from this bundle or from the host.
+ * Called with `undefined` when the `labBadges` call failed or was never made, so the
+ * vendored set is exactly what an unavailable host degrades to.
+ *
+ * The host validates what it sends, but this re-checks anyway: the markup is injected
+ * into the page as HTML, so a blob that is not a complete inert `<svg>` must never
+ * reach the DOM. Normalizing here also means the rows do not have to care whether a
+ * mark came from this bundle, from `lab-logos/`, or from the host.
  * @param remote - the host's `labBadges` answer, when it has been fetched.
  * @returns the logos to render from.
  */
 export function mergeLabBadges(remote: Readonly<Record<string, string>> | undefined): Readonly<Record<string, string>> {
   const merged: Record<string, string> = { ...LAB_BADGES }
   for (const [lab, markup] of Object.entries(remote ?? {})) {
+    const normalized = normalizeLabLogo(markup)
+    if (normalized !== undefined) merged[lab] = normalized
+  }
+  // Hand-supplied last, so it wins over both the bundle and the host.
+  for (const [lab, markup] of Object.entries(LOCAL_LAB_BADGES)) {
     const normalized = normalizeLabLogo(markup)
     if (normalized !== undefined) merged[lab] = normalized
   }
@@ -1060,7 +1069,7 @@ export function labsNeedingBadges(
   for (const list of Object.values(models)) {
     for (const model of list ?? []) {
       const lab = model.vendor?.lab
-      if (lab === undefined || LAB_BADGES[lab] !== undefined) continue
+      if (lab === undefined || LAB_BADGES[lab] !== undefined || LOCAL_LAB_BADGES[lab] !== undefined) continue
       labs.add(lab)
     }
   }
@@ -2787,9 +2796,9 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                       {visibilityLoading[id] === true && models === undefined && (
                         <p style={styles.statusLine}>{t('visibilityLoading')}</p>
                       )}
-                      /* The absence is stated where the list would have been, rather than
-                          leaving an empty box that reads as "no models". Nothing is
-                          substituted: no greyed-out rows, no placeholder ids. */
+                      {/* The absence is stated where the list would have been, rather
+                          than leaving an empty box that reads as "no models". Nothing
+                          is substituted: no greyed-out rows, no placeholder ids. */}
                       {notFetched !== undefined && (
                         <p style={styles.errorLine}>
                           {t('visibilityNotFetched', { what: notFetched.what })}

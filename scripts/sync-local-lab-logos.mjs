@@ -1,0 +1,179 @@
+/**
+ * Generate `src/client/local-lab-badges.ts` from the marks kept in `lab-logos/`.
+ *
+ * WHY THIS EXISTS SEPARATELY FROM `fetch-lab-badges.mjs`
+ *
+ * That script vendors what models.dev publishes. models.dev does NOT publish a logo
+ * for every lab, and for some — `bytedance-seed` (Doubao), `stepfun` — the logo URL
+ * answers HTTP 200 with its generic 1421-byte placeholder instead of a 404, so there is
+ * nothing to vendor. Those marks are supplied by hand here instead.
+ *
+ * A file placed in `lab-logos/` is named after its models.dev LAB SLUG, and takes
+ * PRIORITY over the fetched one. `tencent` is the case that needs saying out loud: it
+ * has a real models.dev logo, and the hand-provided Hunyuan mark deliberately wins,
+ * because a lab slug can cover more than one product and the specific mark is the
+ * better attribution.
+ *
+ * The models.dev PLACEHOLDER is vendored too, as `DEFAULT_LAB_LOGO`, for the marks that
+ * are still missing after both sources. That is a deliberate choice and it is not a
+ * fabrications: the placeholder is models.dev's own neutral generic icon, so drawing it
+ * asserts no company identity at all — unlike a hand-drawn lookalike, which would.
+ *
+ * Usage: `node scripts/sync-local-lab-logos.mjs [--check]`
+ *   (no flag) write the module
+ *   --check   report drift and exit 1 if the file is stale, 0 when current, 2 on error
+ *
+ * @module dsh-subscription-hub/scripts/sync-local-lab-logos
+ */
+
+import { readFile, readdir, writeFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
+
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
+const sourceDir = join(repoRoot, 'lab-logos')
+const outputPath = join(repoRoot, 'src', 'client', 'local-lab-badges.ts')
+const PLACEHOLDER_URL = 'https://models.dev/logos/labs/__no-such-lab__svg.svg'
+
+/**
+ * Reduce any source SVG to the shape the client renders.
+ *
+ * Three fixes, all required by the marks as supplied:
+ *   1. The XML declaration and DOCTYPE are stripped. The client injects this markup as
+ *      HTML, and its guard refuses `<!DOCTYPE` outright, so a mark carrying one is
+ *      discarded as unsafe.
+ *   2. The root's `width`/`height`/`style`/`class`/`id` are dropped and pinned to
+ *      100%/100%, so one badge cannot render at a different size from another. The
+ *      sources disagree wildly — two are `1024x1024` viewBoxes with `width="200"`, one
+ *      is a 36-unit Illustrator frame — and the rendered box is what unifies them.
+ *   3. `viewBox` is KEPT. It is the coordinate system the path data is written in;
+ *      dropping it would scale every mark wrong.
+ *
+ * Path data is never rewritten: a hand-adjusted path is how a mark quietly becomes a
+ * different mark.
+ * @param raw - the source file's contents.
+ * @returns the renderable markup, or undefined when the file is not a usable SVG.
+ */
+export function normalizeLocalLogo(raw) {
+  let svg = raw
+    .replace(/<\?xml[\s\S]*?\?>/g, '')
+    .replace(/<!DOCTYPE[\s\S]*?>/gi, '')
+    // Illustrator/editor METADATA is not part of the mark. One supplied file carries a
+    // 36 KB base64 PGF blob inside `<metadata>` — 78% of that file — and shipping it
+    // would inflate the bundle for pixels nobody can see.
+    .replace(/<metadata[\s\S]*?<\/metadata>/gi, '')
+    .replace(/\s*<!--[\s\S]*?-->/g, '')
+    .trim()
+  const start = svg.indexOf('<svg')
+  if (start < 0) return undefined
+  svg = svg.slice(start)
+  const openEnd = svg.indexOf('>')
+  if (openEnd < 0) return undefined
+  const root = svg.slice(0, openEnd)
+  const attrs = root
+    .replace(/^<svg\b/, '')
+    .replace(/\s(?:width|height|style|class|id|t|p-id|data-name|x|y)\s*=\s*"[^"]*"/gi, '')
+    .trim()
+  const head = attrs === ''
+    ? '<svg width="100%" height="100%"'
+    : `<svg ${attrs} width="100%" height="100%"`
+  const out = `${head}${svg.slice(openEnd)}`.trim()
+  if (!out.startsWith('<svg') || !out.endsWith('</svg>')) return undefined
+  if (/<script|on\w+\s*=|javascript:|<!ENTITY|<!DOCTYPE|<foreignObject/i.test(out)) return undefined
+  return out
+}
+
+/** Fetch models.dev's generic placeholder, the mark used when a lab has none. */
+async function fetchPlaceholder() {
+  const response = await fetch(PLACEHOLDER_URL, { headers: { 'User-Agent': 'Mozilla/5.0' } })
+  if (!response.ok) throw new Error(`placeholder fetch answered HTTP ${String(response.status)}`)
+  const body = await response.text()
+  const logo = normalizeLocalLogo(body)
+  if (logo === undefined) throw new Error('the placeholder did not normalize into a usable SVG')
+  return logo
+}
+
+/** Build the module source. */
+function render(localBadges, defaultLogo) {
+  const entries = Object.entries(localBadges)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([slug, svg]) => `  ${JSON.stringify(slug)}: ${JSON.stringify(svg)},`)
+    .join('\n')
+  return `/**
+ * Hand-supplied lab marks, plus models.dev's generic placeholder.
+ *
+ * GENERATED by \`scripts/sync-local-lab-logos.mjs\` — do not edit by hand. The sources
+ * live in \`lab-logos/\`, one file per models.dev lab slug.
+ *
+ * These exist because models.dev does not publish a logo for every lab, and for the
+ * missing ones its logo URL answers HTTP 200 with a generic placeholder rather than a
+ * 404 — so there is nothing to fetch and the mark is supplied by hand instead.
+ *
+ * A slug listed here WINS over the fetched one: \`tencent\` has a real models.dev logo
+ * and the hand-provided Hunyuan mark deliberately takes precedence, because a lab slug
+ * can cover more than one product and the specific mark attributes better.
+ *
+ * @module dsh-subscription-hub/client/local-lab-badges
+ */
+
+/** Hand-supplied marks, keyed by models.dev lab slug. These take priority. */
+export const LOCAL_LAB_BADGES: Readonly<Record<string, string>> = Object.freeze({
+${entries}
+})
+
+/**
+ * models.dev's own generic icon, for a lab that has no mark in either source.
+ *
+ * Not a fabrication: this is models.dev's neutral placeholder, so drawing it asserts no
+ * company identity. A hand-drawn lookalike WOULD be one, which is why none are drawn.
+ */
+export const DEFAULT_LAB_LOGO = ${JSON.stringify(defaultLogo)}
+`
+}
+
+async function main() {
+  const check = process.argv.includes('--check')
+  let files
+  try {
+    files = (await readdir(sourceDir)).filter(name => name.endsWith('.svg')).sort()
+  } catch {
+    console.error(`no ${sourceDir} directory; nothing to do`)
+    process.exit(2)
+  }
+  const local = {}
+  for (const file of files) {
+    const slug = file.slice(0, -'.svg'.length)
+    const logo = normalizeLocalLogo(await readFile(join(sourceDir, file), 'utf8'))
+    if (logo === undefined) {
+      console.error(`lab-logos/${file} did not normalize into a usable SVG — refusing to write a broken mark`)
+      process.exit(2)
+    }
+    local[slug] = logo
+  }
+  let placeholder
+  try {
+    placeholder = await fetchPlaceholder()
+  } catch (error) {
+    console.error(`could not obtain the models.dev placeholder: ${String(error)}`)
+    process.exit(2)
+  }
+  const next = render(local, placeholder)
+  let current
+  try {
+    current = await readFile(outputPath, 'utf8')
+  } catch {
+    current = undefined
+  }
+  if (current === next) {
+    console.log(`current: ${files.length} hand-supplied mark(s) + the placeholder, no drift`)
+    process.exit(0)
+  }
+  if (check) {
+    console.error('DRIFT: src/client/local-lab-badges.ts is stale; re-run without --check')
+    process.exit(1)
+  }
+  await writeFile(outputPath, next, 'utf8')
+  console.log(`wrote src/client/local-lab-badges.ts — ${files.length} hand-supplied mark(s): ${Object.keys(local).join(', ')}`)
+}
+
+await main()

@@ -212,7 +212,7 @@ import { qoderSessionFromPaste } from './providers/qoder-session.js'
 import { writeRegisteredProviders } from './startup-diagnostics.js'
 import { autoCheckinQoder, claimQoderCheckin, getQoderCheckinStatusView, recordQoderCheckin } from './providers/qoder/checkin.js'
 import type { QoderRegion } from './providers/qoder/index.js'
-import { modelVendor } from './model-vendor.js'
+import { modelVendorFor } from './model-vendor.js'
 import { createLabBadgeStore } from './lab-badge-store.js'
 import { createXSearchTool } from './tools/x-search.js'
 import { createImageGenerateTool } from './tools/image-generate.js'
@@ -1540,8 +1540,12 @@ export function apply(ctx: Context, config: Config): void {
       const { hidden, unread } = await syncDiscoveredModels(provider, modelIds)
       const rows = models.map(model => {
         // The vendor is resolved here rather than in the browser, so the client
-        // bundle carries no vendor table. It is absent when unknown, never guessed.
-        const vendor = modelVendor(model.id)
+        // bundle carries no vendor table. The NAME is consulted too, because some
+        // routes name their vendor only there: Qoder's ids are opaque pool aliases
+        // (`dmodel`, `gmodel`) while its names read `DeepSeek-V4-Pro`, `GLM-5.3`, so
+        // resolving the id alone left every Qoder row with no icon. Absent when
+        // unknown, never guessed.
+        const vendor = modelVendorFor(model.id, model.name)
         const modalities = model.inputModalities
         return {
           id: model.id,

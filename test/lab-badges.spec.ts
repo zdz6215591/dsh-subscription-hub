@@ -23,6 +23,7 @@ import {
   vendorLabBadge,
 } from '../src/lab-logo.js'
 import { LAB_BADGES, LAB_BADGE_SLUGS, LABS_WITHOUT_LOGO } from '../src/client/lab-badges.js'
+import { DEFAULT_LAB_LOGO, LOCAL_LAB_BADGES } from '../src/client/local-lab-badges.js'
 import { modelVendor } from '../src/model-vendor.js'
 import { PROBE_COOLDOWN_MS, createLabBadgeStore, labBadgesPath } from '../src/lab-badge-store.js'
 import { labsNeedingBadges, mergeLabBadges } from '../src/client/SubscriptionsSection.js'
@@ -427,38 +428,58 @@ function row(id: string, lab?: string): VisibleModelView {
   }
 }
 
-test('the client asks the host only for labs it has no vendored mark for', () => {
+test('the client asks the host only for labs it has no mark for from either bundle', () => {
   const labs = labsNeedingBadges({
     codex: [row('gpt-5.6-sol', 'openai'), row('mystery-model-9')],
     cline: [row('microsoft/mai-code-1.1-flash', 'microsoft'), row('step-3', 'stepfun'), row('microsoft/x', 'microsoft')],
   })
-  // Vendored labs are already in the bundle; a lab named twice is asked once; a
-  // model with no vendor contributes nothing.
-  assert.deepEqual(labs, ['microsoft', 'stepfun'])
+  // A bundled lab needs no request; a lab named twice is asked once; a model with no
+  // vendor contributes nothing. `stepfun` is NO LONGER requested, because `lab-logos/`
+  // supplies its mark by hand — the hand-supplied set already resolves it, so the live
+  // fetch is not spent on a lab that has a logo.
+  assert.deepEqual(labs, ['microsoft'])
   assert.deepEqual(labsNeedingBadges({}), [])
   // A provider that has not been loaded yet contributes nothing.
   assert.deepEqual(labsNeedingBadges({ codex: [] }), [])
 })
 
-test('the rows draw the host\'s answer over the vendored set, and nothing else', () => {
+test('the rows draw hand-supplied over the host over the vendored set, and nothing else', () => {
   // No host answer: the vendored snapshot, which is the whole degradation path.
   const offline = mergeLabBadges(undefined)
   assert.equal(offline.anthropic, LAB_BADGES.anthropic)
-  assert.equal(offline.microsoft, undefined, 'a lab with no logo stays blank')
+  assert.equal(offline.microsoft, undefined, 'a lab with no logo is left to the generic mark')
+  // The hand-supplied marks survive with NO host at all — that is what makes them a
+  // floor rather than a remote enhancement.
+  assert.equal(offline.stepfun, LOCAL_LAB_BADGES.stepfun)
+  assert.equal(offline.tencent, LOCAL_LAB_BADGES.tencent)
 
-  // A host answer adds a lab the bundle lacks…
-  const merged = mergeLabBadges({ stepfun: ANTHROPIC_LOGO_SVG })
-  assert.ok(merged.stepfun?.startsWith('<svg viewBox="0 0 40 40"'))
-  assert.ok(merged.stepfun.includes('width="100%" height="100%"'), 'a remote mark is normalized like a vendored one')
+  // A host answer adds a lab no bundle carries…
+  const merged = mergeLabBadges({ microsoft: ANTHROPIC_LOGO_SVG })
+  assert.ok(merged.microsoft?.startsWith('<svg viewBox="0 0 40 40"'))
+  assert.ok(merged.microsoft.includes('width="100%" height="100%"'), 'a remote mark is normalized like a vendored one')
   assert.equal(merged.anthropic, LAB_BADGES.anthropic, 'the vendored mark is still there')
+
+  // …but it does NOT displace a hand-supplied one. A file in `lab-logos/` is a
+  // deliberate human choice about a specific product, so it outranks anything fetched —
+  // including for `tencent`, where models.dev DOES publish a logo.
+  const contested = mergeLabBadges({ stepfun: ANTHROPIC_LOGO_SVG, tencent: ANTHROPIC_LOGO_SVG })
+  assert.equal(contested.stepfun, LOCAL_LAB_BADGES.stepfun, 'the hand-supplied mark wins over the host')
+  assert.equal(contested.tencent, LOCAL_LAB_BADGES.tencent, 'and over a lab models.dev does publish one for')
 
   // …and nothing that is not a complete inert logo, whatever the host sends.
   const hostile = mergeLabBadges({
-    stepfun: '<svg onload="alert(1)"></svg>',
+    microsoft: '<svg onload="alert(1)"></svg>',
     evil: '<script>alert(1)</script>',
     fragment: '<svg>',
   })
-  assert.equal(hostile.stepfun, undefined)
+  assert.equal(hostile.microsoft, undefined, 'an unsafe remote mark is refused')
   assert.equal(hostile.evil, undefined)
   assert.equal(hostile.fragment, undefined)
+
+  // A hostile value for a HAND-SUPPLIED lab cannot even reach the row: the local mark
+  // is applied last, so it replaces whatever arrived — the safe mark wins by
+  // construction, not by the hostile one being filtered first.
+  const hostileLocal = mergeLabBadges({ stepfun: '<svg onload="alert(1)"></svg>' })
+  assert.equal(hostileLocal.stepfun, LOCAL_LAB_BADGES.stepfun)
+  assert.equal(hostileLocal.stepfun.includes('onload'), false)
 })

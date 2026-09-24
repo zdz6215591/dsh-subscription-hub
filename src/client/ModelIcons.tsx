@@ -32,6 +32,7 @@
 import type { ModelVendor } from '../model-vendor.js'
 import type { InputModality } from '../providers/modality.js'
 import { vendorLabBadge } from '../lab-logo.js'
+import { DEFAULT_LAB_LOGO } from './local-lab-badges.js'
 
 /** Shared stroke geometry: one weight for every glyph in the set. */
 const STROKE = {
@@ -51,15 +52,22 @@ const MODALITY_SIZE = 14
 /**
  * The vendor mark.
  *
+ * A vendor whose lab has no real logo draws models.dev's own generic placeholder rather
+ * than nothing. That is NOT the fabrication this module otherwise refuses: the
+ * placeholder asserts no company identity, whereas a hand-drawn lookalike would assert a
+ * specific one. Rows therefore stay aligned whether or not a mark exists, and nothing
+ * manufactured ever reaches the list.
+ *
+ * The component is mounted only for a model that HAS a vendor, so a model nothing
+ * attributes to a company still draws nothing at all.
  * @param props - the vendor, and the lab logos available to draw from.
- * @returns the logo in a fixed-size box, or null when there is no real logo —
- *   which is a normal outcome, not a failure.
+ * @returns the logo in a fixed-size box.
  */
 export function VendorMark({ vendor, badges }: {
   vendor: ModelVendor
   badges: Readonly<Record<string, string>>
 }): React.JSX.Element | null {
-  const markup = vendorLabBadge(vendor.lab, badges)
+  const markup = vendorLabBadge(vendor.lab, badges) ?? DEFAULT_LAB_LOGO
   if (markup === undefined) return null
   return (
     <span

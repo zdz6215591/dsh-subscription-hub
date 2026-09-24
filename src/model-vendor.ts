@@ -188,6 +188,31 @@ export function modelVendor(modelId: string): ModelVendor | undefined {
 }
 
 /**
+ * The vendor of one model, from its id AND, when the id does not name one, its name.
+ *
+ * The second half is load-bearing rather than a nicety: Qoder's wire ids are opaque
+ * POOL ALIASES — `dmodel`, `dfmodel`, `qmodel_38max`, `gmodel`, `mmodel` — which name
+ * no company at all, while the display name the upstream also supplies does
+ * (`DeepSeek-V4-Pro`, `Qwen3.8-Max`, `GLM-5.3`). Resolving only the id therefore left
+ * every Qoder row with no vendor and so no icon, which is exactly what was reported.
+ *
+ * The name may carry decoration this hub added (a rate suffix like ` · x0.5`, or the
+ * disambiguating `(dfmodel)`, or upstream's own `正式版`), and the family rules match on
+ * a leading segment, so those suffixes do not interfere.
+ *
+ * A name that names no vendor still yields `undefined` — `Auto` is Qoder's own router
+ * and must not be attributed to a company that does not make it.
+ * @param id - the wire model id.
+ * @param name - the model's display name, when one was supplied.
+ * @returns the vendor, or undefined when neither the id nor the name names one.
+ */
+export function modelVendorFor(id: string, name?: string): ModelVendor | undefined {
+  const fromId = modelVendor(id)
+  if (fromId !== undefined) return fromId
+  return name === undefined || name === '' ? undefined : modelVendor(name)
+}
+
+/**
  * The vendors present in a model list, in first-seen order.
  *
  * Used to build the legend strip above the list, so a reader can see at a glance
