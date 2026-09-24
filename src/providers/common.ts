@@ -544,6 +544,42 @@ export function rateSuffix(rate: number | string | undefined): string {
   return ` · x${fixed}`
 }
 
+/** A number without pointless trailing zeros, for dense one-line labels. */
+function trimNumber(value: number): string {
+  if (Number.isInteger(value)) return String(value)
+  return value.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')
+}
+
+/**
+ * The display-name suffix for a model's published ABSOLUTE price.
+ *
+ * For a route that resells third-party models at list prices, the honest per-model
+ * cost signal is a price rather than a ratio: CommandCode and Cline both publish
+ * US dollars per million tokens and NEITHER publishes a multiplier, so their
+ * multiplier slot is empty and a price is what actually answers "what does this
+ * model cost me?".
+ *
+ * Formatted `· $in/$out` — input then output, per million tokens — with the unit
+ * spelled out in the model's `description`, because a bare pair of numbers in a
+ * one-line row cannot carry the "per 1M tokens" part and a guessed unit is worse
+ * than none.
+ *
+ * BOTH rates must be known: a suffix built from one of them would still read as a
+ * pair, and be wrong. Upstream publishing `0` is a real free rate and is shown as
+ * such.
+ * @param rates - the published per-million rates, when known.
+ * @returns the suffix, or an empty string when no complete price is known.
+ */
+export function priceSuffix(rates: { input: number; output: number } | undefined): string {
+  if (rates === undefined) return ''
+  if (!Number.isFinite(rates.input) || !Number.isFinite(rates.output)) return ''
+  if (rates.input < 0 || rates.output < 0) return ''
+  return ` · $${trimNumber(rates.input)}/$${trimNumber(rates.output)}`
+}
+
+/** The unit legend that accompanies {@link priceSuffix} in a model description. */
+export const PRICE_UNIT_LEGEND = 'USD per 1M tokens · input/output'
+
 /**
  * Display name for a wire reasoning-effort identifier.
  *

@@ -25,9 +25,10 @@ import type { CommandCodeSession } from '../auth/store.js'
 import type { ProviderId } from '../auth/store.js'
 import { proxiedFetch } from '../http.js'
 import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from './accounts.js'
-import { httpLlmError, idleWatchdog, mapFetchFailure } from './common.js'
+import { httpLlmError, idleWatchdog, mapFetchFailure, PRICE_UNIT_LEGEND, priceSuffix } from './common.js'
 import { readCommandCodeCatalog, writeCommandCodeCatalog } from './commandcode-catalog-cache.js'
 import { COMMANDCODE_MODELS_VERSION, COMMANDCODE_PUBLISHED_MODELS } from './commandcode-models.js'
+import { resolveModelPrice } from '../stats/model-prices.js'
 import type { FetchFn, ModelEntry, ProviderUsage } from './common.js'
 import type { PoolAdapter } from './pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, subscriptionRetryPolicy } from './rate-limit.js'
@@ -1192,10 +1193,18 @@ export function isUnpublishedModel(model: string): boolean {
 
 /** Project a sized catalog model into the harness model-info shape. */
 function toModelInfo(catalog: CommandCodeCatalogModel, provider: string): LlmModelInfo {
+  // The absolute price rides the display name, with its unit in the description.
+  // CommandCode exposes no multiplier at all — its own API catalog carries seven
+  // fields and none is rate-shaped — so a price is the only per-model cost signal
+  // it discloses, and the vendored table covers every one of the 81 served models.
+  const price = resolveModelPrice(catalog.id)
+  const rates = price?.rates
+  const suffix = priceSuffix(rates)
   return {
     provider,
     id: catalog.id,
-    name: catalog.name,
+    name: `${catalog.name}${suffix}`,
+    ...suffix === '' ? {} : { description: PRICE_UNIT_LEGEND },
     inputModalities: isCommandCodeVisionModel(catalog.id) ? ['text', 'image'] : ['text'],
   }
 }

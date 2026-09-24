@@ -27,6 +27,7 @@ import type { InputModality } from '../modality.js'
  */
 
 import type { LlmModelInfo } from '@deepseek-ai/dsh-llm'
+import { PRICE_UNIT_LEGEND, priceSuffix } from '../common.js'
 import { proxiedFetch } from '../../http.js'
 import type { FetchFn } from '../common.js'
 
@@ -68,6 +69,13 @@ export interface ClineModel {
    * then offers the gateway-wide list rather than hiding levels that do work.
    */
   efforts?: readonly string[]
+  /**
+   * The upstream's published ABSOLUTE price, in US dollars per 1M tokens.
+   *
+   * Absent when models.dev publishes no complete pair for the model — a partial
+   * price is not shown, because a lone input or output rate still reads as a pair.
+   */
+  price?: { input: number; output: number }
   /** Source the row's metadata came from. */
   source: ClineCatalogSource
 }
@@ -174,6 +182,22 @@ function positiveNumber(value: unknown): number | undefined {
   return undefined
 }
 
+/**
+ * A published rate, which unlike a context window MAY legitimately be zero.
+ *
+ * `positiveNumber` is right for a window — zero is not a window — but wrong for a
+ * price: upstream publishes `0` for a free model, and rejecting it would hide the
+ * cheapest rows in the list.
+ */
+function finiteNonNegative(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return value
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed) && parsed >= 0) return parsed
+  }
+  return undefined
+}
+
 /** Map an `architecture.input_modalities` list onto harness modalities. */
 function inputModalities(value: unknown): InputModality[] | undefined {
   if (!Array.isArray(value)) return undefined
@@ -257,10 +281,23 @@ export function parseModelsDevEfforts(clinePassId: string, registry: unknown): P
   // normalizer keeps `video` as video and folds `pdf` onto `file`.
   const input = inputRaw === undefined ? undefined : normalizeInputModalities(inputRaw)
   const reasoning = entry.reasoning === true || efforts.length > 0
+  // models.dev publishes ABSOLUTE prices for this registry — a `cost` block in US
+  // dollars per 1M tokens — and this parser read `limit`, `modalities` and
+  // `reasoning_options` out of the very same entry while DISCARDING `cost`. Cline
+  // publishes no multiplier anywhere, so a price is the only per-model cost signal
+  // it has. Both rates must be present: one alone would still render as a pair and
+  // be wrong.
+  const cost = isRecord(entry.cost) ? entry.cost : undefined
+  const inputRate = finiteNonNegative(cost?.input)
+  const outputRate = finiteNonNegative(cost?.output)
+  const price = inputRate === undefined || outputRate === undefined
+    ? undefined
+    : { input: inputRate, output: outputRate }
   return {
     ...contextWindow === undefined ? {} : { contextWindow },
     ...maxTokens === undefined ? {} : { maxTokens },
     ...input === undefined ? {} : { input },
+    ...price === undefined ? {} : { price },
     ...efforts.length === 0 ? {} : { efforts: ['none', ...efforts.filter(effort => effort !== 'none')] },
     reasoning,
     source: 'models.dev',
@@ -284,6 +321,10 @@ export function mergeClineModel(id: string, live: { cline?: Partial<ClineModel>;
   const dev = live.modelsDev ?? {}
   const own = live.cline ?? {}
   const efforts = dev.efforts ?? own.efforts
+  // The price has to be carried across this merge explicitly: it builds a NEW
+  // object, so a field not listed here is silently dropped. models.dev is the only
+  // source that publishes one.
+  const price = dev.price ?? own.price ?? base.price
   return {
     id: base.id,
     name: base.name,
@@ -292,16 +333,22 @@ export function mergeClineModel(id: string, live: { cline?: Partial<ClineModel>;
     input: dev.input ?? own.input ?? base.input,
     reasoning: dev.reasoning ?? own.reasoning ?? base.reasoning,
     ...efforts === undefined ? {} : { efforts },
+    ...price === undefined ? {} : { price },
     source: dev.contextWindow !== undefined || dev.efforts !== undefined ? 'models.dev' : own.contextWindow !== undefined ? 'cline' : base.source,
   }
 }
 
 /** Project one catalog model into the harness model-info shape. */
 export function toClineModelInfo(model: ClineModel, provider: string): LlmModelInfo {
+  // The absolute price rides the display name with its unit in the description, the
+  // same way the multiplier does on the routes that publish one. Cline Pass has no
+  // multiplier, so this is the only per-model cost signal it discloses.
+  const suffix = priceSuffix(model.price)
   return {
     provider,
     id: model.id,
-    name: model.name,
+    name: `${model.name}${suffix}`,
+    ...suffix === '' ? {} : { description: PRICE_UNIT_LEGEND },
     inputModalities: [...model.input],
   }
 }

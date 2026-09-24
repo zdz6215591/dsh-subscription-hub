@@ -272,6 +272,16 @@ const TRAE_REMOTE_DIRECTORY_FUNCTIONS: readonly string[] = [
  * model only one function advertises (the agent-only and coder-only rosters)
  * is not silently hidden. A config the callability table proves uncallable is
  * dropped rather than listed.
+ *
+ * **The URL must be ABSOLUTE.** This used to pass a bare path (`/models?...`) and
+ * rely on the injected fetcher to resolve it, but `proxiedFetch` hands its input
+ * straight to global `fetch`, which cannot parse a relative URL — so the call threw
+ * every single time and the `catch` below turned it into `undefined`. Nothing
+ * surfaced as an error, because `fetchTraeModels` treats a missing directory as a
+ * reason to serve the static fallback: the route silently listed 8 hardcoded
+ * models instead of the live roster, with no rates, no per-model context windows
+ * and no advertised reasoning levels. The base comes from the region table, which
+ * is the authority for the directory host on both regions.
  */
 export async function fetchRemoteModels(
   accessToken: string,
@@ -289,7 +299,8 @@ export async function fetchRemoteModels(
     Referer: 'https://solo.trae.cn/',
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
   }
-  const url = `/models?functions=${TRAE_REMOTE_DIRECTORY_FUNCTIONS.join(',')}`
+  const base = REGION_GATEWAYS[regionOfEdition(edition)].remote
+  const url = `${base}/models?functions=${TRAE_REMOTE_DIRECTORY_FUNCTIONS.join(',')}`
   try {
     const response = await fetchFn(url, { headers, signal: signal ?? AbortSignal.timeout(DISCOVERY_TIMEOUT_MS) })
     if (!response.ok) return undefined
@@ -496,14 +507,20 @@ export function mergeTraeModelSources(remote: readonly TraeModel[], wire: readon
     if (match === undefined) continue
     merged.push({
       id: row.id,
-      // The credit multiplier rides the display name, as the reference formats it
-      // (`name · x0.78`): it is the only per-model cost signal this route
-      // discloses, and it belongs where a model is chosen. `row.name` itself stays
-      // undecorated so every join on the plain name keeps working.
-      name: `${row.name}${rateSuffix(row.creditMultiplier)}`,
+      // `row.name` stays UNDECORATED here: the rate is appended in
+      // `toTraeModelInfo`, the single projection into `LlmModelInfo`, so every
+      // path that reaches the UI carries it. Decorating here only covered the
+      // merged path and left the raw-remote and fallback returns bare.
+      name: row.name,
       ...row.contextWindow === undefined ? {} : { contextWindow: row.contextWindow },
       ...row.maxContextWindow === undefined ? {} : { maxContextWindow: row.maxContextWindow },
       ...row.maxTokens === undefined ? {} : { maxTokens: row.maxTokens },
+      // The rate comes from the DIRECTORY row (the wire roster does not publish
+      // one). It has to be carried across this merge explicitly: the merge builds a
+      // new object, so omitting a field here silently drops it, and the rate was
+      // lost exactly that way — the directory parsed it and every model arrived
+      // without one.
+      ...row.creditMultiplier === undefined ? {} : { creditMultiplier: row.creditMultiplier },
       ...row.efforts === undefined ? {} : { efforts: row.efforts },
       // The owning function comes from the WIRE row: it is what the chat call
       // replays, and the skeleton does not know it.
@@ -557,12 +574,24 @@ export async function fetchTraeModels(
   return merged.length > 0 ? merged : [...TRAE_FALLBACK_MODELS]
 }
 
-/** Project one Trae model into the harness model-info shape. */
+/**
+ * Project one Trae model into the harness model-info shape.
+ *
+ * The ONE place the credit multiplier is appended, deliberately: `fetchTraeModels`
+ * has three returns (the merged roster, the raw directory when the wire roster did
+ * not answer, and the static fallback) and the adapter also serves a cached list,
+ * so decorating at any single upstream point misses the others. Doing it here
+ * covers all of them, and `resolveOwnModel` reads the same figure off the model
+ * itself, so the picker and the resolved metadata cannot disagree.
+ *
+ * `model.name` stays undecorated everywhere else, so joins and lookups keyed on the
+ * upstream name keep working.
+ */
 export function toTraeModelInfo(model: TraeModel, provider: string): LlmModelInfo {
   return {
     provider,
     id: model.id,
-    name: model.name,
+    name: `${model.name}${rateSuffix(model.creditMultiplier)}`,
     inputModalities: ['text'],
     ...model.contextWindow === undefined ? {} : { context: { contextWindow: model.contextWindow } },
   }
