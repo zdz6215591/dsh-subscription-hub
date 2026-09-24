@@ -28,9 +28,44 @@ import { dirname } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { proxiedFetch } from '../../http.js'
-// The SAME schedule helpers the CodeBuddy and Trae routes use, so all three
-// check-ins pick a random morning time by one rule rather than three.
-import { generateMorningTargetTime, localDateString } from '../codebuddy.js'
+// The SAME schedule WINDOW helper the CodeBuddy and Trae routes use, so all three
+// check-ins pick a random morning time by one rule rather than three. The DAY key is
+// deliberately NOT shared — see `qoderBenefitDay`, which exists because this vendor's
+// day does not begin at local midnight.
+import { generateMorningTargetTime } from '../codebuddy.js'
+
+/**
+ * The hour, UTC+8, at which Qoder posts a new day's benefit campaign.
+ *
+ * The reference records this as the vendor's reset cycle, and it is observable: a claim
+ * made on 2026-09-24 at 10:48 UTC+8 succeeded, while the same account at 01:23 UTC+8 the
+ * next calendar day was still being answered from the previous day's campaign.
+ */
+const QODER_RESET_HOUR = 10
+
+/**
+ * The BENEFIT DAY an instant belongs to — the vendor's day, NOT the calendar's.
+ *
+ * This is why the check-in once reported "already claimed today" and "not checked in" at
+ * the same time. The ledger and the status view keyed on the LOCAL calendar date while
+ * the vendor resets at {@link QODER_RESET_HOUR} UTC+8, so for the ten hours between local
+ * midnight and the reset the two disagreed: the ledger correctly held the previous
+ * benefit day, the card compared it against the new calendar date, and the message and the
+ * status flatly contradicted each other.
+ *
+ * Judging by the vendor's day makes both agree, because there is then only one answer to
+ * "which day is this" and it is the vendor's.
+ * @param now - the instant to classify.
+ * @returns `YYYY-MM-DD` for the benefit day, in UTC+8.
+ */
+export function qoderBenefitDay(now = new Date()): string {
+  // Shift into UTC+8 wall-clock first, then step back a day if the reset has not passed.
+  const wall = new Date(now.getTime() + (now.getTimezoneOffset() + 480) * 60_000)
+  if (wall.getHours() < QODER_RESET_HOUR) wall.setDate(wall.getDate() - 1)
+  const month = String(wall.getMonth() + 1).padStart(2, '0')
+  const day = String(wall.getDate()).padStart(2, '0')
+  return `${String(wall.getFullYear())}-${month}-${day}`
+}
 import type { QoderRegion } from './region.js'
 import { getQoderCampaignsUrl, getQoderClaimCampaignUrl, resolveQoderEndpoints } from './region.js'
 import { openApiJsonRequest } from './request.js'
@@ -225,10 +260,10 @@ export async function claimQoderCheckin(
 }
 
 /**
- * Run the daily check-in for every account, once per UTC+8 day.
+ * Run the daily check-in for every account, once per benefit day.
  *
- * Structurally IDENTICAL to the CodeBuddy and Trae schedulers — the same
- * `localDateString` day key, the same `generateMorningTargetTime` window, the same
+ * Structurally the SAME as the CodeBuddy and Trae schedulers — the same
+ * `generateMorningTargetTime` window, the same
  * `lastDate`/`scheduledDate`/`scheduledTime` ledger and the same
  * schedule-then-wait shape — because a per-provider check-in that behaves
  * differently from the other two is a bug in waiting, not a feature.
@@ -254,12 +289,12 @@ export async function autoCheckinQoder(
   now = new Date(),
 ): Promise<QoderCheckinOutcome | undefined> {
   if (accounts.length === 0) return undefined
-  const todayStr = localDateString(now)
+  const todayStr = qoderBenefitDay(now)
   const state = await readQoderCheckinState()
 
   if (state.lastDate === todayStr) {
     const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
-    const tomorrowStr = localDateString(tomorrow)
+    const tomorrowStr = qoderBenefitDay(tomorrow)
     if (state.scheduledDate !== tomorrowStr || state.scheduledTime === undefined) {
       state.scheduledDate = tomorrowStr
       state.scheduledTime = generateMorningTargetTime(tomorrow)
@@ -322,7 +357,7 @@ export interface QoderCheckinStatusView {
  * @param now - the instant the claim landed.
  */
 export async function recordQoderCheckin(message: string, now = new Date()): Promise<void> {
-  const todayStr = localDateString(now)
+  const todayStr = qoderBenefitDay(now)
   const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
   const previous = await readQoderCheckinState()
   await writeQoderCheckinState({
@@ -330,7 +365,7 @@ export async function recordQoderCheckin(message: string, now = new Date()): Pro
     lastDate: todayStr,
     lastTime: now.getTime(),
     lastMessage: message,
-    scheduledDate: localDateString(tomorrow),
+    scheduledDate: qoderBenefitDay(tomorrow),
     scheduledTime: generateMorningTargetTime(tomorrow),
   })
 }
@@ -346,11 +381,11 @@ export async function recordQoderCheckin(message: string, now = new Date()): Pro
  * @returns the ledger's public face, in the shared view shape.
  */
 export async function getQoderCheckinStatusView(now = new Date()): Promise<QoderCheckinStatusView> {
-  const todayStr = localDateString(now)
+  const todayStr = qoderBenefitDay(now)
   const state = await readQoderCheckinState()
   if (state.lastDate === todayStr) {
     const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
-    const tomorrowStr = localDateString(tomorrow)
+    const tomorrowStr = qoderBenefitDay(tomorrow)
     if (state.scheduledDate !== tomorrowStr || state.scheduledTime === undefined) {
       state.scheduledDate = tomorrowStr
       state.scheduledTime = generateMorningTargetTime(tomorrow)

@@ -17,11 +17,12 @@ import {
   claimQoderCheckin,
   fetchQoderCampaigns,
   getQoderCheckinStatusView,
+  qoderBenefitDay,
   readQoderCheckinState,
   writeQoderCheckinState,
 } from '../src/providers/qoder/checkin.js'
 import type { FetchFn } from '../src/providers/common.js'
-// The shared day helper the ledger uses; Qoder has no day concept of its own.
+// Qoder's OWN day concept, because this vendor's day does not start at local midnight.
 import { localDateString } from '../src/providers/codebuddy.js'
 
 /** Run one case with DSH_HOME pointed at a scratch tree. */
@@ -192,7 +193,10 @@ test('the ledger round-trips and treats a corrupt file as empty', async () => {
 
 test('the status view matches the shape the card already renders', async () => {
   await withHome(async () => {
-    const today = localDateString()
+    // Seeded with the day key the LEDGER uses, which is the vendor's benefit day. Seeding
+    // with the calendar day is exactly the mismatch that produced "already claimed today"
+    // alongside "not checked in", and this test caught it.
+    const today = qoderBenefitDay()
     await writeQoderCheckinState({ lastDate: today, lastTime: Date.now(), lastMessage: 'claimed 100 credits' })
     const view = await getQoderCheckinStatusView()
     // The same keys the CodeBuddy and Trae routes answer with, so the card's
@@ -230,5 +234,44 @@ test('the ledger is written where the plugin keeps its other state', async () =>
       .filter(name => name.endsWith('.tmp'))
     assert.deepEqual(leftovers, [])
     assert.match(readFileSync(path, 'utf8'), /2026-09-24/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The benefit DAY, which is the vendor's and not the calendar's.
+// ---------------------------------------------------------------------------
+
+test('the benefit day turns over at 10:00 UTC+8, not at local midnight', () => {
+  // THE BUG THIS EXISTS FOR: the ledger and the status view keyed on the local calendar
+  // date while the vendor resets at 10:00 Beijing, so for the ten hours after local
+  // midnight the card reported "already claimed today" and "not checked in" AT THE SAME
+  // TIME — the message read the previous benefit day correctly, the status compared it
+  // against the new calendar date. One day key, the vendor's, makes them agree.
+  const at = (iso: string): string => qoderBenefitDay(new Date(iso))
+  assert.equal(at('2026-09-25T00:30:00+08:00'), '2026-09-24', 'just after local midnight is still the previous benefit day')
+  assert.equal(at('2026-09-25T01:23:00+08:00'), '2026-09-24', 'the reported moment')
+  assert.equal(at('2026-09-25T09:59:59+08:00'), '2026-09-24', 'one second before the reset')
+  assert.equal(at('2026-09-25T10:00:00+08:00'), '2026-09-25', 'the reset itself belongs to the new day')
+  assert.equal(at('2026-09-25T22:00:00+08:00'), '2026-09-25', 'and the rest of the day follows')
+})
+
+test('the benefit day is the UTC+8 day, not the machine zone', () => {
+  // 2026-09-25T03:00Z is 11:00 in Beijing — after the reset, so the 25th — while a
+  // machine in UTC would call it the 25th at 03:00 and a US machine the 24th.
+  assert.equal(qoderBenefitDay(new Date('2026-09-25T03:00:00Z')), '2026-09-25')
+  // 2026-09-24T18:00Z is 02:00 Beijing on the 25th, i.e. BEFORE the reset: the 24th.
+  assert.equal(qoderBenefitDay(new Date('2026-09-24T18:00:00Z')), '2026-09-24')
+})
+
+test('a claim recorded for one benefit day is not reported as today once the day turns', async () => {
+  await withHome(async () => {
+    await writeQoderCheckinState({ lastDate: '2026-09-24', lastTime: 1, lastMessage: 'claimed 100 credits' })
+    // 01:23 on the 25th still belongs to the 24th, so the recorded day IS the current
+    // benefit day and the card must say so — the whole point of the fix.
+    const beforeReset = await getQoderCheckinStatusView(new Date('2026-09-25T01:23:00+08:00'))
+    assert.equal(beforeReset.checkedInToday, true, 'the previous benefit day is still current before 10:00')
+    // After the reset the same ledger is a day behind, and the card must say THAT.
+    const afterReset = await getQoderCheckinStatusView(new Date('2026-09-25T10:00:00+08:00'))
+    assert.equal(afterReset.checkedInToday, false, 'the day turns at 10:00')
   })
 })
