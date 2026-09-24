@@ -7,20 +7,30 @@
 import { ReasoningEffortId, type LlmModelInfo, type LlmModelReasoningInfo, type LlmResolvedModelInfo, type ModelModality } from '@deepseek-ai/dsh-llm'
 import { AGY_ENDPOINT_FALLBACKS, getAgyBootstrapClientMetadata, getAgyBootstrapUserAgent } from './constants.js'
 import { proxiedFetch } from '../../http.js'
-import { AGY_PUBLIC_MODELS, catalogModel, cleanAgyDisplayName, isChatCallableModelId, isLevelThinkingModel } from './catalog.js'
+import { AGY_PUBLIC_MODELS, antigravityEfforts, catalogModel, cleanAgyDisplayName, isChatCallableModelId, isLevelThinkingModel } from './catalog.js'
 import type { ProviderUsage, UsageWindow } from '../common.js'
 
 export const AGY_PROVIDER = 'agy'
 
-/** Level-thinking: single id + selectable low/medium/high via thinkingLevel. Default is UI hint, not wire default. */
-const LEVEL_REASONING: LlmModelReasoningInfo = Object.freeze({
-  efforts: Object.freeze([
-    { id: ReasoningEffortId('low'), name: 'Low' },
-    { id: ReasoningEffortId('medium'), name: 'Medium' },
-    { id: ReasoningEffortId('high'), name: 'High' },
-  ] as const),
-  defaultEffort: ReasoningEffortId('medium'),
-} as const)
+/**
+ * The level picker for one model, from its FAMILY rather than one set for everything.
+ *
+ * `antigravityEfforts` owns the table and the reasoning behind it; this only shapes it
+ * into the harness contract. The default is a UI hint (which level the picker opens
+ * on), not a wire default — the request carries whatever the user chose.
+ */
+function levelReasoningFor(model: string): LlmModelReasoningInfo | undefined {
+  const ids = antigravityEfforts(model)
+  if (ids.length === 0) return undefined
+  return {
+    efforts: ids.map(id => ({
+      id: ReasoningEffortId(id),
+      name: id === 'off' ? 'Off' : id === 'xhigh' ? 'Extra High' : id.charAt(0).toUpperCase() + id.slice(1),
+    })),
+    // `medium` where the family has it, otherwise the middle of what it does offer.
+    defaultEffort: ReasoningEffortId(ids.includes('medium') ? 'medium' : (ids[Math.floor(ids.length / 2)] ?? ids[0]!)),
+  }
+}
 
 /**
  * Input modalities per model. Image support follows the catalog's own
@@ -205,6 +215,7 @@ export function resolveAgyModel(provider: string, model: string): LlmResolvedMod
     // are gone; an unread capacity is omitted rather than guessed.
     const contextWindow = meta?.contextLength
     const maxOutputTokens = meta?.maxOutputTokens
+    const levelReasoning = levelReasoningFor(model)
     return {
       provider,
       id: model,
@@ -212,8 +223,8 @@ export function resolveAgyModel(provider: string, model: string): LlmResolvedMod
       inputModalities: inputModalitiesFor(meta),
       ...contextWindow === undefined ? {} : { context: { contextWindow } },
       ...maxOutputTokens === undefined ? {} : { defaultMaxTokens: maxOutputTokens },
-      // Return a shallow copy so callers cannot mutate the frozen singleton.
-      reasoning: { ...LEVEL_REASONING, efforts: [...LEVEL_REASONING.efforts] },
+      // The levels THIS family accepts, not one set for every level-thinking model.
+      ...levelReasoning === undefined ? {} : { reasoning: levelReasoning },
     }
   }
   return {

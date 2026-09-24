@@ -108,3 +108,44 @@ export function isLevelThinkingModel(modelId: string): boolean {
   const lower = modelId.toLowerCase()
   return lower.startsWith('gemini-3') || lower.startsWith('claude-') || lower.startsWith('gpt-oss')
 }
+
+/**
+ * Which reasoning efforts one Antigravity model actually accepts.
+ *
+ * Taken from the reference's own table
+ * (`ref-dsh-plugin-subscriptions/src/translate/antigravity-thinking.ts` →
+ * `antigravityReasoning`), which establishes these per FAMILY rather than offering one
+ * set everywhere. The hub previously handed `low, medium, high` to every level-thinking
+ * model, which over-offers on two families and under-offers on another:
+ *
+ *   claude-*                    only `high`     — the runtime takes one budget
+ *   gpt-oss-*                   only `medium`   — likewise
+ *   gemini-3.1-pro, pro-agent   `low`, `high`   — there is no third distinct level
+ *   gemini-2.5*, gemini-3*      `low`, `medium`, `high`
+ *   anything else               NONE            — no picker at all
+ *
+ * A model whose id ends in `-low` / `-medium` / `-high` has that level BOUND to it —
+ * `gemini-3.5-flash-low` IS the low variant — so it offers that single level instead of
+ * a choice it cannot make.
+ *
+ * `off` is included wherever there is any level. The reference's `antigravityThinking`
+ * accepts `effort === 'off'` for every family and emits
+ * `{ includeThoughts: false, thinkingBudget: 0 }`, so thinking can always be turned off;
+ * leaving it out is why the picker previously had no way to disable thinking.
+ *
+ * @param modelId - the wire model id.
+ * @returns the effort ids in display order, or an empty list when the model takes none.
+ */
+export function antigravityEfforts(modelId: string): readonly string[] {
+  const lower = modelId.toLowerCase()
+  const family: readonly string[] = lower.startsWith('claude-') ? ['high']
+    : lower.startsWith('gpt-oss-') ? ['medium']
+      : lower.startsWith('gemini-3.1-pro') || lower === 'gemini-pro-agent' ? ['low', 'high']
+        : /^gemini-(?:2\.5|3)/.test(lower) ? ['low', 'medium', 'high']
+          : []
+  if (family.length === 0) return []
+  // An id that names its own level is that level, and only that level.
+  const bound = /-(low|medium|high)$/.exec(lower)?.[1]
+  const levels = bound !== undefined && family.includes(bound) ? [bound] : family
+  return ['off', ...levels]
+}
