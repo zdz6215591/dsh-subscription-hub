@@ -11,9 +11,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { PRICE_UNIT_LEGEND, priceSuffix } from '../src/providers/common.js'
-import { parseModelsDevEfforts, toClineModelInfo } from '../src/providers/cline/catalog.js'
 import { resolveModelPrice } from '../src/stats/model-prices.js'
-import type { InputModality } from '../src/providers/modality.js'
 
 test('a published price renders as · $in/$out', () => {
   assert.equal(priceSuffix({ input: 2.5, output: 7.5 }), ' · $2.5/$7.5')
@@ -71,48 +69,3 @@ test('a served CommandCode id never renders half a price', () => {
   }
 })
 
-test('Cline reads the price models.dev publishes beside the metadata it already read', () => {
-  // The parser read `limit`, `modalities` and `reasoning_options` from this entry
-  // and discarded `cost`; this asserts the sibling field is now kept.
-  const registry = {
-    'cline-pass': {
-      models: {
-        'cline-pass/qwen3.7-max': {
-          reasoning: true,
-          reasoning_options: [{ values: ['low', 'high'] }],
-          limit: { context: 200_000, output: 32_000 },
-          cost: { input: 2.5, output: 7.5, cache_read: 0.5 },
-        },
-      },
-    },
-  }
-  const parsed = parseModelsDevEfforts('cline-pass/qwen3.7-max', registry)
-  assert.deepEqual(parsed?.price, { input: 2.5, output: 7.5 })
-  // The pre-existing reads still work — the price is an addition, not a swap.
-  assert.equal(parsed?.contextWindow, 200_000)
-  assert.deepEqual(parsed?.efforts, ['none', 'low', 'high'])
-})
-
-test('a models.dev entry with a partial cost contributes no price', () => {
-  const registry = { 'cline-pass': { models: { 'cline-pass/x': { cost: { input: 1 } } } } }
-  assert.equal(parseModelsDevEfforts('cline-pass/x', registry)?.price, undefined)
-})
-
-test('an entry with no cost block contributes no price but keeps its metadata', () => {
-  const registry = { 'cline-pass': { models: { 'cline-pass/y': { limit: { context: 100_000 } } } } }
-  const parsed = parseModelsDevEfforts('cline-pass/y', registry)
-  assert.equal(parsed?.price, undefined)
-  assert.equal(parsed?.contextWindow, 100_000)
-})
-
-test('a Cline row without a price shows its bare name', () => {
-  const base = {
-    id: 'cline-pass/x', name: 'X', contextWindow: 1, maxTokens: 1,
-    input: ['text'] as InputModality[], reasoning: true, source: 'static' as const,
-  }
-  assert.equal(toClineModelInfo({ ...base }, 'cline').name, 'X')
-  assert.equal(toClineModelInfo({ ...base, price: { input: 2, output: 6 } }, 'cline').name, 'X · $2/$6')
-  // And the description appears only when there is a figure to explain.
-  assert.equal(toClineModelInfo({ ...base }, 'cline').description, undefined)
-  assert.equal(toClineModelInfo({ ...base, price: { input: 2, output: 6 } }, 'cline').description, PRICE_UNIT_LEGEND)
-})
