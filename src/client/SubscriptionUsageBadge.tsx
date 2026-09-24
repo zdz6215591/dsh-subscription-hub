@@ -14,13 +14,17 @@ import type { CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
-import { IconDataOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconDataOutline16, useAnchoredPosition, useDismissOnOutsidePointer } from '@deepseek-ai/dsh-client-ui-primitives'
 import { callSubscriptionsAuth } from './SubscriptionsSection.js'
 import type { AccountStatus, ProviderStatus, ProviderUsage, SubscriptionProvider, UsageWindow } from './SubscriptionsSection.js'
 import type { ModelDirectoriesLike } from './SpeedSelect.js'
 
 /** How often the pill re-reads usage and the current model. */
 const POLL_INTERVAL_MS = 15_000
+
+const PANEL_GAP = 8
+const PANEL_MARGIN = 12
+const MEASURE_STYLE: CSSProperties = { visibility: 'hidden', left: 0, top: 0 }
 
 /** Injected dependencies (slot `inject`, session-bound). */
 export interface SubscriptionUsageBadgeInjected {
@@ -174,13 +178,15 @@ export function SubscriptionUsageBadge(props: SubscriptionUsageBadgeProps) {
   const [open, setOpen] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [statsRow, setStatsRow] = useState<HTMLElement | null>(null)
-  const [panelPos, setPanelPos] = useState<{ left: number; bottom: number } | null>(null)
 
   const seatRef = useRef<HTMLSpanElement | null>(null)
-  const buttonRef = useRef<HTMLButtonElement | null>(null)
+  const rootRef = useRef<HTMLSpanElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
   const inflightRef = useRef(false)
   const mountedRef = useRef(true)
+
+  const pos = useAnchoredPosition({ open, anchorRef: rootRef, panelRef, side: 'top', gap: PANEL_GAP, margin: PANEL_MARGIN })
+  useDismissOnOutsidePointer(rootRef, open, setOpen, panelRef)
 
   const refresh = useCallback(async (force = false): Promise<void> => {
     if (rpc === undefined || inflightRef.current) return
@@ -189,10 +195,9 @@ export function SubscriptionUsageBadge(props: SubscriptionUsageBadgeProps) {
     try {
       const current = await currentModel?.()
       if (!mountedRef.current) return
-      const provider = current?.provider as SubscriptionProvider | undefined
+      let provider = current?.provider as SubscriptionProvider | undefined
       if (provider === undefined || !(provider in PROVIDER_NAMES)) {
-        setReading(undefined)
-        return
+        provider = undefined
       }
 
       const statusResp = await callSubscriptionsAuth<{ providers: Record<SubscriptionProvider, ProviderStatus> }>(
@@ -200,8 +205,19 @@ export function SubscriptionUsageBadge(props: SubscriptionUsageBadgeProps) {
       )
       if (!mountedRef.current) return
 
-      const providerStatus = statusResp.providers[provider]
+      let providerStatus = provider !== undefined ? statusResp.providers[provider] : undefined
       if (providerStatus === undefined || providerStatus.accounts.length === 0) {
+        // Fall back to the first connected provider that has accounts
+        const connected = (Object.keys(statusResp.providers) as SubscriptionProvider[])
+          .map(p => ({ provider: p, status: statusResp.providers[p] }))
+          .find(entry => entry.status && entry.status.accounts.length > 0)
+        if (connected !== undefined) {
+          provider = connected.provider
+          providerStatus = connected.status
+        }
+      }
+
+      if (provider === undefined || providerStatus === undefined || providerStatus.accounts.length === 0) {
         setReading(undefined)
         return
       }
@@ -293,39 +309,20 @@ export function SubscriptionUsageBadge(props: SubscriptionUsageBadgeProps) {
     return () => observer.disconnect()
   }, [])
 
-  // Position popup above button when opened
   const toggleOpen = () => {
     const next = !open
     setOpen(next)
-    if (next) {
-      if (buttonRef.current) {
-        const rect = buttonRef.current.getBoundingClientRect()
-        const left = Math.max(12, Math.min(rect.left + rect.width / 2 - 140, window.innerWidth - 300))
-        const bottom = Math.max(12, window.innerHeight - rect.top + 8)
-        setPanelPos({ left, bottom })
-      }
-      void refresh(true)
-    }
+    if (next) void refresh(true)
   }
 
-  // Dismiss popup on outside pointerdown or Escape
+  // Dismiss popup on Escape
   useEffect(() => {
     if (!open) return
-    const onPointerDown = (e: MouseEvent | TouchEvent) => {
-      const target = e.target as Node | null
-      if (!target) return
-      if (panelRef.current?.contains(target) || buttonRef.current?.contains(target)) return
-      setOpen(false)
-    }
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setOpen(false)
     }
-    document.addEventListener('pointerdown', onPointerDown)
     document.addEventListener('keydown', onKeyDown)
-    return () => {
-      document.removeEventListener('pointerdown', onPointerDown)
-      document.removeEventListener('keydown', onKeyDown)
-    }
+    return () => { document.removeEventListener('keydown', onKeyDown) }
   }, [open])
 
   const label = reading === undefined ? '' : compactUsageLabel(reading)
@@ -336,9 +333,8 @@ export function SubscriptionUsageBadge(props: SubscriptionUsageBadgeProps) {
   const tooltip = makeTooltip(reading)
 
   const pill = (
-    <span className="bOPqQW_anchor" style={styles.anchor}>
+    <span ref={rootRef} className="bOPqQW_anchor" style={styles.anchor}>
       <button
-        ref={buttonRef}
         type="button"
         className="bOPqQW_pill"
         style={{ ...styles.pill, ...(hover || open ? styles.pillHover : {}) }}
@@ -355,15 +351,14 @@ export function SubscriptionUsageBadge(props: SubscriptionUsageBadgeProps) {
     </span>
   )
 
-  const dialog = open && panelPos && createPortal(
+  const dialog = open && createPortal(
     <div
       ref={panelRef}
       role="dialog"
       aria-label={`${reading.name} 额度详情`}
       style={{
         ...styles.panel,
-        left: panelPos.left,
-        bottom: panelPos.bottom,
+        ...(pos ?? MEASURE_STYLE),
       }}
     >
       {/* Title row mirrors the official stat dialog: leading icon + label on
@@ -444,7 +439,7 @@ export function SubscriptionUsageBadge(props: SubscriptionUsageBadgeProps) {
   return (
     <>
       {seat}
-      {statsRow && statsRow.isConnected ? createPortal(pill, statsRow) : null}
+      {statsRow !== null && statsRow.isConnected ? createPortal(pill, statsRow) : pill}
       {dialog}
     </>
   )

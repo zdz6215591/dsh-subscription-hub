@@ -43,13 +43,24 @@ export const REQUEST_IMAGE_MAX_LONG_EDGE = 1568
  */
 export const REQUEST_IMAGE_MAX_ENCODED_BYTES = 1024 * 1024
 
-/** Projected request geometry for one attachment. */
-export interface RequestImagePolicy {
-  /** Maximum width multiplied by height after aspect-preserving projection. */
+/**
+ * One image's request target, in both generations' vocabulary at once:
+ *   <= 0.1.5 reads maxPixels and maxBytes
+ *   >= 0.1.6 reads width, height, and maxBytes
+ */
+export interface RequestImageTarget {
+  /** <=0.1.5's pixel budget: the projected area this target came from. */
   maxPixels: number
-  /** Encoded-byte target before base64 expansion. */
+  /** >=0.1.6's target width, already projected. */
+  width: number
+  /** >=0.1.6's target height, already projected. */
+  height: number
+  /** Both generations' encoded-byte budget. */
   maxBytes: number
 }
+
+/** Backward-compatible alias for {@link RequestImageTarget}. */
+export type RequestImagePolicy = RequestImageTarget
 
 /**
  * Aspect-preserving projection onto a long-edge budget.
@@ -82,10 +93,12 @@ export function longEdgeDimensions(width: number, height: number, longEdge: numb
  * @param ref - the durable normalized attachment reference.
  * @returns the policy to hand to `readImageRequest`.
  */
-export function requestImagePolicy(ref: Pick<ImageAttachmentRef, 'width' | 'height'>): RequestImagePolicy {
+export function requestImagePolicy(ref: Pick<ImageAttachmentRef, 'width' | 'height'>): RequestImageTarget {
   const projected = longEdgeDimensions(ref.width, ref.height, REQUEST_IMAGE_MAX_LONG_EDGE)
   return {
     maxPixels: projected.width * projected.height,
+    width: projected.width,
+    height: projected.height,
     maxBytes: REQUEST_IMAGE_MAX_ENCODED_BYTES,
   }
 }

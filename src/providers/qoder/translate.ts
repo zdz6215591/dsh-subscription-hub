@@ -25,6 +25,7 @@ import { isHarnessError } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, ImageBlock, Message, ToolResultBlock, ToolSchema } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore, RequestImageAttachment } from '@deepseek-ai/dsh-attachment'
 import { qoderError, QODER_ABORTED_CODE, QODER_UNSUPPORTED_CODE } from './errors.js'
+import { requestImagePolicy } from '../../translate/image-request.js'
 import type { CosyCredentials } from './cosy.js'
 import type {
   QoderWireImagePart,
@@ -142,11 +143,8 @@ async function resolveImagePart(
   }
   let image: RequestImageAttachment
   try {
-    const limits = attachments.imageLimits
-    image = await attachments.readImageRequest(block.attachment, {
-      maxPixels: limits.maxImagePixels,
-      maxBytes: limits.maxImageBytes,
-    }, signal)
+    const target = requestImagePolicy(block.attachment)
+    image = await attachments.readImageRequest(block.attachment, target as unknown as never, signal)
   } catch (error) {
     if (signal?.aborted) throw qoderError('Qoder image preparation was aborted.', QODER_ABORTED_CODE, { cause: error })
     if (isHarnessError(error)) throw error

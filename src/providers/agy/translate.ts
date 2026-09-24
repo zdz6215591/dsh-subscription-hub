@@ -312,10 +312,11 @@ export function toAgyRequestBody(
   const tools = toolsToDeclarations(options.tools)
   const generationConfig: NonNullable<AgyRequestBody['request']['generationConfig']> = {}
   if (options.temperature !== undefined) generationConfig.temperature = options.temperature
-  if (options.maxTokens !== undefined) {
-    const isClaude = isClaudeModel(options.model)
-    generationConfig.maxOutputTokens = isClaude ? Math.min(options.maxTokens, 64000) : options.maxTokens
-  }
+  const isClaude = isClaudeModel(options.model)
+  const defaultAgyMaxTokens = isClaude ? 64000 : 65536
+  generationConfig.maxOutputTokens = options.maxTokens !== undefined
+    ? (isClaude ? Math.min(options.maxTokens, 64000) : options.maxTokens)
+    : defaultAgyMaxTokens
   if (options.stop !== undefined && options.stop.length > 0) generationConfig.stopSequences = options.stop
   // Level-thinking: map the DSH reasoning effort to thinkingConfig.
   const effort = options.reasoningEffort?.toLowerCase()

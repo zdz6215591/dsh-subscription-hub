@@ -25,6 +25,25 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
     size?: number
     className?: string
   }): import('react').ReactNode
+
+  export interface AnchoredPositionOptions {
+    open: boolean
+    anchorRef: import('react').RefObject<HTMLElement | null>
+    panelRef: import('react').RefObject<HTMLElement | null>
+    side?: 'top' | 'bottom' | 'left' | 'right'
+    align?: 'start' | 'center' | 'end'
+    gap?: number
+    margin?: number
+  }
+
+  export function useAnchoredPosition(options: AnchoredPositionOptions): { left: number; top: number } | null
+
+  export function useDismissOnOutsidePointer(
+    anchorRef: import('react').RefObject<HTMLElement | null>,
+    open: boolean,
+    setOpen: (open: boolean) => void,
+    panelRef?: import('react').RefObject<HTMLElement | null>,
+  ): void
 }
 
 declare module 'react-dom' {
