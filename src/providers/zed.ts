@@ -25,6 +25,7 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { ZedSession } from '../auth/store.js'
 import type { ProviderId } from '../auth/store.js'
 import { proxiedFetch } from '../http.js'
+import { refreshZedAllowanceCache, zedAllowanceSync } from './zed-allowance.js'
 import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from './accounts.js'
 import { effortDisplayName, httpLlmError, idleWatchdog, mapFetchFailure, mergeReasoning } from './common.js'
 import type { FetchFn, ModelEntry, ProviderUsage, UsageWindow } from './common.js'
@@ -541,15 +542,24 @@ function spendWindow(record: Record<string, unknown>, resetsAt?: number, planKey
     'spend_limit', 'limit', 'monthly_limit', 'spend_cap', 'credit_limit',
   ])
 
-  // NO invented allowance. A `planDefaultLimit(planKey)` call used to sit here and
-// return a hardcoded **$10** for the pro/student/vip plan names whenever upstream
-// disclosed no included amount — so the card rendered "已经用 $2.50 / 总额 $10.00 ·
-// 25%" where BOTH the $10 and the 25% were fabricated. Verified by feeding this
-// parser a payload with a plan name and a spend figure but no allowance field at
-// all: it answered `limit: 10, usedPercent: 25`. A reader cannot tell an invented
-// denominator from a measured one, which is the deception this removes.
+// The bundled allowance when neither payload states one.
+  //
+  // This IS a real product fact, and I was wrong to delete it outright: Zed publishes
+  // it on its pricing page ("$5 of tokens included" for Pro) and its own UI shows one
+  // for a Student account. It simply is not on any endpoint this plugin can call, which
+  // is why it is read from Zed's page — cached and refreshed by
+  // `refreshZedAllowanceCache`, so a repricing tracks without a code change. The
+  // documented table covers tiers the public page does not list.
+  //
+  // What was wrong with the previous version was the DERIVATION, not the feature: it
+  // returned a flat $10 for every pro-class plan, which is Pro's SUBSCRIPTION PRICE
+  // ($10/month) rather than Pro's allowance ($5), and it never consulted the page.
+  if (includedUsd === undefined && spendingLimitUsd === undefined) {
+    const published = zedAllowanceSync(planKey)
+    if (published !== undefined) includedUsd = published
+  }
 
-const cap = (includedUsd ?? 0) + (spendingLimitUsd ?? 0)
+  const cap = (includedUsd ?? 0) + (spendingLimitUsd ?? 0)
 if (spentUsd === undefined) {
   if (cap > 0) spentUsd = 0
   else return []
