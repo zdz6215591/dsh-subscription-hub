@@ -14,7 +14,14 @@ import type { CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
-import { IconDataOutline16, useAnchoredPosition, useDismissOnOutsidePointer } from '@deepseek-ai/dsh-client-ui-primitives'
+import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
+import { useAnchoredPosition, useDismissOnOutsidePointer } from '@deepseek-ai/dsh-client-ui-primitives'
+
+const IconDataOutline = (
+  (primitives as Record<string, unknown>).IconDataOutlineRegular
+  ?? (primitives as Record<string, unknown>).IconDataOutline16
+  ?? (primitives as Record<string, unknown>).IconDataOutlineMedium
+) as (props: { size?: number; className?: string }) => React.ReactNode
 import { callSubscriptionsAuth } from './SubscriptionsSection.js'
 import type { AccountStatus, ProviderStatus, ProviderUsage, SubscriptionProvider, UsageWindow } from './SubscriptionsSection.js'
 import type { ModelDirectoriesLike } from './SpeedSelect.js'
@@ -195,9 +202,10 @@ export function SubscriptionUsageBadge(props: SubscriptionUsageBadgeProps) {
     try {
       const current = await currentModel?.()
       if (!mountedRef.current) return
-      let provider = current?.provider as SubscriptionProvider | undefined
+      const provider = current?.provider as SubscriptionProvider | undefined
       if (provider === undefined || !(provider in PROVIDER_NAMES)) {
-        provider = undefined
+        setReading(undefined)
+        return
       }
 
       const statusResp = await callSubscriptionsAuth<{ providers: Record<SubscriptionProvider, ProviderStatus> }>(
@@ -205,19 +213,8 @@ export function SubscriptionUsageBadge(props: SubscriptionUsageBadgeProps) {
       )
       if (!mountedRef.current) return
 
-      let providerStatus = provider !== undefined ? statusResp.providers[provider] : undefined
+      const providerStatus = statusResp.providers[provider]
       if (providerStatus === undefined || providerStatus.accounts.length === 0) {
-        // Fall back to the first connected provider that has accounts
-        const connected = (Object.keys(statusResp.providers) as SubscriptionProvider[])
-          .map(p => ({ provider: p, status: statusResp.providers[p] }))
-          .find(entry => entry.status && entry.status.accounts.length > 0)
-        if (connected !== undefined) {
-          provider = connected.provider
-          providerStatus = connected.status
-        }
-      }
-
-      if (provider === undefined || providerStatus === undefined || providerStatus.accounts.length === 0) {
         setReading(undefined)
         return
       }
@@ -345,7 +342,7 @@ export function SubscriptionUsageBadge(props: SubscriptionUsageBadgeProps) {
         onMouseEnter={() => setHover(true)}
         onMouseLeave={() => setHover(false)}
       >
-        <IconDataOutline16 size={14} />
+        <IconDataOutline size={14} />
         <span className="bOPqQW_label" style={styles.label}>{label}</span>
       </button>
     </span>
@@ -365,7 +362,7 @@ export function SubscriptionUsageBadge(props: SubscriptionUsageBadgeProps) {
           the left, value on the right, then a hairline rule. */}
       <div style={styles.title}>
         <span style={styles.titleLabel}>
-          <IconDataOutline16 size={14} />
+          <IconDataOutline size={14} />
           {reading.name} 额度详情
         </span>
         <span style={styles.titleActions}>

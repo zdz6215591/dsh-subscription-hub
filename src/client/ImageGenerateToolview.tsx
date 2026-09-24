@@ -16,7 +16,13 @@
 import type { CSSProperties } from 'react'
 import type { ConnectionHandle, RpcResult } from '@deepseek-ai/dsh-api-remotes/client'
 import type { ToolCallBlock } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import { IconSparkle16 } from '@deepseek-ai/dsh-client-ui-primitives'
+import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
+
+const IconSparkle = (
+  (primitives as Record<string, unknown>).IconSparkleRegular
+  ?? (primitives as Record<string, unknown>).IconSparkle16
+  ?? (primitives as Record<string, unknown>).IconSparkleMedium
+) as (props: { size?: number; className?: string }) => React.ReactNode
 import { ImageGallery } from './ImageGallery.js'
 import type { ImageAttachmentRef, ImageLoader, MessageImageLabels } from './ImageGallery.js'
 import { callSubscriptionsAuth } from './subscriptions-rpc.js'
@@ -182,7 +188,7 @@ export function ImageGenerateToolview(props: ImageGenerateToolviewProps) {
   return (
     <div style={styles.container}>
       <div style={styles.row}>
-        <span style={styles.icon}><IconSparkle16 size={14} /></span>
+        <span style={styles.icon}><IconSparkle size={14} /></span>
         <span style={styles.title}>{title}</span>
       </div>
       {!settled && <p style={styles.subtle}>{t('generating')}</p>}

@@ -480,7 +480,7 @@ export class ClineAdapter extends LlmAdapter {
             })),
           },
           ...options.temperature === undefined ? {} : { temperature: options.temperature },
-          max_tokens: options.maxTokens ?? (meta as unknown as { maxTokens?: number })?.maxTokens ?? 32_768,
+          ...options.maxTokens === undefined ? {} : { max_tokens: options.maxTokens },
           ...options.stop === undefined ? {} : { stop: options.stop },
           ...options.reasoningEffort === undefined || String(options.reasoningEffort) === 'off'
             ? {}

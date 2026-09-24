@@ -187,11 +187,11 @@ export async function* parseAgySse(
             finishReason = mapFinishReason(candidate.finishReason)
           }
           for (const part of candidate.content?.parts ?? []) {
-            if (part.text !== undefined && part.thought !== true) {
+            if (typeof part.text === 'string' && part.text.length > 0 && part.thought !== true) {
               for (const chunk of ensureBlock('text')) yield chunk
               open!.text += part.text
               yield { type: 'text-delta', index: blockIndex, text: part.text }
-            } else if (part.text !== undefined && part.thought === true) {
+            } else if (typeof part.text === 'string' && part.text.length > 0 && part.thought === true) {
               // A thought part may carry the thoughtSignature that the NEXT
               // functionCall part must replay (Antigravity puts it here, not on
               // the functionCall). Remember it for the following functionCall.

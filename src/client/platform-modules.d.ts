@@ -14,17 +14,13 @@
  */
 
 declare module '@deepseek-ai/dsh-client-ui-primitives' {
-  /** Mirror of IconSparkle16 (packages/client/ui-primitives/src/icons/index.tsx). */
-  export function IconSparkle16(props: {
-    size?: number
-    className?: string
-  }): import('react').ReactNode
+  export function IconSparkleRegular(props: { size?: number; className?: string }): import('react').ReactNode
+  export function IconSparkleMedium(props: { size?: number; className?: string }): import('react').ReactNode
+  export function IconSparkle16(props: { size?: number; className?: string }): import('react').ReactNode
 
-  /** Mirror of IconDataOutline16 (packages/client/ui-primitives/src/icons/index.tsx). */
-  export function IconDataOutline16(props: {
-    size?: number
-    className?: string
-  }): import('react').ReactNode
+  export function IconDataOutlineRegular(props: { size?: number; className?: string }): import('react').ReactNode
+  export function IconDataOutlineMedium(props: { size?: number; className?: string }): import('react').ReactNode
+  export function IconDataOutline16(props: { size?: number; className?: string }): import('react').ReactNode
 
   export interface AnchoredPositionOptions {
     open: boolean
