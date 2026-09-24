@@ -136,9 +136,12 @@ test('QoderUsageReader maps the credit packages onto the hub usage shape', async
   assert.equal(usage.supported, true)
   assert.equal(usage.plan, 'Pro')
   assert.deepEqual(usage.windows, [
-    { kind: 'other', scope: 'plan', usedPercent: 3, remaining: 2916, limit: 3000, used: 84, resetsAt: 1790756471159 },
-    { kind: 'other', scope: 'org', usedPercent: 0, remaining: 3000, limit: 3000, used: 0, resetsAt: 1790756471159 },
-    { kind: 'other', scope: 'add-on', usedPercent: 100, remaining: 0, limit: 100, used: 100, resetsAt: 1790756471159 },
+    // `unit` is CREDITS, and it is asserted here precisely because its ABSENCE is
+    // what put a currency symbol on the progress bar: the renderer treated any
+    // window carrying `used` and `limit` as dollars, and these pools are 积分.
+    { kind: 'other', scope: 'plan', usedPercent: 3, remaining: 2916, limit: 3000, used: 84, unit: 'credits', resetsAt: 1790756471159 },
+    { kind: 'other', scope: 'org', usedPercent: 0, remaining: 3000, limit: 3000, used: 0, unit: 'credits', resetsAt: 1790756471159 },
+    { kind: 'other', scope: 'add-on', usedPercent: 100, remaining: 0, limit: 100, used: 100, unit: 'credits', resetsAt: 1790756471159 },
   ])
   assert.equal(usage.remaining, 5916)
   assert.equal(usage.limit, 6100)

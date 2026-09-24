@@ -147,6 +147,9 @@ export function traeUsageToProviderUsage(snapshot: TraeUsageSnapshot): ProviderU
       usedPercent: snapshot.total > 0 ? Math.min(100, Math.max(0, (snapshot.consumed / snapshot.total) * 100)) : 0,
       remaining: snapshot.available,
       limit: snapshot.total,
+      // Trae's allowance is 积分 (credits) — the plan name the upstream returns
+      // literally says "Trae 积分", so this is its own word, not a guess.
+      unit: 'credits',
     },
   ]
   for (const pack of snapshot.packs) {
@@ -157,6 +160,8 @@ export function traeUsageToProviderUsage(snapshot: TraeUsageSnapshot): ProviderU
       usedPercent: Math.min(100, Math.max(0, (pack.consumed / pack.limit) * 100)),
       remaining: pack.remaining,
       limit: pack.limit,
+      // Credit packs, same unit as the main allowance.
+      unit: 'credits',
       ...pack.expiresAt === undefined
       ? {}
       : { resetsAt: pack.expiresAt < 10_000_000_000 ? pack.expiresAt * 1000 : pack.expiresAt },

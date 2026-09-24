@@ -43,6 +43,7 @@ import type {
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { proxiedFetch } from '../../http.js'
 import type { FetchFn, ModelEntry, ProviderUsage } from '../common.js'
+import { rateSuffix } from '../common.js'
 import { DEFAULT_RATE_LIMIT_WAIT, DEFAULT_RETRY, subscriptionRetryPolicy } from '../rate-limit.js'
 import type { RateLimitWait } from '../rate-limit.js'
 import { QoderAuthService } from './auth.js'
@@ -392,7 +393,11 @@ export class QoderAdapter extends LlmAdapter {
     return {
       provider,
       id: model.id,
-      name: model.name,
+      // The rate rides the LISTED name too, not only the resolved one: the model
+      // picker and the settings visibility list both read this, and a multiplier
+      // that only appeared after a model was already chosen would be useless for
+      // deciding between them. One rule in `rateSuffix`, applied in both places.
+      name: `${model.name}${rateSuffix(model.priceFactor)}`,
       ...model.description === undefined ? {} : { description: model.description },
       inputModalities: model.supportsImages === true ? ['text', 'image'] as const : ['text'] as const,
     }
@@ -444,12 +449,22 @@ export class QoderAdapter extends LlmAdapter {
           ...defaultEffortId === undefined ? {} : { defaultEffort: defaultEffortId },
         }
     const supportsImages = entry?.supportsImages ?? configured?.inputModalities?.includes('image') ?? false
+    const baseName = entry?.name ?? configured?.name ?? model
     return {
       provider,
       id: model,
-      name: entry?.name ?? configured?.name ?? model,
+      // The published rate multiplier rides the display name, the way Qoder's own
+      // client shows it: it is the only per-model cost signal upstream discloses,
+      // and a reader comparing two models needs it at the point of choosing.
+      // Absent when the catalog published none — never a stand-in `x1`.
+      name: `${baseName}${rateSuffix(entry?.priceFactor)}`,
       inputModalities: supportsImages === true ? ['text', 'image'] as const : ['text'] as const,
-      context: { contextWindow },
+      // The LARGEST declared window rather than the default tier. Upstream's
+      // `context_config` offers 200K/400K/1M with 200K marked default, and the
+      // reference's own preference for the maximum is `z.boolean().default(true)`
+      // — declaring 200K caps a 1M model at a fifth of its window. The request's
+      // tier selection is aligned in `serialize.ts`.
+      context: { contextWindow: entry?.maxContextWindow ?? contextWindow },
       defaultMaxTokens: maxTokens,
       ...reasoning === undefined ? {} : { reasoning },
     }

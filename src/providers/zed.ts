@@ -577,6 +577,9 @@ function spendWindow(record: Record<string, unknown>, resetsAt?: number, planKey
     scope: 'Hosted models',
     usedPercent: cap > 0 ? usagePercent(spentUsd, cap) : 0,
     used: spentUsd,
+    // DOLLARS: Zed's included LLM-token spend (cents arrived on the wire and were
+    // converted), which is what its own "已用 $x / 总额 $y" display shows.
+    unit: 'currency',
     ...resetsAt === undefined ? {} : { resetsAt },
   }
   return [{

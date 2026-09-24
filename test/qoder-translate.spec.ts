@@ -63,13 +63,19 @@ function imageAttachments(onRead?: () => void): QoderImageAttachments {
   }
 }
 
-test('request preserves the discovered default tier and does not send ambiguous tier defaults', async () => {
-  for (const conflicting of [false, true]) {
+test('the request selects the LARGEST declared tier, matching the window it reports', async () => {
+  // The window a model advertises and the tier its requests ask for must AGREE, or
+  // the two contradict each other: declaring a 1M window while requesting the 200K
+  // tier packs a request the gateway then rejects. Upstream marks 200K default and
+  // the reference's own preference for the maximum is `z.boolean().default(true)`,
+  // so the largest tier wins — including when upstream ALSO marked a smaller one
+  // default, which is exactly the case that used to send no tier at all.
+  for (const upstreamAlsoDefaultsSmall of [false, true]) {
     const [model] = normalizeQoderModels({ assistant: [{
       key: 'model', enable: true, max_input_tokens: 180_000,
       context_config: {
         small: { token_count: 200_000, is_default: true },
-        large: { token_count: 1_000_000, ...conflicting ? { is_default: true } : {} },
+        large: { token_count: 1_000_000, ...upstreamAlsoDefaultsSmall ? { is_default: true } : {} },
       },
       is_reasoning: true,
       thinking_config: { disabled: { is_default: true } },
@@ -80,16 +86,42 @@ test('request preserves the discovered default tier and does not send ambiguous 
     }, 'user-test', undefined, model)
     assert.equal(body.model_config.is_reasoning, false)
     assert.equal(body.chat_context.extra.modelConfig.is_reasoning, false)
-    if (conflicting) {
-      assert.equal(model!.contextWindow, 180_000)
-      assert.equal(body.model_config.context_config, undefined)
-    } else {
-      assert.equal(model!.contextWindow, 200_000)
-      assert.deepEqual(body.model_config.context_config, {
-        small: { token_count: 200_000, is_default: true }, large: { token_count: 1_000_000 },
-      })
-    }
+    // The largest tier is selected, and EXACTLY one tier is marked default.
+    assert.deepEqual(body.model_config.context_config, {
+      small: { token_count: 200_000, is_default: false },
+      large: { token_count: 1_000_000, is_default: true },
+    })
+    // The largest declared window is what the route will report, in both cases —
+    // this is the figure `resolveOwnModel` hands the session, so it is the one
+    // that has to agree with the tier selected above.
+    assert.equal(model!.maxContextWindow, 1_000_000)
+    // Upstream's OWN `contextWindow` keeps its documented reading: the single
+    // marked default when there is exactly one, and the `max_input_tokens`
+    // fallback when upstream marked two tiers default (an ambiguity it is not
+    // this field's job to resolve).
+    assert.equal(model!.contextWindow, upstreamAlsoDefaultsSmall ? 180_000 : 200_000)
   }
+})
+
+test('a single-tier model still selects its own tier', async () => {
+  const [model] = normalizeQoderModels({ assistant: [{
+    key: 'solo', enable: true,
+    context_config: { only: { token_count: 200_000, is_default: true } },
+  }] })
+  const body = await buildQoderRequestBody({
+    provider: 'qoder', model: 'solo',
+    messages: [createUserMessage({ content: [{ type: 'text', text: 'Hi' }], source: { kind: 'user' } })],
+  }, 'user-test', undefined, model)
+  assert.deepEqual(body.model_config.context_config, { only: { token_count: 200_000, is_default: true } })
+})
+
+test('a model with no declared tiers sends none rather than an empty object', async () => {
+  const [model] = normalizeQoderModels({ assistant: [{ key: 'plain', enable: true, max_input_tokens: 180_000 }] })
+  const body = await buildQoderRequestBody({
+    provider: 'qoder', model: 'plain',
+    messages: [createUserMessage({ content: [{ type: 'text', text: 'Hi' }], source: { kind: 'user' } })],
+  }, 'user-test', undefined, model)
+  assert.equal(body.model_config.context_config, undefined)
 })
 
 test('validateAndTranslateMessages processes DSH text history', async () => {

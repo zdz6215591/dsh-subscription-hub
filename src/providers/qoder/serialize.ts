@@ -162,16 +162,34 @@ export async function buildQoderRequestBody(
   const maxTokens = Math.min(options.maxTokens ?? modelMaxTokens, modelMaxTokens)
   const isReasoning = options.reasoningEffort !== undefined || (model?.isReasoning ?? false)
   const tools = translateTools(options.tools)
-  // Ambiguous defaults stay in discovery metadata, but must not select a request tier.
-  const defaultContexts = Object.values(model?.contextOptions ?? {}).filter(option =>
-    option.isDefault === true && typeof option.tokenCount === 'number'
-    && Number.isFinite(option.tokenCount) && option.tokenCount > 0)
-  const contextConfig = model?.contextOptions === undefined || defaultContexts.length !== 1
+  // The request DECLARES the largest tier, not upstream's default one.
+  //
+  // This has to agree with the window `resolveOwnModel` reports, or the two
+  // contradict each other: advertising a 1M window while asking the gateway for
+  // the 200K tier would pack a request the gateway then rejects. Upstream's
+  // `context_config` offers 200K / 400K / 1M with 200K marked default, and the
+  // reference's own preference for the maximum is `z.boolean().default(true)` —
+  // so the largest tier is selected, and the SMALLEST is chosen as the tie-break
+  // only when entries somehow share the top token count.
+  const contextConfig = model?.contextOptions === undefined
     ? undefined
-    : Object.fromEntries(Object.entries(model.contextOptions).map(([key, value]) => [key, {
-      ...value.tokenCount === undefined ? {} : { token_count: value.tokenCount },
-      ...value.isDefault === undefined ? {} : { is_default: value.isDefault },
-    }]))
+    : (() => {
+        const tiers = Object.entries(model.contextOptions)
+          .filter(([, value]) => typeof value.tokenCount === 'number' && Number.isFinite(value.tokenCount) && value.tokenCount > 0)
+        if (tiers.length === 0) return undefined
+        const largest = Math.max(...tiers.map(([, value]) => value.tokenCount ?? 0))
+        // The lowest-keyed tier wins a tie, so the choice is deterministic rather
+        // than dependent on property order.
+        const chosen = tiers.filter(([, value]) => value.tokenCount === largest).map(([key]) => key).sort()[0]
+        return Object.fromEntries(Object.entries(model.contextOptions).map(([key, value]) => [key, {
+          ...value.tokenCount === undefined ? {} : { token_count: value.tokenCount },
+          // `is_default` is written for EVERY tier, including one upstream left
+          // unmarked: exactly one tier has to carry it or the gateway sees an
+          // ambiguous request, and upstream's own omission is not an instruction
+          // to send none.
+          is_default: key === chosen,
+        }]))
+      })()
   let lastUserText = ''
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index]

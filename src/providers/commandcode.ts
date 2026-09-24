@@ -711,6 +711,10 @@ function creditWindow(
     usedPercent: Math.min(100, Math.max(0, (used / cap) * 100)),
     remaining: Math.max(cap - used, 0),
     limit: cap,
+    // DOLLARS, and the only place in this hub where that is true for a spend
+    // window: CommandCode's plan caps are money (`$0.04 / $3.00`), which is why
+    // the unit is declared explicitly rather than left to the renderer to guess.
+    unit: 'currency',
     ...typeof resetAt === 'number' && resetAt > 0 ? { resetsAt: resetAt } : {},
     ...scope === undefined ? {} : { scope },
   }

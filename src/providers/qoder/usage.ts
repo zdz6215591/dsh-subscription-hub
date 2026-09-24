@@ -306,6 +306,10 @@ function quotaWindow(kind: string, quota: QoderQuota | undefined, resetsAt: numb
     remaining: quota.remaining,
     limit: quota.total,
     used: quota.used,
+    // CREDITS, not currency. The upstream's pools read `300 / 300` and the plan
+    // is "Pro Trial" with a credit allowance; without this the renderer drew the
+    // amounts as dollars, which is what put a `$` on the progress bar.
+    unit: 'credits',
     ...resetsAt === undefined ? {} : { resetsAt },
   }
 }

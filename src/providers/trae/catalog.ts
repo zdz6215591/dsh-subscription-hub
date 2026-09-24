@@ -17,6 +17,7 @@
 
 import type { LlmModelInfo } from '@deepseek-ai/dsh-llm'
 import { proxiedFetch } from '../../http.js'
+import { rateSuffix } from '../common.js'
 import type { FetchFn } from '../common.js'
 import {
   TRAE_CHAT_BASE,
@@ -45,6 +46,14 @@ export interface TraeModel {
   functionName: string
   /** Selectable reasoning effort ids, when the model advertises them. */
   efforts?: readonly string[]
+  /**
+   * The upstream's published credit multiplier for this model (consumption_rate).
+   *
+   * A RELATIVE rate, not a price: 0.78 means the model draws 0.78x the base rate.
+   * Absent when the row publishes no enabled rate, which is a real case on the
+   * international edition — it advertises none at all.
+   */
+  creditMultiplier?: number
   /** When different from id, the config_name llm_utils_chat accepts */
   wireConfigName?: string
 }
@@ -129,6 +138,43 @@ function sizesOf(config: Record<string, unknown>): { contextWindow?: number; max
     ...contextWindow === undefined ? {} : { contextWindow },
     ...maxTokens === undefined ? {} : { maxTokens },
   }
+}
+
+/**
+ * The published credit multiplier for one directory row.
+ *
+ * It is NOT a top-level field: `features` arrives as a JSON **string** that has to
+ * be parsed a second time, and the rate lives at
+ * `features.consumption_rate.data.rate` behind a `consumption_rate.enable === true`
+ * gate. A disabled `consumption_rate` means the rate is not in force, so it is
+ * treated as absent rather than as zero.
+ *
+ * Zero IS a legitimate multiplier (a free model) and is returned as such: the
+ * caller distinguishes "no rate published" from "rate of 0" by `undefined`.
+ * @param config - one `config_info_list` row.
+ * @returns the multiplier, or undefined when the row publishes none.
+ */
+function creditMultiplierOf(config: Record<string, unknown>): number | undefined {
+  const rawFeatures = config.features
+  if (typeof rawFeatures !== 'string' || rawFeatures.trim() === '') return undefined
+  let features: unknown
+  try {
+    features = JSON.parse(rawFeatures)
+  } catch {
+    // A malformed blob is not a reason to drop the model; it just has no rate.
+    return undefined
+  }
+  if (typeof features !== 'object' || features === null) return undefined
+  const consumption = (features as Record<string, unknown>).consumption_rate
+  if (typeof consumption !== 'object' || consumption === null) return undefined
+  const record = consumption as Record<string, unknown>
+  if (record.enable !== true) return undefined
+  const data = typeof record.data === 'object' && record.data !== null
+    ? record.data as Record<string, unknown>
+    : undefined
+  const rate = data?.rate
+  const value = typeof rate === 'number' ? rate : typeof rate === 'string' ? Number(rate) : NaN
+  return Number.isFinite(value) && value >= 0 ? value : undefined
 }
 
 function displayNameOf(config: Record<string, unknown>, fallback: string): string {
@@ -298,6 +344,7 @@ export async function fetchRemoteModels(
         const name = TRAE_DISPLAY_OVERRIDES[id] ?? display
         const windows = windowsOf(raw)
         const efforts = effortsOf(raw)
+        const creditMultiplier = creditMultiplierOf(raw)
 
         const existing = byId.get(id)
         if (existing === undefined) {
@@ -306,10 +353,15 @@ export async function fetchRemoteModels(
             name,
             ...windows,
             maxTokens: 32_000,
+            ...creditMultiplier === undefined ? {} : { creditMultiplier },
             functionName,
             ...efforts === undefined ? {} : { efforts },
           })
           continue
+        }
+        // A later directory group may be the one that disclosed the rate.
+        if (existing.creditMultiplier === undefined && creditMultiplier !== undefined) {
+          existing.creditMultiplier = creditMultiplier
         }
         // Only the agent directories carry `reasoning_effort_config` and the
         // Max window; a row first seen in the work/coder roster keeps its
@@ -444,7 +496,11 @@ export function mergeTraeModelSources(remote: readonly TraeModel[], wire: readon
     if (match === undefined) continue
     merged.push({
       id: row.id,
-      name: row.name,
+      // The credit multiplier rides the display name, as the reference formats it
+      // (`name · x0.78`): it is the only per-model cost signal this route
+      // discloses, and it belongs where a model is chosen. `row.name` itself stays
+      // undecorated so every join on the plain name keeps working.
+      name: `${row.name}${rateSuffix(row.creditMultiplier)}`,
       ...row.contextWindow === undefined ? {} : { contextWindow: row.contextWindow },
       ...row.maxContextWindow === undefined ? {} : { maxContextWindow: row.maxContextWindow },
       ...row.maxTokens === undefined ? {} : { maxTokens: row.maxTokens },

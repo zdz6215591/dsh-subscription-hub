@@ -95,6 +95,9 @@ function personalWindows(accounts: unknown[]): { windows: UsageWindow[]; remaini
       usedPercent: cap > 0 ? Math.min(100, Math.max(0, (used / cap) * 100)) : 0,
       remaining: left,
       limit: cap,
+      // CodeBuddy counts 积分 (credits) — the live pools read `500 / 500`, `3000`,
+      // `100` — so this is its own unit, not a currency.
+      unit: 'credits',
       ...resetsAt !== undefined && Number.isFinite(resetsAt) ? { resetsAt } : {},
     }
   })
@@ -136,6 +139,8 @@ export function parseMeterUsage(raw: unknown): ProviderUsage | undefined {
       usedPercent: limit > 0 ? Math.min(100, Math.max(0, (used / limit) * 100)) : 0,
       remaining: left,
       limit,
+      // Credits, same unit as the personal pools.
+      unit: 'credits',
       ...resetsAt !== undefined && Number.isFinite(resetsAt) ? { resetsAt } : {},
     }],
   }

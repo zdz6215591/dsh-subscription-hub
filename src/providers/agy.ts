@@ -384,6 +384,11 @@ export function parseAgyUserQuotaSummary(payload: unknown): UsageWindow[] {
           usedPercent: Math.max(0, Math.min(100, Math.round((1 - remainingFraction) * 100))),
           remaining: Math.round(remainingFraction * 1000) / 10,
           limit: 100,
+          // A PERCENTAGE: `remaining` is the remaining fraction expressed as a
+          // 0-100 number and the cap is 100, so the amounts are points of a
+          // percentage rather than units of any currency. Drawing them with a
+          // `$` was plainly wrong.
+          unit: 'percent',
           ...resetsAt !== undefined && Number.isFinite(resetsAt) ? { resetsAt } : {},
         })
       }

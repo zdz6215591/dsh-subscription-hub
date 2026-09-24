@@ -72,6 +72,15 @@ export interface UsageWindow {
   limit?: number
   /** Amount already consumed in the same units as {@link limit} (spend-style windows). */
   used?: number
+  /**
+   * What the amounts are counted in, as the HOST declared it.
+   *
+   * A window carries this so the renderer never has to infer a unit from the
+   * numbers: it used to draw every `used`/`limit` window with a `$`, which put a
+   * currency symbol on credit pools and on AGY's percentage. Absent means the
+   * host did not say, and the amount then renders as a bare number.
+   */
+  unit?: 'currency' | 'credits' | 'percent' | 'tokens'
 }
 
 /** `usage` endpoint value: the node half owns this shape. */
@@ -836,23 +845,54 @@ function formatAmount(value: number): string {
   return String(Math.round(value * 100) / 100)
 }
 
-/** Format a small currency amount ($ with up to 2 decimals). */
-function formatMoney(value: number): string {
-  const rounded = Math.round(value * 100) / 100
-  return `$${String(rounded)}`
+/**
+ * Format an amount in the units its window declares.
+ *
+ * The unit comes from the WINDOW, never from the shape of the numbers: this used
+ * to draw any window carrying `used` and `limit` with a `$`, which labelled
+ * Qoder's 300 credits as three hundred dollars. A window that declares no unit
+ * prints a bare number — a missing symbol is honest, a wrong one is not.
+ * @param value - the amount.
+ * @param unit - what the window is counted in.
+ * @returns the formatted amount.
+ */
+function formatUnitAmount(value: number, unit: UsageWindow['unit']): string {
+  if (unit === 'currency') return `$${String(Math.round(value * 100) / 100)}`
+  return formatAmount(value)
+}
+
+/** The label a unit needs where the number alone would not say what it is. */
+function unitLabel(unit: UsageWindow['unit']): string {
+  switch (unit) {
+    case 'credits': return 'credits'
+    case 'tokens': return 'tokens'
+    case 'percent': return '%'
+    default: return ''
+  }
 }
 
 function usageAmountText(t: SubscriptionsSectionInjected['t'], window: UsageWindow): string {
   const percent = `${String(Math.round(Math.min(100, Math.max(0, window.usedPercent))))}%`
-  // Spend-style window (e.g. Zed "Token Spend"): show "used / total" dollars.
+  const label = unitLabel(window.unit)
+  const suffix = label === '' ? '' : ` ${label}`
+  // Spend-style windows (Zed's "Token Spend", CommandCode's weekly cap, Qoder's
+  // credit pool) show "used / total" in whatever the window is counted in.
   if (window.used !== undefined && window.limit !== undefined) {
-    return `${t('usageSpentOf', { used: formatMoney(window.used), limit: formatMoney(window.limit) })} · ${percent}`
+    return `${t('usageSpentOf', {
+      used: formatUnitAmount(window.used, window.unit),
+      limit: formatUnitAmount(window.limit, window.unit) + suffix,
+    })} · ${percent}`
   }
   if (window.remaining !== undefined && window.limit !== undefined) {
-    return `${t('usageRemaining', { remaining: formatAmount(window.remaining), limit: formatAmount(window.limit) })} · ${percent}`
+    return `${t('usageRemaining', {
+      remaining: formatUnitAmount(window.remaining, window.unit),
+      limit: formatUnitAmount(window.limit, window.unit) + suffix,
+    })} · ${percent}`
   }
   if (window.remaining !== undefined) {
-    return `${t('usageRemainingOnly', { remaining: formatAmount(window.remaining) })} · ${percent}`
+    return `${t('usageRemainingOnly', {
+      remaining: formatUnitAmount(window.remaining, window.unit) + suffix,
+    })} · ${percent}`
   }
   return percent
 }

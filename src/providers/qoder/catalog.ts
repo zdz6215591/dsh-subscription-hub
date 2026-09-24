@@ -228,7 +228,48 @@ export function normalizeQoderModels(
       ...contextOptions === undefined ? {} : { contextOptions },
     })
   }
+  disambiguateNames(models)
   return models
+}
+
+/**
+ * Append the wire key to a display name that does not identify its model.
+ *
+ * Upstream publishes `DeepSeek-Flash` with NO version, while its own sibling
+ * `DeepSeek-V4-Pro` carries one — and DeepSeek genuinely ships a V4-Flash AND a
+ * V4.1-Flash, so the name alone leaves a reader unable to tell which model the row
+ * is. The version cannot be recovered from the payload (the row carries no such
+ * field, and its `icon`, `original_price_factor` and `minimal_version` say nothing
+ * about it), so nothing here is inferred: the row is labelled with the exact
+ * `key` the upstream uses, which is the one identifier that IS authoritative.
+ *
+ * The rule fires narrowly. Models are grouped by the token before their first
+ * separator — `DeepSeek-Flash` and `DeepSeek-V4-Pro` share the family
+ * `DeepSeek` — and a name is decorated only when it carries NO digit while a
+ * sibling in the same family does. Names that version themselves
+ * (`GLM-5.3`, `GLM-5.3-Flash`, `Qwen3.8-Max`) and families with a single member
+ * (`Auto`, `MiniMax-M2.7`) are left exactly as upstream wrote them.
+ * @param models - the normalized catalog, mutated in place.
+ */
+export function disambiguateNames(models: QoderCatalogModel[]): void {
+  const familyOf = (name: string): string => name.split(/[-_ /]/)[0]?.toLowerCase() ?? ''
+  const hasDigit = (name: string): boolean => /[0-9]/.test(name)
+  const families = new Map<string, QoderCatalogModel[]>()
+  for (const model of models) {
+    const family = familyOf(model.name)
+    if (family === '') continue
+    const bucket = families.get(family)
+    if (bucket === undefined) families.set(family, [model])
+    else bucket.push(model)
+  }
+  for (const bucket of families.values()) {
+    if (bucket.length < 2) continue
+    if (!bucket.some(model => hasDigit(model.name))) continue
+    for (const model of bucket) {
+      if (hasDigit(model.name) || model.name.includes(`(${model.id})`)) continue
+      model.name = `${model.name} (${model.id})`
+    }
+  }
 }
 
 /**

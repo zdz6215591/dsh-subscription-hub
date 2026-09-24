@@ -438,12 +438,23 @@ export interface UsageWindow {
   usedPercent: number
   /** Epoch milliseconds at which the window resets, when the provider discloses it. */
   resetsAt?: number
-  /** Remaining allowance in the provider's own units, when disclosed. */
+  /** Remaining allowance in the units {@link unit} names, when disclosed. */
   remaining?: number
   /** Cap of this window in the same units as {@link remaining}. */
   limit?: number
   /** Amount already consumed, in the same units as {@link limit} (spend-style windows). */
   used?: number
+  /**
+   * What the three amounts are COUNTED IN.
+   *
+   * Required whenever an amount is present, because the numbers alone do not say
+   * — and the renderer used to ASSUME: any window carrying `used` and `limit` was
+   * drawn with a `$`, which put a currency symbol on Qoder's 300 *credits*.
+   *
+   * A wrong unit is worse than no unit, so this is explicit rather than
+   * defaulted, and an amount with no unit renders as a bare number.
+   */
+  unit?: 'currency' | 'credits' | 'percent' | 'tokens'
 }
 
 /** Subscription usage of one provider, as served by the `usage` RPC endpoint. */
@@ -492,6 +503,45 @@ export interface DiscoveredModel {
    * there when it combines function tools with a reasoning effort.
    */
   copilotResponses?: boolean
+}
+
+/**
+ * The display-name suffix for a model's published rate multiplier.
+ *
+ * Some routes publish a RELATIVE rate per model — a multiplier rather than a
+ * price — and showing it is the difference between a reader knowing that one
+ * model costs five times another and having to guess. Qoder calls it
+ * `price_factor`, CodeBuddy `credits` ("积分倍率"), Trae
+ * `consumption_rate.data.rate`.
+ *
+ * Formatted as `· x0.79`, with these rules, each of which matters:
+ *
+ * - **The suffix is OMITTED when the upstream published no rate.** A route with
+ *   no multiplier at all (CommandCode and Cline publish absolute prices and plan
+ *   tiers, never a ratio) shows nothing rather than a fabricated `x1` — and
+ *   inventing a baseline is exactly what cannot be done honestly.
+ * - **Zero is a VALUE, not an absence.** `x0` is a free model and must render;
+ *   treating 0 as missing would hide the cheapest row in the list.
+ * - Up to two decimals, with trailing zeros trimmed, so `1.5` reads as `x1.5`
+ *   rather than `x1.50` in a dense list while `0.79` keeps both digits.
+ *
+ * @param rate - the published multiplier, as a number or the upstream's own
+ *   preformatted string (CodeBuddy already sends `"x0.29"`).
+ * @returns the suffix, or an empty string when there is no rate to show.
+ */
+export function rateSuffix(rate: number | string | undefined): string {
+  if (rate === undefined) return ''
+  if (typeof rate === 'string') {
+    const trimmed = rate.trim()
+    if (trimmed === '') return ''
+    // The upstream already spelled it; a leading `x` is kept as given rather than
+    // doubled, and a bare number is still formatted.
+    return trimmed.startsWith('x') || trimmed.startsWith('X') ? ` · ${trimmed}` : ` · x${trimmed}`
+  }
+  if (!Number.isFinite(rate) || rate < 0) return ''
+  // Two decimals then trim, so an integer rate stays `x3` and 1.5 stays `x1.5`.
+  const fixed = rate.toFixed(2).replace(/\.?0+$/, '')
+  return ` · x${fixed}`
 }
 
 /**
