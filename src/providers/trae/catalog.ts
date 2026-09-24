@@ -17,7 +17,7 @@
 
 import type { LlmModelInfo } from '@deepseek-ai/dsh-llm'
 import { proxiedFetch } from '../../http.js'
-import { rateSuffix } from '../common.js'
+import { rateLabel } from '../common.js'
 import type { FetchFn, ModelListNotFetched } from '../common.js'
 import {
   TRAE_CHAT_BASE,
@@ -631,7 +631,11 @@ export function toTraeModelInfo(model: TraeModel, provider: string): LlmModelInf
   return {
     provider,
     id: model.id,
-    name: `${model.name}${rateSuffix(model.creditMultiplier)}`,
+    // The NAME stays plain. The credit multiplier travels in `rateLabel`, which only the
+    // settings list renders — putting it in `name` pushed `· x0.78` into the composer's
+    // model picker, where a reader choosing a model wants the name alone.
+    name: model.name,
+    ...rateLabel(model.creditMultiplier) === '' ? {} : { rateLabel: rateLabel(model.creditMultiplier) },
     inputModalities: ['text'],
     ...model.contextWindow === undefined ? {} : { context: { contextWindow: model.contextWindow } },
   }

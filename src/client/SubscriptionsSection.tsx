@@ -121,6 +121,15 @@ export interface VisibleModelView {
   vendor?: { id: string; label: string; lab?: string }
   /** Accepted input modalities; absent when the route never declared them. */
   inputModalities?: InputModality[]
+  /**
+   * The model's cost label — `x0.5` for a published multiplier, `$2/$10` for a published
+   * price — or absent when the route disclosed neither.
+   *
+   * It rides its own field rather than the model NAME: the name is what the composer's
+   * model picker renders, and a suffix on every row there was reported as noise. Only
+   * this list shows the cost.
+   */
+  rate?: string
 }
 
 /** The one-click auto-configure report, as answered by `clineAutoConfigure`. */
@@ -540,6 +549,8 @@ const styles: Record<string, CSSProperties> = {
   usageHeader: { display: 'flex', alignItems: 'center', gap: 8 },
   usageTitle: { fontSize: 12, lineHeight: '18px', fontWeight: 500, color: 'var(--dsw-alias-label-secondary)' },
   usagePlan: { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
+  /** The per-model cost figure in the settings list — quiet, and never in the picker. */
+  rateLabel: { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)', flex: '0 0 auto' },
   usageRefresh: {
     boxSizing: 'border-box', display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
     height: 22, padding: '0 8px', borderRadius: 11, marginLeft: 'auto',
@@ -2833,6 +2844,19 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                                   {model.unread && <span style={styles.unreadModelDot} title={t('newModelBadge')} />}
                                 </span>
                                 <ModalityIcons modalities={model.inputModalities} />
+                                {/* The cost label, drawn here and NOWHERE else — it must
+                                    not reach the composer's picker through the model
+                                    name. A `$` figure is a price per 1M tokens, so it
+                                    carries the unit as a tooltip; an `x` figure is a
+                                    multiplier and needs none. */}
+                                {model.rate !== undefined && (
+                                  <span
+                                    style={styles.rateLabel}
+                                    title={model.rate.startsWith('$') ? t('ratePriceUnit') : t('rateMultiplierUnit')}
+                                  >
+                                    {model.rate}
+                                  </span>
+                                )}
                               </label>
                             ))}
                           </div>

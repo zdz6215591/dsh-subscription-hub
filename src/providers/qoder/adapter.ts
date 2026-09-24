@@ -43,7 +43,7 @@ import type {
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { proxiedFetch } from '../../http.js'
 import type { FetchFn, ModelEntry, ModelListNotFetched, ProviderUsage } from '../common.js'
-import { rateSuffix } from '../common.js'
+import { rateLabel } from '../common.js'
 import { DEFAULT_RATE_LIMIT_WAIT, DEFAULT_RETRY, subscriptionRetryPolicy } from '../rate-limit.js'
 import type { RateLimitWait } from '../rate-limit.js'
 import { QoderAuthService } from './auth.js'
@@ -415,11 +415,11 @@ export class QoderAdapter extends LlmAdapter {
     return {
       provider,
       id: model.id,
-      // The rate rides the LISTED name too, not only the resolved one: the model
-      // picker and the settings visibility list both read this, and a multiplier
-      // that only appeared after a model was already chosen would be useless for
-      // deciding between them. One rule in `rateSuffix`, applied in both places.
-      name: `${model.name}${rateSuffix(model.priceFactor)}`,
+      // The NAME stays plain. The rate travels in `rateLabel`, which only the settings
+      // list reads — appending it here put `· x0.5` on every row of the COMPOSER's model
+      // picker, where a reader choosing a model wants the name and nothing else.
+      name: model.name,
+      ...rateLabel(model.priceFactor) === '' ? {} : { rateLabel: rateLabel(model.priceFactor) },
       ...model.description === undefined ? {} : { description: model.description },
       inputModalities: model.supportsImages === true ? ['text', 'image'] as const : ['text'] as const,
     }
@@ -480,11 +480,12 @@ export class QoderAdapter extends LlmAdapter {
     return {
       provider,
       id: model,
-      // The published rate multiplier rides the display name, the way Qoder's own
-      // client shows it: it is the only per-model cost signal upstream discloses,
-      // and a reader comparing two models needs it at the point of choosing.
-      // Absent when the catalog published none — never a stand-in `x1`.
-      name: `${baseName}${rateSuffix(entry?.priceFactor)}`,
+      name: baseName,
+      // The published rate multiplier travels BESIDE the name, never inside it. It is
+      // the only per-model cost signal upstream discloses, and the settings list shows
+      // it — but `name` feeds the composer's picker, where it is noise. Absent when the
+      // catalog published none, never a stand-in `x1`.
+      ...rateLabel(entry?.priceFactor) === '' ? {} : { rateLabel: rateLabel(entry?.priceFactor) },
       inputModalities: supportsImages === true ? ['text', 'image'] as const : ['text'] as const,
       // The LARGEST declared window rather than the default tier. Upstream's
       // `context_config` offers 200K/400K/1M with 200K marked default, and the

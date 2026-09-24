@@ -1554,6 +1554,10 @@ export function apply(ctx: Context, config: Config): void {
           unread: unread.has(model.id),
           ...vendor === undefined ? {} : { vendor: { ...vendor } },
           ...modalities === undefined ? {} : { inputModalities: [...modalities] },
+          // The cost label reaches the SETTINGS list only. It cannot ride the model
+          // name, because that name is what the composer's model picker renders and a
+          // suffix on every row there was reported as noise.
+          ...model.rateLabel === undefined ? {} : { rate: model.rateLabel },
         }
       })
       // An empty roster is reported as an un-fetched one. The adapter's own

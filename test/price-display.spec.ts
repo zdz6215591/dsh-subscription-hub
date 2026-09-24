@@ -10,29 +10,29 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { PRICE_UNIT_LEGEND, priceSuffix } from '../src/providers/common.js'
+import { PRICE_UNIT_LEGEND, priceLabel } from '../src/providers/common.js'
 import { resolveModelPrice } from '../src/stats/model-prices.js'
 
-test('a published price renders as · $in/$out', () => {
-  assert.equal(priceSuffix({ input: 2.5, output: 7.5 }), ' · $2.5/$7.5')
-  assert.equal(priceSuffix({ input: 2, output: 10 }), ' · $2/$10')
-  assert.equal(priceSuffix({ input: 0.435, output: 0.87 }), ' · $0.43/$0.87')
-  assert.equal(priceSuffix({ input: 3, output: 15 }), ' · $3/$15')
+test('a published price renders as $in/$out', () => {
+  assert.equal(priceLabel({ input: 2.5, output: 7.5 }), '$2.5/$7.5')
+  assert.equal(priceLabel({ input: 2, output: 10 }), '$2/$10')
+  assert.equal(priceLabel({ input: 0.435, output: 0.87 }), '$0.43/$0.87')
+  assert.equal(priceLabel({ input: 3, output: 15 }), '$3/$15')
 })
 
 test('an incomplete price renders NOTHING, never half a pair', () => {
   // A lone rate would still render as `$in/$out` and misreport the other one.
-  assert.equal(priceSuffix(undefined), '')
-  assert.equal(priceSuffix({ input: Number.NaN, output: 5 }), '')
-  assert.equal(priceSuffix({ input: 5, output: Number.NaN }), '')
-  assert.equal(priceSuffix({ input: Number.POSITIVE_INFINITY, output: 5 }), '')
-  assert.equal(priceSuffix({ input: -1, output: 5 }), '')
+  assert.equal(priceLabel(undefined), '')
+  assert.equal(priceLabel({ input: Number.NaN, output: 5 }), '')
+  assert.equal(priceLabel({ input: 5, output: Number.NaN }), '')
+  assert.equal(priceLabel({ input: Number.POSITIVE_INFINITY, output: 5 }), '')
+  assert.equal(priceLabel({ input: -1, output: 5 }), '')
 })
 
 test('a FREE model shows $0/$0 rather than disappearing', () => {
   // 0 is a published rate, not a missing one; hiding it would drop the cheapest
   // rows from the list.
-  assert.equal(priceSuffix({ input: 0, output: 0 }), ' · $0/$0')
+  assert.equal(priceLabel({ input: 0, output: 0 }), '$0/$0')
 })
 
 test('the unit legend states what the numbers count', () => {
@@ -65,7 +65,7 @@ test('a served CommandCode id never renders half a price', () => {
   for (const id of ['claude-sonnet-5', 'claude-fable-5', 'zai-org/GLM-5.3']) {
     const rates = resolveModelPrice(id).rates
     assert.ok(rates !== undefined, `${id} has no vendored price`)
-    assert.ok(priceSuffix({ input: rates.input, output: rates.output }).startsWith(' · $'), id)
+    assert.ok(priceLabel({ input: rates.input, output: rates.output }).startsWith('$'), id)
   }
   // An id the table does not carry renders NOTHING rather than a half or guessed
   // figure. This id used to be priced by the `claude-opus` vendor-SUBSTRING rule,
@@ -73,6 +73,6 @@ test('a served CommandCode id never renders half a price', () => {
   const unlisted = resolveModelPrice('claude-opus-5-5')
   assert.equal(unlisted.source, 'unpriced')
   assert.equal(unlisted.rates, undefined)
-  assert.equal(priceSuffix(unlisted.rates), '', 'no rate means no suffix at all')
+  assert.equal(priceLabel(unlisted.rates), '', 'no rate means no suffix at all')
 })
 

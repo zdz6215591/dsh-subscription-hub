@@ -21,7 +21,7 @@ import './keep-alive.js'
 import {
   normalizeQoderModels,
 } from '../src/providers/qoder/catalog.js'
-import { priceSuffix } from '../src/providers/common.js'
+import { priceLabel } from '../src/providers/common.js'
 import { priceUsage, resolveModelPrice } from '../src/stats/model-prices.js'
 import { clineModel } from '../src/providers/cline/catalog.js'
 import { fetchTraeModels } from '../src/providers/trae/catalog.js'
@@ -106,7 +106,7 @@ test('a vendor-name substring no longer prices a model', () => {
   assert.equal(resolveModelPrice('z-ai/glm-5.3-flashx').source, 'unpriced')
   assert.equal(resolveModelPrice('z-ai/glm-5.3-flashx').rates, undefined)
   // And no half-price suffix is rendered for it either.
-  assert.equal(priceSuffix(resolveModelPrice('z-ai/glm-5.3-flashx').rates), '')
+  assert.equal(priceLabel(resolveModelPrice('z-ai/glm-5.3-flashx').rates), '')
 })
 
 // ---------------------------------------------------------------------------

@@ -15,7 +15,7 @@ import type { CodeBuddySession } from '../auth/store.js'
 import type { ProviderId } from '../auth/store.js'
 import { proxiedFetch } from '../http.js'
 import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from './accounts.js'
-import { effortDisplayName, httpLlmError, idleWatchdog, mapFetchFailure, mergeReasoning, rateSuffix } from './common.js'
+import { effortDisplayName, httpLlmError, idleWatchdog, mapFetchFailure, mergeReasoning, rateLabel } from './common.js'
 import type { FetchFn, ModelEntry, ProviderUsage } from './common.js'
 import type { PoolAdapter } from './pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, DEFAULT_RETRY, subscriptionRetryPolicy } from './rate-limit.js'
@@ -475,13 +475,15 @@ export class CodeBuddyAdapter extends LlmAdapter {
     return {
       provider,
       id: model.id,
-      // The upstream's own credit multiplier (积分倍率) rides the display name.
-      // CodeBuddy already sends it preformatted — `"x0.29"`, `"x0.00"` for free —
-      // and it is the only per-model cost signal this route discloses. 17 of the 23
-      // catalog rows carry it; the six that do not genuinely have a floating rate
-      // (upstream's own description of `auto` says 积分倍率随之浮动), so an absent
-      // one stays absent rather than becoming a stand-in `x1`.
-      name: `${model.name}${rateSuffix(model.credits)}`,
+      // The upstream's own credit multiplier (积分倍率) travels BESIDE the name, never
+      // inside it: `name` feeds the composer's model picker, where a suffix on every row
+      // is noise. CodeBuddy already sends it preformatted — `"x0.29"`, `"x0.00"` for
+      // free — and it is the only per-model cost signal this route discloses. 17 of the
+      // 23 catalog rows carry it; the six that do not genuinely have a floating rate
+      // (upstream's own description of `auto` says 积分倍率随之浮动), so an absent one
+      // stays absent rather than becoming a stand-in `x1`.
+      name: model.name,
+      ...rateLabel(model.credits) === '' ? {} : { rateLabel: rateLabel(model.credits) },
       inputModalities: model.supportsImages === true ? ['text', 'image'] as const : ['text'] as const,
     }
   }

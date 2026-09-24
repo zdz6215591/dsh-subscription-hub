@@ -1,7 +1,7 @@
 /**
  * The two new cross-provider display rules.
  *
- * `rateSuffix` is shared by Qoder, CodeBuddy and Trae, and its edge cases are the
+ * `rateLabel` is shared by Qoder, CodeBuddy and Trae, and its edge cases are the
  * whole reason it exists: a multiplier of ZERO is a free model and must render,
  * while a route that publishes NO multiplier must render nothing rather than a
  * fabricated `x1`. Conflating those two is the mistake that makes a rate display
@@ -13,39 +13,39 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { rateSuffix } from '../src/providers/common.js'
+import { rateLabel } from '../src/providers/common.js'
 import { disambiguateNames, normalizeQoderModels } from '../src/providers/qoder/catalog.js'
 
-test('a rate renders as · x<n>', () => {
-  assert.equal(rateSuffix(0.79), ' · x0.79')
-  assert.equal(rateSuffix(1.4), ' · x1.4')
-  assert.equal(rateSuffix(1.5), ' · x1.5')
-  assert.equal(rateSuffix(5), ' · x5')
-  assert.equal(rateSuffix(0.06), ' · x0.06')
+test('a rate renders as x<n>', () => {
+  assert.equal(rateLabel(0.79), 'x0.79')
+  assert.equal(rateLabel(1.4), 'x1.4')
+  assert.equal(rateLabel(1.5), 'x1.5')
+  assert.equal(rateLabel(5), 'x5')
+  assert.equal(rateLabel(0.06), 'x0.06')
 })
 
 test('ZERO is a value, not an absence: a free model shows x0', () => {
   // The trap: treating 0 as "no rate" would hide the cheapest row in the list.
-  assert.equal(rateSuffix(0), ' · x0')
-  assert.equal(rateSuffix(0.0), ' · x0')
+  assert.equal(rateLabel(0), 'x0')
+  assert.equal(rateLabel(0.0), 'x0')
 })
 
 test('no published rate renders NOTHING, never a stand-in x1', () => {
   // CommandCode and Cline publish absolute prices and no ratio at all; inventing
   // `x1` there would assert a baseline that does not exist upstream.
-  assert.equal(rateSuffix(undefined), '')
-  assert.equal(rateSuffix(Number.NaN), '')
-  assert.equal(rateSuffix(Number.POSITIVE_INFINITY), '')
-  assert.equal(rateSuffix(-1), '')
-  assert.equal(rateSuffix(''), '')
-  assert.equal(rateSuffix('  '), '')
+  assert.equal(rateLabel(undefined), '')
+  assert.equal(rateLabel(Number.NaN), '')
+  assert.equal(rateLabel(Number.POSITIVE_INFINITY), '')
+  assert.equal(rateLabel(-1), '')
+  assert.equal(rateLabel(''), '')
+  assert.equal(rateLabel('  '), '')
 })
 
 test("the upstream's own preformatted string is not double-prefixed", () => {
   // CodeBuddy sends `"x0.29"`; a bare number from the same field still formats.
-  assert.equal(rateSuffix('x0.29'), ' · x0.29')
-  assert.equal(rateSuffix('x0.00'), ' · x0.00')
-  assert.equal(rateSuffix('0.29'), ' · x0.29')
+  assert.equal(rateLabel('x0.29'), 'x0.29')
+  assert.equal(rateLabel('x0.00'), 'x0.00')
+  assert.equal(rateLabel('0.29'), 'x0.29')
 })
 
 test('a display name that omits its version is labelled with the upstream key', () => {

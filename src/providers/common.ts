@@ -525,42 +525,45 @@ export interface DiscoveredModel {
 }
 
 /**
- * The display-name suffix for a model's published rate multiplier.
+ * The cost label for a model's published rate multiplier, WITHOUT decoration.
  *
- * Some routes publish a RELATIVE rate per model — a multiplier rather than a
- * price — and showing it is the difference between a reader knowing that one
- * model costs five times another and having to guess. Qoder calls it
+ * Some routes publish a RELATIVE rate per model — a multiplier rather than a price —
+ * and showing it tells a reader that one model costs five times another. Qoder calls it
  * `price_factor`, CodeBuddy `credits` ("积分倍率"), Trae
  * `consumption_rate.data.rate`.
  *
- * Formatted as `· x0.79`, with these rules, each of which matters:
+ * Formatted `x0.79`, with these rules, each of which matters:
  *
- * - **The suffix is OMITTED when the upstream published no rate.** A route with
- *   no multiplier at all (CommandCode and Cline publish absolute prices and plan
- *   tiers, never a ratio) shows nothing rather than a fabricated `x1` — and
- *   inventing a baseline is exactly what cannot be done honestly.
- * - **Zero is a VALUE, not an absence.** `x0` is a free model and must render;
- *   treating 0 as missing would hide the cheapest row in the list.
- * - Up to two decimals, with trailing zeros trimmed, so `1.5` reads as `x1.5`
- *   rather than `x1.50` in a dense list while `0.79` keeps both digits.
+ * - **Empty when the upstream published no rate.** A route with no multiplier at all
+ *   (CommandCode and Cline publish absolute prices and plan tiers, never a ratio) gets
+ *   nothing rather than a fabricated `x1` — inventing a baseline is exactly what cannot
+ *   be done honestly.
+ * - **Zero is a VALUE, not an absence.** `x0` is a free model and must render; treating
+ *   0 as missing would hide the cheapest row in the list.
+ * - Up to two decimals, trailing zeros trimmed, so `1.5` reads as `x1.5` rather than
+ *   `x1.50` in a dense list while `0.79` keeps both digits.
+ *
+ * This is a LABEL, never a suffix on the model name. Appending it to `name` leaked it
+ * into the composer's model picker, where a reader choosing a model wants the name and
+ * nothing else; it now travels in `LlmModelInfo.rateLabel`, which only the settings list
+ * renders.
  *
  * @param rate - the published multiplier, as a number or the upstream's own
  *   preformatted string (CodeBuddy already sends `"x0.29"`).
- * @returns the suffix, or an empty string when there is no rate to show.
+ * @returns the label, or an empty string when there is no rate to show.
  */
-export function rateSuffix(rate: number | string | undefined): string {
+export function rateLabel(rate: number | string | undefined): string {
   if (rate === undefined) return ''
   if (typeof rate === 'string') {
     const trimmed = rate.trim()
     if (trimmed === '') return ''
     // The upstream already spelled it; a leading `x` is kept as given rather than
     // doubled, and a bare number is still formatted.
-    return trimmed.startsWith('x') || trimmed.startsWith('X') ? ` · ${trimmed}` : ` · x${trimmed}`
+    return trimmed.startsWith('x') || trimmed.startsWith('X') ? trimmed : `x${trimmed}`
   }
   if (!Number.isFinite(rate) || rate < 0) return ''
   // Two decimals then trim, so an integer rate stays `x3` and 1.5 stays `x1.5`.
-  const fixed = rate.toFixed(2).replace(/\.?0+$/, '')
-  return ` · x${fixed}`
+  return `x${rate.toFixed(2).replace(/\.?0+$/, '')}`
 }
 
 /** A number without pointless trailing zeros, for dense one-line labels. */
@@ -570,34 +573,52 @@ function trimNumber(value: number): string {
 }
 
 /**
- * The display-name suffix for a model's published ABSOLUTE price.
+ * The cost label for a model's published ABSOLUTE price, WITHOUT decoration.
  *
- * For a route that resells third-party models at list prices, the honest per-model
- * cost signal is a price rather than a ratio: CommandCode and Cline both publish
- * US dollars per million tokens and NEITHER publishes a multiplier, so their
- * multiplier slot is empty and a price is what actually answers "what does this
+ * For a route that resells third-party models at list prices, the honest per-model cost
+ * signal is a price rather than a ratio: CommandCode publishes US dollars per million
+ * tokens and no multiplier at all, so a price is what actually answers "what does this
  * model cost me?".
  *
- * Formatted `· $in/$out` — input then output, per million tokens — with the unit
- * spelled out in the model's `description`, because a bare pair of numbers in a
- * one-line row cannot carry the "per 1M tokens" part and a guessed unit is worse
- * than none.
+ * Formatted `$in/$out` — input then output, per million tokens — with the unit spelled
+ * out alongside it, because a bare pair of numbers cannot carry the "per 1M tokens" part
+ * and a guessed unit is worse than none.
  *
- * BOTH rates must be known: a suffix built from one of them would still read as a
- * pair, and be wrong. Upstream publishing `0` is a real free rate and is shown as
- * such.
+ * BOTH rates must be known: a label built from one of them would still read as a pair,
+ * and be wrong. Upstream publishing `0` is a real free rate and is shown as such.
+ *
+ * Like {@link rateLabel}, this is a LABEL and never a suffix on the model name, so it
+ * cannot leak into the composer's model picker.
  * @param rates - the published per-million rates, when known.
- * @returns the suffix, or an empty string when no complete price is known.
+ * @returns the label, or an empty string when no complete price is known.
  */
-export function priceSuffix(rates: { input: number; output: number } | undefined): string {
+export function priceLabel(rates: { input: number; output: number } | undefined): string {
   if (rates === undefined) return ''
   if (!Number.isFinite(rates.input) || !Number.isFinite(rates.output)) return ''
   if (rates.input < 0 || rates.output < 0) return ''
-  return ` · $${trimNumber(rates.input)}/$${trimNumber(rates.output)}`
+  return `$${trimNumber(rates.input)}/$${trimNumber(rates.output)}`
 }
 
-/** The unit legend that accompanies {@link priceSuffix} in a model description. */
+/** The unit legend that accompanies {@link priceLabel} in the settings list. */
 export const PRICE_UNIT_LEGEND = 'USD per 1M tokens · input/output'
+
+declare module '@deepseek-ai/dsh-llm' {
+  /**
+   * A per-model COST label, carried beside the model rather than inside its name.
+   *
+   * It rides here instead of the display name for a specific reason: `name` is rendered
+   * by the COMPOSER's model picker, where a reader choosing a model wants the name and
+   * nothing else — appending `· x0.5` there made every row noisy and was reported as
+   * wrong. `rateLabel` reaches only the settings list, which reads the `visibility`
+   * payload this hub builds itself.
+   *
+   * The harness never switches on it; an unrecognised field on a model entry is simply
+   * ignored by every core surface.
+   */
+  interface LlmModelInfo {
+    rateLabel?: string
+  }
+}
 
 /**
  * Display name for a wire reasoning-effort identifier.
