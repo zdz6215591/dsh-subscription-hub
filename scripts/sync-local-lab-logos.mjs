@@ -36,6 +36,17 @@ const outputPath = join(repoRoot, 'src', 'client', 'local-lab-badges.ts')
 const PLACEHOLDER_URL = 'https://models.dev/logos/labs/__no-such-lab__svg.svg'
 
 /**
+ * Per-lab padding, as a fraction of the frame, for a mark whose art fills its viewBox.
+ *
+ * Applied by EXPANDING the viewBox, never by touching the paths: a mark drawn edge to
+ * edge (the StepFun circle runs 0→36 of a 36-unit frame) reads as optically larger than
+ * one with built-in margins, so it is inset to sit at the same visual weight as its
+ * neighbours. Judged by eye against the adjacent rows, which is the only way a perceived
+ * weight difference can be set.
+ */
+const INSET = { stepfun: 0.08 }
+
+/**
  * Reduce any source SVG to the shape the client renders.
  *
  * Three fixes, all required by the marks as supplied:
@@ -46,15 +57,17 @@ const PLACEHOLDER_URL = 'https://models.dev/logos/labs/__no-such-lab__svg.svg'
  *      100%/100%, so one badge cannot render at a different size from another. The
  *      sources disagree wildly — two are `1024x1024` viewBoxes with `width="200"`, one
  *      is a 36-unit Illustrator frame — and the rendered box is what unifies them.
- *   3. `viewBox` is KEPT. It is the coordinate system the path data is written in;
- *      dropping it would scale every mark wrong.
+ *   3. `viewBox` is KEPT, and is the thing {@link INSET} adjusts. It is the coordinate
+ *      system the path data is written in, so dropping or rescaling it without
+ *      compensation would scale the art wrong.
  *
  * Path data is never rewritten: a hand-adjusted path is how a mark quietly becomes a
  * different mark.
  * @param raw - the source file's contents.
+ * @param inset - the padding fraction for this lab, when it has one.
  * @returns the renderable markup, or undefined when the file is not a usable SVG.
  */
-export function normalizeLocalLogo(raw) {
+export function normalizeLocalLogo(raw, inset = 0) {
   let svg = raw
     .replace(/<\?xml[\s\S]*?\?>/g, '')
     .replace(/<!DOCTYPE[\s\S]*?>/gi, '')
@@ -70,7 +83,20 @@ export function normalizeLocalLogo(raw) {
   const openEnd = svg.indexOf('>')
   if (openEnd < 0) return undefined
   const root = svg.slice(0, openEnd)
-  const attrs = root
+  // The inset is applied to the VIEWBOX, so the art keeps its own coordinates and its
+  // path data is not touched. A frame that is not four finite numbers is left as
+  // declared — guessing a frame is worse than keeping the one the file states.
+  const numbers = (/viewBox\s*=\s*"([^"]*)"/i.exec(root)?.[1] ?? '')
+    .trim().split(/[\s,]+/).map(Number)
+  const boxed = numbers.length === 4 && numbers.every(Number.isFinite)
+    ? (() => {
+        const [minX = 0, minY = 0, width = 0, height = 0] = numbers
+        return `viewBox="${minX - width * inset} ${minY - height * inset} ` +
+          `${width * (1 + inset * 2)} ${height * (1 + inset * 2)}"`
+      })()
+    : undefined
+  const withBox = boxed === undefined ? root : root.replace(/viewBox\s*=\s*"[^"]*"/i, boxed)
+  const attrs = withBox
     .replace(/^<svg\b/, '')
     .replace(/\s(?:width|height|style|class|id|t|p-id|data-name|x|y)\s*=\s*"[^"]*"/gi, '')
     .trim()
@@ -143,7 +169,7 @@ async function main() {
   const local = {}
   for (const file of files) {
     const slug = file.slice(0, -'.svg'.length)
-    const logo = normalizeLocalLogo(await readFile(join(sourceDir, file), 'utf8'))
+    const logo = normalizeLocalLogo(await readFile(join(sourceDir, file), 'utf8'), INSET[slug] ?? 0)
     if (logo === undefined) {
       console.error(`lab-logos/${file} did not normalize into a usable SVG — refusing to write a broken mark`)
       process.exit(2)

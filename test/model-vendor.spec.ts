@@ -8,7 +8,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { modelVendor, vendorsOf } from '../src/model-vendor.js'
+import { modelVendor, modelVendorFor, vendorsOf } from '../src/model-vendor.js'
 
 test('an owner segment is authoritative', () => {
   assert.equal(modelVendor('deepseek/deepseek-v4-pro')?.id, 'deepseek')
@@ -127,4 +127,21 @@ test('every vendor carries a distinct id, and a lab only when models.dev has one
   // The live roster spans several companies; a single-id result would mean the
   // owner table never matched and every row fell through to one family rule.
   assert.ok(ids.size >= 8, `only ${String(ids.size)} distinct vendors resolved`)
+})
+
+test('Tencent Hunyuan ids arrive BARE and still resolve to Tencent', () => {
+  // CodeBuddy serves these with no owner segment and no `hunyuan` in the name, so the
+  // `hunyuan` prefix rule never saw them and all three rows drew no Tencent mark. These
+  // are real ids from that catalog.
+  for (const [id, name] of [
+    ['hy4-preview', 'Hy4 preview · x0.29'],
+    ['hy3', 'Hy3 · x0.00'],
+    ['hy3-x', 'Hy3 · x0.05'],
+    ['hy3-paid', 'Hy3 Paid'],
+  ]) {
+    assert.equal(modelVendorFor(id, name)?.lab, 'tencent', `${id} must attribute to Tencent`)
+  }
+  // The versioned forms are keyed rather than a bare `hy`, which would sweep in ids that
+  // are not Hunyuan at all.
+  assert.equal(modelVendor('hype-model')?.lab, undefined)
 })

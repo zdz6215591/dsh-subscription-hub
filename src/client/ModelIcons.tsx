@@ -52,27 +52,32 @@ const MODALITY_SIZE = 14
 /**
  * The vendor mark.
  *
- * A vendor whose lab has no real logo draws models.dev's own generic placeholder rather
- * than nothing. That is NOT the fabrication this module otherwise refuses: the
- * placeholder asserts no company identity, whereas a hand-drawn lookalike would assert a
- * specific one. Rows therefore stay aligned whether or not a mark exists, and nothing
- * manufactured ever reaches the list.
+ * ALWAYS draws something, for every row, so the list keeps a constant shape:
  *
- * The component is mounted only for a model that HAS a vendor, so a model nothing
- * attributes to a company still draws nothing at all.
- * @param props - the vendor, and the lab logos available to draw from.
+ *   - a vendor whose lab has a real logo (hand-supplied or fetched) draws that logo;
+ *   - a vendor whose lab has none, AND a model nothing attributes to a company at all
+ *     (`Auto` is a router, so no company makes it), draw models.dev's own generic
+ *     placeholder.
+ *
+ * Drawing the placeholder is NOT the fabrication this module otherwise refuses: it
+ * asserts no company identity, whereas a hand-drawn lookalike would assert a specific
+ * one. That is why none are drawn, and why a missing mark shows a neutral icon rather
+ * than an invented brand.
+ * @param props - the vendor (absent when unknown), and the lab logos to draw from.
  * @returns the logo in a fixed-size box.
  */
 export function VendorMark({ vendor, badges }: {
-  vendor: ModelVendor
+  vendor: ModelVendor | undefined
   badges: Readonly<Record<string, string>>
 }): React.JSX.Element | null {
-  const markup = vendorLabBadge(vendor.lab, badges) ?? DEFAULT_LAB_LOGO
+  const markup = vendorLabBadge(vendor?.lab, badges) ?? DEFAULT_LAB_LOGO
   if (markup === undefined) return null
   return (
     <span
       aria-hidden="true"
-      title={vendor.label}
+      // The tooltip names the company only when one is known. The mark would otherwise
+      // be a generic placeholder sitting under a label that claims an owner.
+      {...vendor === undefined ? {} : { title: vendor.label }}
       style={{
         display: 'inline-flex',
         alignItems: 'center',

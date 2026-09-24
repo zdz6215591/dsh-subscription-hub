@@ -136,6 +136,14 @@ const BY_PREFIX: readonly (readonly [string, ModelVendor])[] = Object.freeze([
   ['mimo', vendor('xiaomi', 'Xiaomi', 'xiaomi')],
   ['step-', vendor('stepfun', 'StepFun', 'stepfun')],
   ['hunyuan', vendor('tencent', 'Tencent', 'tencent')],
+  // Tencent's Hunyuan line is abbreviated `hy` + version on some routes, and the ids
+  // arrive BARE — CodeBuddy serves `hy3`, `hy3-x`, `hy3-paid`, `hy4-preview` with no
+  // owner segment and no `hunyuan` in the name, so the `hunyuan` rule above never saw
+  // them and all three rows drew no Tencent mark. Keyed on the versioned forms rather
+  // than a bare `hy`, which would match unrelated ids.
+  ['hy2', vendor('tencent', 'Tencent', 'tencent')],
+  ['hy3', vendor('tencent', 'Tencent', 'tencent')],
+  ['hy4', vendor('tencent', 'Tencent', 'tencent')],
   ['ernie', vendor('baidu', 'Baidu')],
   ['nova-', vendor('amazon', 'Amazon', 'amazon')],
   ['ling-', vendor('inclusionai', 'InclusionAI', 'inclusionai')],

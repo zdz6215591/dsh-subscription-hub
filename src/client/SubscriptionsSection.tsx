@@ -2822,7 +2822,12 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                                     glyphs immediately after it: the row answers
                                     "who makes this, and what does it take?" without
                                     the reader's eye crossing the whole row. */}
-                                {model.vendor !== undefined && <VendorMark vendor={model.vendor} badges={labBadges} />}
+                                {/* Always drawn, even with NO vendor: the row keeps a
+                                    constant shape and a model nothing attributes to a
+                                    company shows models.dev's neutral generic mark
+                                    rather than a gap. `Auto` is the usual case — no
+                                    company makes it, so nothing is claimed about one. */}
+                                <VendorMark vendor={model.vendor} badges={labBadges} />
                                 <span style={styles.defaultEffortName} title={model.id}>
                                   {model.name}
                                   {model.unread && <span style={styles.unreadModelDot} title={t('newModelBadge')} />}
