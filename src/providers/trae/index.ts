@@ -63,8 +63,8 @@ export type {
   TraeToolCall,
   TraeToolCallDelta,
 } from './protocol.js'
-export { fetchTraeModels, mergeTraeModels, toTraeModelInfo, TRAE_FALLBACK_MODELS } from './catalog.js'
-export type { TraeModel } from './catalog.js'
+export { fetchTraeModels, toTraeModelInfo } from './catalog.js'
+export type { TraeCatalogRead, TraeModel } from './catalog.js'
 export {
   autoCheckinTrae,
   claimTraeCheckin,

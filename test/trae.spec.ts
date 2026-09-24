@@ -32,7 +32,7 @@ import {
   traeEndpoint,
   traeHeaders,
 } from '../src/providers/trae/protocol.js'
-import { mergeTraeModelSources, mergeTraeModels, TRAE_FALLBACK_MODELS, fetchRemoteModels } from '../src/providers/trae/catalog.js'
+import { mergeTraeModelSources, fetchTraeModels, fetchRemoteModels } from '../src/providers/trae/catalog.js'
 import type { TraeModel } from '../src/providers/trae/catalog.js'
 import { toTraeMessages } from '../src/providers/trae/adapter.js'
 import type { FetchFn } from '../src/providers/common.js'
@@ -332,15 +332,20 @@ test('traeEndpoint joins a base and path without doubling the slash', () => {
 // Catalog + usage
 // ---------------------------------------------------------------------------
 
-test('mergeTraeModels falls back to a sized roster when discovery is empty', () => {
-  assert.deepEqual(mergeTraeModels([]), [...TRAE_FALLBACK_MODELS])
-  const discovered = [{ id: 'glm-5.3', name: 'GLM-5.3', functionName: 'solo_work_remote' }]
-  assert.deepEqual(mergeTraeModels(discovered), discovered)
-  // Every fallback row needs a positive window or the catalog is rejected.
-  for (const model of TRAE_FALLBACK_MODELS) {
-    assert.equal(typeof model.contextWindow, 'number')
-    assert.ok(model.contextWindow! > 0)
-  }
+/** A fetcher that answers every request with a 500, so nothing is discoverable. */
+function failingFetch(): FetchFn {
+  return (() => Promise.resolve(new Response('{}', { status: 500 }))) as unknown as FetchFn
+}
+
+test('a route with no discovery yields no fabricated rows, and says why', async () => {
+  // The catalogue read is the ONLY source of roster rows. This test exists
+  // because the opposite was once true: an empty discovery served eight
+  // hardcoded models, so a broken directory fetch produced a full-looking picker
+  // and the user could not tell a dead route from a healthy one.
+  const read = await fetchTraeModels('token', 'user', 'solo', undefined, failingFetch())
+  assert.deepEqual(read.models, [], 'no discovery must produce no rows')
+  assert.notEqual(read.notFetched, undefined, 'and must report that the roster was not fetched')
+  assert.match(read.notFetched!.what, /no model roster/)
 })
 
 test('fetchRemoteModels builds the unfiltered skeleton from every directory group', async () => {

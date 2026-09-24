@@ -69,6 +69,14 @@ export interface TokenSavingsSummary {
   cacheWriteTokens: number
   /** Cache-write tokens that carry no published rate and are therefore billed at nothing. */
   unpricedCacheWriteTokens: number
+  /**
+   * Turns that contributed NO cost because no published rate covers their model.
+   *
+   * Without this the savings figure reads as a complete total when it is in fact
+   * a partial one: a model the price table does not carry adds nothing, and the
+   * reader could not tell that from a genuinely cheap model.
+   */
+  unpricedModelTurns: number
   savedRmb: number
   savedUsd: number
   /** The conversion the host applied, so a client never restates the rate. */
@@ -79,7 +87,7 @@ export interface TokenSavingsSummary {
 }
 
 /** Bumped whenever the scan's reading or pricing changes what the totals mean. */
-export const SCAN_VERSION = 3
+export const SCAN_VERSION = 4
 
 const SUBSCRIPTION_PROVIDERS = new Set([
   'codex',
@@ -127,6 +135,7 @@ function emptySummary(): TokenSavingsSummary {
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
     unpricedCacheWriteTokens: 0,
+    unpricedModelTurns: 0,
     turns: 0,
     savedUsd: 0,
     savedRmb: 0,
@@ -308,13 +317,15 @@ interface Accumulator {
   totalCacheRead: number
   totalCacheWrite: number
   unpricedCacheWrite: number
+  /** Turns whose model the price table does not carry, so they cost nothing here. */
+  unpricedModelTurns: number
   turns: number
   costUsd: number
   byProvider: Record<string, ProviderSavingsStat>
 }
 
 function emptyAccumulator(): Accumulator {
-  return { totalInput: 0, totalOutput: 0, totalCacheRead: 0, totalCacheWrite: 0, unpricedCacheWrite: 0, turns: 0, costUsd: 0, byProvider: {} }
+  return { totalInput: 0, totalOutput: 0, totalCacheRead: 0, totalCacheWrite: 0, unpricedCacheWrite: 0, unpricedModelTurns: 0, turns: 0, costUsd: 0, byProvider: {} }
 }
 
 const count = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) ? value : 0)
@@ -346,6 +357,9 @@ function accumulateTurn(acc: Accumulator, provider: string, model: string, usage
   acc.totalCacheRead += cacheReadTokens
   acc.totalCacheWrite += cacheWriteTokens
   acc.unpricedCacheWrite += priced.unpricedCacheWriteTokens
+  // Counted, not costed: an unpriced model must not disappear silently from a
+  // savings figure that a reader takes as complete.
+  if (priced.unpriced) acc.unpricedModelTurns += 1
   acc.turns += 1
   acc.costUsd += priced.usd
 
@@ -368,6 +382,7 @@ function summarize(acc: Accumulator): TokenSavingsSummary {
     cacheReadTokens: acc.totalCacheRead,
     cacheWriteTokens: acc.totalCacheWrite,
     unpricedCacheWriteTokens: acc.unpricedCacheWrite,
+    unpricedModelTurns: acc.unpricedModelTurns,
     savedRmb: Math.round(totalCostUsd * USD_TO_CNY_RATE * 100) / 100,
     savedUsd: Math.round(totalCostUsd * 100) / 100,
     rmbPerUsd: USD_TO_CNY_RATE,
@@ -385,6 +400,7 @@ function accumulatorOf(summary: TokenSavingsSummary, exactCostUsd: number): Accu
     totalCacheRead: summary.cacheReadTokens,
     totalCacheWrite: summary.cacheWriteTokens,
     unpricedCacheWrite: summary.unpricedCacheWriteTokens,
+    unpricedModelTurns: summary.unpricedModelTurns,
     turns: summary.turns,
     costUsd: exactCostUsd,
     byProvider: summary.byProvider,
@@ -563,6 +579,7 @@ function sanitizePersisted(value: unknown): TokenSavingsSummary | undefined {
     cacheReadTokens: out.cacheReadTokens!,
     cacheWriteTokens: optional('cacheWriteTokens'),
     unpricedCacheWriteTokens: optional('unpricedCacheWriteTokens'),
+    unpricedModelTurns: optional('unpricedModelTurns'),
     turns: out.turns!,
     savedUsd: out.savedUsd!,
     savedRmb: out.savedRmb!,

@@ -28,7 +28,7 @@ import {
   OAuthEndpointError,
   oauthEndpointError,
 } from './common.js'
-import type { CatalogPersistence, DiscoveredModel, FetchFn, ModelEntry, ProviderUsage, UsageWindow } from './common.js'
+import type { CatalogPersistence, DiscoveredModel, FetchFn, ModelEntry, ModelListNotFetched, ProviderUsage, UsageWindow } from './common.js'
 import type { PoolAdapter } from './pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, DEFAULT_RETRY, jsonBody, resetInstantFromValue, retryAfterInstant, subscriptionRetryPolicy } from './rate-limit.js'
 import type { RateLimitResetReader, RateLimitWait } from './rate-limit.js'
@@ -45,7 +45,7 @@ import {
   getAgyBootstrapUserAgent,
   getAgyGenerateUserAgent,
 } from './agy/constants.js'
-import { AGY_PUBLIC_MODELS, catalogModel } from './agy/catalog.js'
+import { catalogModel } from './agy/catalog.js'
 import { fetchAvailableModels, listAgyModels, parseAgyQuotaUsage, resolveAgyModel } from './agy/models.js'
 import { parseAgySse } from './agy/parse.js'
 import { recordToolSignature } from './agy/signature-cache.js'
@@ -487,6 +487,15 @@ export class AgyAdapter extends LlmAdapter {
   private readonly catalog: ModelCatalogCache
   private readonly accountCatalogs = new Map<string, ModelCatalogCache>()
   private catalogOwner: string | undefined
+  /**
+   * Why a route's roster was not retrieved, when it was not.
+   *
+   * Empty means "a live read succeeded", so the settings card can distinguish a
+   * provider that fetched nothing from one that genuinely serves no models. An
+   * empty roster alone cannot say which, which is why the reason is carried
+   * separately and cleared on every successful read.
+   */
+  private readonly notFetched = new Map<string, ModelListNotFetched>()
 
   constructor(private readonly options: AgyAdapterOptions) {
     super()
@@ -576,6 +585,7 @@ export class AgyAdapter extends LlmAdapter {
           return discoveredFromList(models)
         }),
       )
+      if (discovered.length > 0) this.notFetched.delete(provider)
       return discovered.map(model => ({
         provider,
         id: model.id,
@@ -585,13 +595,24 @@ export class AgyAdapter extends LlmAdapter {
     } catch (error) {
       if (isDiscoveryAborted(error, signal)) throw error
       if (isMissingOrInvalidCredential(error)) return []
-      this.options.onWarn?.(`agy catalog failed; using the built-in catalog (${errorChain(error)})`)
-      return AGY_PUBLIC_MODELS.filter(model => !model.id.includes('tab')).map(model => ({
-        provider,
-        id: model.id,
-        name: model.name,
-        inputModalities: model.supportsVision === false ? ['text'] as const : ['text', 'image'] as const,
-      }))
+      // NOTHING IS SERVED. This used to return the whole pinned
+      // {@link AGY_PUBLIC_MODELS} roster — twelve models with capabilities — so a
+      // failed discovery was indistinguishable from a healthy one: the user saw a
+      // complete model list and had no way to tell that the READ had failed rather
+      // than the account genuinely having those models. That is exactly the failure
+      // the user reported being unable to diagnose, so it now reports itself through
+      // the same visible channel the other routes use.
+      //
+      // The pinned catalog is NOT deleted, and the distinction matters: it remains
+      // the source of capability metadata for ids the LIVE endpoint returned (see
+      // `discoveredFromList` → `catalogModel`), which is enrichment of a real read
+      // rather than a substitute for one. Agy's endpoint supplies ids and quotaInfo
+      // and no capabilities at all, so deleting it would drop a real disclosure.
+      this.reportNotFetched(provider, {
+        what: 'The Antigravity model list could not be fetched',
+        detail: errorChain(error),
+      })
+      return []
     }
   }
 
@@ -602,6 +623,23 @@ export class AgyAdapter extends LlmAdapter {
       this.catalogOwner = undefined
       this.catalog.invalidate()
     }
+  }
+
+  /**
+   * Record that a route's roster could not be retrieved, and say so on the log too.
+   *
+   * `onWarn` is the log; {@link notFetchedReason} is what the settings card reads, so
+   * the absence is visible where the user actually looks rather than only in a log
+   * they never open.
+   */
+  private reportNotFetched(provider: string, reason: ModelListNotFetched): void {
+    this.notFetched.set(provider, reason)
+    this.options.onWarn?.(`${reason.what} (${reason.detail})`)
+  }
+
+  /** Why this route's roster is empty, when it is empty because nothing was read. */
+  notFetchedReason(provider: string): ModelListNotFetched | undefined {
+    return this.notFetched.get(provider)
   }
 
   async resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {

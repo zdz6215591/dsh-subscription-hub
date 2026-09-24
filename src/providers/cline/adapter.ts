@@ -33,7 +33,7 @@ import type { ProviderId } from '../../auth/store.js'
 import { proxiedFetch } from '../../http.js'
 import { AccountTokenManager } from '../accounts.js'
 import { effortDisplayName, httpLlmError, idleWatchdog, mapFetchFailure } from '../common.js'
-import type { FetchFn, ModelEntry } from '../common.js'
+import type { FetchFn, ModelEntry, ModelListNotFetched } from '../common.js'
 import type { PoolAdapter } from '../pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, subscriptionRetryPolicy } from '../rate-limit.js'
 import type { RateLimitWait } from '../rate-limit.js'
@@ -289,6 +289,8 @@ export interface ClineAdapterOptions {
 /** Cline provider adapter. */
 export class ClineAdapter extends LlmAdapter {
   private readonly catalogs = new Map<string, { at: number; models: ClineModel[] }>()
+  /** Why the last catalog read produced no roster, so a caller can say so. */
+  private readonly notFetched = new Map<string, ModelListNotFetched>()
   private readonly fetchFn: FetchFn
 
   constructor(private readonly options: ClineAdapterOptions) {
@@ -305,8 +307,22 @@ export class ClineAdapter extends LlmAdapter {
   }
 
   clearAccountCatalog(account?: string): void {
-    if (account === undefined) this.catalogs.clear()
-    else this.catalogs.delete(account)
+    if (account === undefined) {
+      this.catalogs.clear()
+      this.notFetched.clear()
+    } else {
+      this.catalogs.delete(account)
+    }
+  }
+
+  /**
+   * Why this route's model list is empty, when it is empty because the read
+   * failed rather than because the account has no models.
+   * @param provider - the registered route.
+   * @returns the recorded reason, or undefined when the last read succeeded.
+   */
+  notFetchedReason(provider: string): ModelListNotFetched | undefined {
+    return this.notFetched.get(provider)
   }
 
   private baseUrl(session: ClineSession): string {
@@ -328,9 +344,11 @@ export class ClineAdapter extends LlmAdapter {
     const configured = this.options.models.find(entry => entry.id === model)
     const catalog = this.catalogEntry(model) ?? clineModel(model)
     // The level set comes from the official catalog when it publishes one.
-    // Only when no source discloses it do we fall back to the gateway-wide
-    // list, because hiding levels would hide ones that do work.
-    const efforts = catalog.reasoning
+    // Only when a source disclosed that the model reasons — but not which levels
+    // — do we offer the gateway-wide list, because hiding levels would hide ones
+    // that do work. A model no source described claims NO reasoning at all:
+    // `catalog.reasoning` is absent, not defaulted to true.
+    const efforts = catalog.reasoning === true
       ? (catalog.efforts ?? CLINE_EFFORTS).map(effort => ({
           id: ReasoningEffortId(effort),
           name: effortDisplayName(effort),
@@ -340,13 +358,18 @@ export class ClineAdapter extends LlmAdapter {
     const defaultEffort = override !== undefined && efforts.some(effort => effort.id === ReasoningEffortId(override))
       ? ReasoningEffortId(override)
       : undefined
+    const contextWindow = configured?.contextWindow ?? catalog.contextWindow
+    const maxTokens = configured?.maxTokens ?? catalog.maxTokens
     return {
       provider,
       id: model,
       name: configured?.name ?? catalog.name,
       inputModalities: configured?.inputModalities ?? [...catalog.input],
-      context: { contextWindow: configured?.contextWindow ?? catalog.contextWindow },
-      defaultMaxTokens: configured?.maxTokens ?? catalog.maxTokens,
+      // Omitted when unread. This used to always carry a number (the catalog's
+      // synthesized 200000), so a model whose window was never read was
+      // indistinguishable from one that disclosed it.
+      ...contextWindow === undefined ? {} : { context: { contextWindow } },
+      ...maxTokens === undefined ? {} : { defaultMaxTokens: maxTokens },
       ...efforts.length === 0 ? {} : { reasoning: { efforts, ...defaultEffort === undefined ? {} : { defaultEffort } } },
     }
   }
@@ -387,13 +410,34 @@ export class ClineAdapter extends LlmAdapter {
     try {
       const session = await this.options.tokens.session(account)
       const models = await discoverClineModels(session.accessToken, this.baseUrl(session), signal, this.fetchFn)
-      if (models.length > 0) this.catalogs.set(account, { at: Date.now(), models })
+      if (models.length > 0) {
+        this.catalogs.set(account, { at: Date.now(), models })
+        this.notFetched.delete(provider)
+      } else {
+        // The reads answered but listed nothing: say so instead of leaving an
+        // empty list that reads as "this account has no models".
+        this.reportNotFetched(provider, {
+          what: 'Cline returned no model roster',
+          detail: 'the recommended-models list and the gateway model list both answered with no cline-pass model',
+        })
+      }
       return toInfos(models, provider)
     } catch (error) {
       if (cached !== undefined) return toInfos(cached.models, provider)
-      this.options.onWarn?.(`cline catalog failed (${error instanceof Error ? error.message : String(error)})`)
+      const detail = error instanceof Error ? error.message : String(error)
+      this.options.onWarn?.(`cline catalog failed (${detail})`)
+      this.reportNotFetched(provider, { what: 'Cline returned no model roster', detail })
       return toInfos([], provider)
     }
+  }
+
+  /**
+   * Record and surface a discovery failure: `onWarn` is the log, and
+   * {@link notFetchedReason} is what the settings card reads.
+   */
+  private reportNotFetched(provider: string, reason: ModelListNotFetched): void {
+    this.notFetched.set(provider, reason)
+    this.options.onWarn?.(`${reason.what} (${reason.detail})`)
   }
 
   streamAccount(options: GenerateOptions, account: string): AsyncIterable<StreamChunk> {

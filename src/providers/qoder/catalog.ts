@@ -201,23 +201,29 @@ export function normalizeQoderModels(
     const contextOptions = contextOptionsOf(raw.context_config)
     const defaultOptions = Object.values(contextOptions ?? {}).filter(option => option.isDefault && option.tokenCount !== undefined)
     if (defaultOptions.length > 1) onConflict?.('context-defaults')
+    // The window is whatever a source actually declared. There used to be a
+    // `?? 180_000` here, which gave every model with no default tier and no
+    // `max_input_tokens` the same invented window — so a model whose window was
+    // never read looked exactly like one that disclosed 200000.
     const contextWindow = (defaultOptions.length === 1 ? defaultOptions[0]?.tokenCount : undefined)
-      ?? positiveNumber(raw.max_input_tokens) ?? 180_000
+      ?? positiveNumber(raw.max_input_tokens)
     const maxContextWindow = Math.max(
       positiveNumber(raw.max_input_tokens) ?? 0,
-      contextWindow,
+      contextWindow ?? 0,
       ...Object.values(contextOptions ?? {}).map(option => option.tokenCount ?? 0),
     )
     const isReasoning = thinkingDefault(raw.thinking_config, raw.is_reasoning === true, onConflict)
     const priceFactor = typeof raw.price_factor === 'number' && Number.isFinite(raw.price_factor) && raw.price_factor >= 0
       ? raw.price_factor : undefined
+    const maxTokens = positiveNumber(raw.max_output_tokens)
     const reasoning = reasoningEffortsOf(raw.thinking_config)
     models.push({
       id,
       name: typeof raw.display_name === 'string' && raw.display_name.trim() ? raw.display_name.trim() : id,
-      contextWindow,
+      ...contextWindow === undefined ? {} : { contextWindow },
       maxContextWindow,
-      maxTokens: positiveNumber(raw.max_output_tokens) ?? 32_768,
+      // Same rule for the output cap: `?? 32_768` used to invent one per model.
+      ...maxTokens === undefined ? {} : { maxTokens },
       source: typeof raw.source === 'string' && raw.source.trim() ? raw.source.trim() : 'system',
       isReasoning,
       supportsEffort: reasoning.efforts !== undefined,
@@ -321,60 +327,6 @@ export function hasSameQoderDiscoveryMetadata(
     ))
   })
 }
-
-/** Per-request output cap assumed when a model's catalog entry omits one. */
-export const defaultMaxTokens = 32_768
-
-/** The catalog used before the first successful discovery (and when discovery is off). */
-export const defaultModels: QoderCatalogModel[] = [
-  {
-    id: 'cmodel',
-    name: 'Cantus (Qoder)',
-    description: 'Default Global Qoder subscription model for quick validation',
-    contextWindow: 1_000_000,
-    maxTokens: defaultMaxTokens,
-    supportsImages: true,
-  },
-  {
-    id: 'auto',
-    name: 'Qoder Auto',
-    description: 'Server-routed Global Qoder model pool',
-    contextWindow: 180_000,
-    maxTokens: defaultMaxTokens,
-    supportsImages: true,
-  },
-  {
-    id: 'ultimate',
-    name: 'Qoder Ultimate',
-    description: 'Highest-capability Global Qoder model pool',
-    contextWindow: 1_000_000,
-    maxTokens: defaultMaxTokens,
-    supportsImages: true,
-  },
-  {
-    id: 'performance',
-    name: 'Qoder Performance',
-    description: 'Performance-oriented Global Qoder model pool',
-    contextWindow: 1_000_000,
-    maxTokens: defaultMaxTokens,
-    supportsImages: true,
-  },
-  {
-    id: 'efficient',
-    name: 'Qoder Efficient',
-    description: 'Efficiency-oriented Global Qoder model pool',
-    contextWindow: 180_000,
-    maxTokens: defaultMaxTokens,
-    supportsImages: true,
-  },
-  {
-    id: 'lite',
-    name: 'Qoder Lite',
-    description: 'Basic Global Qoder model pool',
-    contextWindow: 180_000,
-    maxTokens: defaultMaxTokens,
-  },
-]
 
 /** Tuning for one catalog read. */
 export interface FetchQoderModelsOptions {

@@ -493,21 +493,28 @@ export class CodeBuddyAdapter extends LlmAdapter {
     }
     const entry = [...this.catalogs.values()].flatMap(item => item.models).find(candidate => candidate.id === model)
     const configured = this.options.models.find(item => item.id === model)
+    // Only a disclosed value. This used to end on `?? 128_000` / `?? 8_192`, so a
+    // model the catalog does not list reported two invented capacities as its own.
     const contextWindow = entry?.maxAllowedSize !== undefined && entry.maxAllowedSize > 0
       ? entry.maxAllowedSize
-      : configured?.contextWindow ?? 128_000
+      : configured?.contextWindow
     const maxTokens = entry?.maxOutputTokens !== undefined && entry.maxOutputTokens > 0
       ? entry.maxOutputTokens
-      : configured?.maxTokens ?? 8_192
+      : configured?.maxTokens
     const reasoning = codebuddyReasoning(entry?.reasoning)
     const mergedReasoning = mergeReasoning(this.options.defaultEffortOf?.(model), reasoning)
+    // Mirrors the LISTING path exactly. Both arms here used to read
+    // `['text', 'image']`, so the resolved metadata claimed image input for every
+    // model — including ones the catalog says are text-only — while the picker
+    // row for the same model said otherwise.
+    const inputModalities = entry?.supportsImages === true ? ['text', 'image'] as const : ['text'] as const
     return {
       provider,
       id: model,
       name: entry?.name ?? configured?.name ?? model,
-      inputModalities: entry?.supportsImages === true ? ['text', 'image'] : ['text', 'image'],
-      context: { contextWindow },
-      defaultMaxTokens: maxTokens,
+      inputModalities,
+      ...contextWindow === undefined ? {} : { context: { contextWindow } },
+      ...maxTokens === undefined ? {} : { defaultMaxTokens: maxTokens },
       ...mergedReasoning !== undefined ? { reasoning: mergedReasoning } : {},
     }
   }

@@ -125,16 +125,17 @@ test('QoderAdapter falls back to the configured list when discovery fails', asyn
   assert.equal(resolved.defaultMaxTokens, 8_192)
 })
 
-test('QoderAdapter advertises no model catalog when discovery is off and nothing is configured', async () => {
+test('QoderAdapter lists NO models when discovery is off and nothing is configured', async () => {
   const transport = adapter({
     discovery: false,
     models: [],
     fetchFn: (async () => { throw new Error('no request expected') }) as typeof fetch,
   })
   const models = await transport.listModels('qoder')
-  // The reference's built-in fallback list is what an unconfigured route offers.
-  assert.ok(models.length > 0)
-  assert.equal(models[0]?.provider, 'qoder')
+  // The reference's built-in fallback list used to be served here, which put six
+  // invented pool names and windows in front of the user as the account's roster.
+  // An unconfigured route with discovery off now offers nothing at all.
+  assert.deepEqual(models, [])
 })
 
 test('QoderAdapter aborts a shared discovery only after its last waiter leaves', async () => {

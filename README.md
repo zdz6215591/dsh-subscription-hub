@@ -28,8 +28,9 @@ Also included:
   stream `usage` chunk or on the settled assistant message — a session uses one
   or the other), prices each turn by its own catalog row including the
   peak/off-peak windows, context-length bands and cache-write rates that row
-  publishes, and marks a model no published rate covers as approximate instead of
-  guessing a lookalike. **Recalculate** re-walks the whole history.
+  publishes, and contributes NO cost for a model no published rate covers
+  (reporting it as an unpriced turn) instead of guessing a lookalike or a generic
+  rate. **Recalculate** re-walks the whole history.
 - **Multi-account pool** with quota-aware rotation, per-account usage bars, and
   image-request account failover.
 - **Visible-model checkboxes** (composer picker only) plus a **Refresh models**

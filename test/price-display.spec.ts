@@ -62,10 +62,17 @@ test('CommandCode prices resolve for the live catalog ids', () => {
 test('a served CommandCode id never renders half a price', () => {
   // The property the display actually depends on: not "the table is big" but "a
   // row either shows a complete pair or nothing".
-  for (const id of ['claude-sonnet-5', 'claude-fable-5', 'claude-opus-5-5', 'MiniMaxAI/MiniMax-M2.5']) {
-    const rates = resolveModelPrice(id)?.rates
+  for (const id of ['claude-sonnet-5', 'claude-fable-5', 'zai-org/GLM-5.3']) {
+    const rates = resolveModelPrice(id).rates
     assert.ok(rates !== undefined, `${id} has no vendored price`)
     assert.ok(priceSuffix({ input: rates.input, output: rates.output }).startsWith(' · $'), id)
   }
+  // An id the table does not carry renders NOTHING rather than a half or guessed
+  // figure. This id used to be priced by the `claude-opus` vendor-SUBSTRING rule,
+  // i.e. it showed Claude Opus's own rates as if they were this model's.
+  const unlisted = resolveModelPrice('claude-opus-5-5')
+  assert.equal(unlisted.source, 'unpriced')
+  assert.equal(unlisted.rates, undefined)
+  assert.equal(priceSuffix(unlisted.rates), '', 'no rate means no suffix at all')
 })
 

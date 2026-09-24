@@ -60,17 +60,17 @@ export const GROK_API_URL = 'https://api.x.ai/v1/responses'
 const GROK_SCOPE = 'openid profile email offline_access grok-cli:access api:access'
 const GROK_CALLBACK_PATH = '/callback'
 /**
- * Fallback window for a model the live CLI catalog does not describe.
+ * Refresh when the access token has less than this much life left.
  *
- * The live catalog (`cli-chat-proxy.grok.com/v1/models`) reports 500000 for
- * every model it serves (grok-4.5/4.6/4.7 and the build-fast variant), so the
- * offline fallback must match it: the old 256000 made the harness compact a
- * conversation to half the window the model actually accepts. Discovery
- * overrides this whenever it succeeds.
+ * NOTE for whoever reads the history here: this file used to carry a
+ * `GROK_CONTEXT_WINDOW = 500_000` fallback for models the live CLI catalog did
+ * not describe, and before that a `256000` one. Both were wrong in the same way
+ * — they presented a constant as the model's own capacity, and the `256000` made
+ * the harness compact a conversation to half the window the model accepts. The
+ * live catalog (`cli-chat-proxy.grok.com/v1/models`) reports 500000 for every
+ * model it serves; the number is a real fact about THAT catalog, so it belongs to
+ * discovery, not to a default.
  */
-const GROK_CONTEXT_WINDOW = 500_000
-const GROK_DEFAULT_MAX_TOKENS = 32_000
-/** Refresh when the access token has less than this much life left. */
 export const GROK_PREEMPT_MS = 2 * 60_000
 
 /** Body fields xAI uses to name a delay or reset. */
@@ -816,14 +816,21 @@ export class GrokAdapter extends LlmAdapter {
     // still merges in: the picker then preselects it even for models the
     // CLI catalog does not cover.
     const reasoning = mergeReasoning(this.options.defaultEffortOf?.(model), discovered?.reasoning)
+    const contextWindow = discovered?.contextWindow ?? configured?.contextWindow
+    const maxTokens = configured?.maxTokens
     return {
       provider,
       id: model,
       name: discovered?.name ?? configured?.name ?? model,
       ...discovered?.description === undefined ? {} : { description: discovered.description },
       inputModalities: configured?.inputModalities ?? grokModalities(model),
-      context: { contextWindow: discovered?.contextWindow ?? configured?.contextWindow ?? GROK_CONTEXT_WINDOW },
-      defaultMaxTokens: configured?.maxTokens ?? GROK_DEFAULT_MAX_TOKENS,
+      // Only a value that was READ. This used to terminate on `?? 500_000` and
+      // `?? 32_000`, so a model the live CLI catalog does not describe — the
+      // `grok-build-*` entries it omits — reported a 500000 window as its own.
+      // Both fields are optional in the harness contract; absent is honest, and
+      // the settings list renders it as "not fetched".
+      ...contextWindow === undefined ? {} : { context: { contextWindow } },
+      ...maxTokens === undefined ? {} : { defaultMaxTokens: maxTokens },
       ...reasoning === undefined ? {} : { reasoning },
     }
   }

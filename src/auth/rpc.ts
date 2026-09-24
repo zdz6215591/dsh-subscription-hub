@@ -12,7 +12,7 @@ import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { LAB_SLUG_PATTERN } from '../lab-logo.js'
 import { PROVIDER_IDS, type ProviderId } from './store.js'
-import type { ProviderUsage } from '../providers/common.js'
+import type { ModelListNotFetched, ProviderUsage } from '../providers/common.js'
 import type { ProxyConfigView, ProxyDraft, ProxyInput, ProxyTestResult } from '../http.js'
 import type { PoolModeController, PoolModeInput } from '../providers/pool-mode.js'
 import type { CodeBuddyCheckinStatusView } from '../providers/codebuddy.js'
@@ -190,17 +190,27 @@ export interface ExtraOps {
    * Every model of one route, with the display facts the list renders beside its
    * name: the owning vendor and the accepted input modalities. Both are resolved
    * host-side, so the browser carries no vendor table of its own.
+   *
+   * `notFetched` is present EXACTLY when the route's roster could not be
+   * retrieved, so the list is empty for THAT reason rather than because the
+   * account has no models. It exists so an absent roster renders as absent: an
+   * empty array alone cannot be told from "nothing to show", and a substituted
+   * default roster — what this used to be masked by — is worse still.
    */
   visibility(provider: ProviderId): Promise<{
-    id: string
-    name: string
-    visible: boolean
-    unread?: boolean
-    /** Owning vendor, or absent when the id names none this build knows. */
-    vendor?: { id: string; label: string; lab?: string }
-    /** Accepted input modalities, or absent when the route never declared them. */
-    inputModalities?: string[]
-  }[]>
+    models: {
+      id: string
+      name: string
+      visible: boolean
+      unread?: boolean
+      /** Owning vendor, or absent when the id names none this build knows. */
+      vendor?: { id: string; label: string; lab?: string }
+      /** Accepted input modalities, or absent when the route never declared them. */
+      inputModalities?: string[]
+    }[]
+    /** Why the roster is empty, present only when the read failed. */
+    notFetched?: ModelListNotFetched
+  }>
   setVisible(provider: ProviderId, model: string, visible: boolean): Promise<void>
   /**
    * The models.dev logos for the labs the model list is currently showing, so a
@@ -802,7 +812,9 @@ async function dispatch(
     }
     case 'visibility': {
       if (extras === undefined) throw new BadRequest('visibility is unavailable')
-      return ok({ models: await extras.visibility(readProvider(payload)) })
+      // The whole answer is passed through, so an empty roster travels with its
+      // reason instead of arriving as a bare `[]`.
+      return ok(await extras.visibility(readProvider(payload)))
     }
     case 'setVisible': {
       if (extras === undefined) throw new BadRequest('visibility is unavailable')

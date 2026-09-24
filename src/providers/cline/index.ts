@@ -16,7 +16,6 @@ export type { ClineAdapterOptions } from './adapter.js'
 export {
   CLINE_BASE_URL,
   CLINE_EFFORTS,
-  CLINE_MODEL_CATALOG,
   CLINE_MODEL_PREFIX,
   CLINE_RECOMMENDED_URL,
   clineModel,

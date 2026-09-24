@@ -234,66 +234,41 @@ export function priceSlugCandidates(model: string): string[] {
   return [...new Set(out.filter(slug => slug !== ''))]
 }
 
-/** A coarse vendor-family fallback, used only when the published table has no row. */
-export interface FamilyRate {
-  key: string
-  rates: ModelRates
-}
-
-/**
- * Family fallback rates, for ids the published table does not carry (a hub
- * brand name, a model that shipped after the last sync).
- *
- * This is a fallback, not the pricing model: it keys on a vendor substring, so
- * it cannot tell a resold model from the vendor's own, and it publishes no
- * cache-write rate. {@link resolveModelPrice} reports which source won so a
- * caller can say "approximate" instead of implying a published figure.
- */
-const FAMILY_RATES: ReadonlyArray<readonly [string, RateTuple]> = [
-  ['claude-opus', [15, 75, 0.5]],
-  ['claude-sonnet', [3, 15, 0.3]],
-  ['claude-haiku', [1, 5, 0.1]],
-  ['gpt-6', [5, 20, 0.5]],
-  ['gpt-5', [2.5, 10, 0.25]],
-  ['gpt-4', [2.5, 10, 0.25]],
-  ['grok', [2, 10, 0.2]],
-  ['gemini-3-pro', [2, 12, 0.2]],
-  ['gemini-3.1-pro', [2, 12, 0.2]],
-  ['gemini-3.8-flash', [0.75, 3.75, 0.075]],
-  ['gemini-3.7-flash', [0.75, 3.75, 0.075]],
-  ['gemini-3-flash', [0.5, 3, 0.05]],
-  ['gemini-2.5-flash', [0.3, 2.5, 0.03]],
-  ['gemini-flash', [0.3, 2.5, 0.03]],
-  ['deepseek', [0.15, 0.6, 0.003]],
-  ['glm', [0.2, 0.8, 0.02]],
-  ['hy3', [0.14, 0.58, 0.035]],
-  ['hy4', [0.4, 1.5, 0.05]],
-  ['doubao', [0.4, 1.5, 0.05]],
-  ['seed', [0.4, 1.5, 0.05]],
-  ['codebuddy', [0.4, 1.5, 0.05]],
-]
-
-/** The last resort when neither the table nor a family rule can price a model. */
-const DEFAULT_RATES: ModelRates = { input: 2, output: 8, cacheRead: 0.2 }
-
 /** Which source priced a model. */
-export type PriceSource = 'catalog' | 'family' | 'default'
+export type PriceSource = 'catalog' | 'unpriced'
 
 /** The outcome of pricing one model id. */
 export interface ResolvedPrice {
   source: PriceSource
-  /** The published row, present only for `catalog`. */
+  /**
+   * The published row. Present only for `catalog`, which is the only source
+   * there is now: a model the table does not carry is UNPRICED, not guessed at.
+   */
   price?: ModelPrice
-  /** The family rule's key, present only for `family`. */
-  family?: string
-  rates: ModelRates
+  /**
+   * The rates. Present only for `catalog`; absent means "no published rate
+   * exists for this id", which the caller reports as no cost at all.
+   */
+  rates?: ModelRates
   peak?: ModelRates
   tiers?: ModelPriceTier[]
 }
 
 /**
- * Price one model id: published row first, family fallback second, generic last.
- * @param model - the catalog model id (a provider name is accepted as a last resort).
+ * Price one model id from the published table alone.
+ *
+ * A model the table does not carry is returned UNPRICED — `rates` absent — and
+ * the caller contributes no cost for it. This replaced a two-stage guess: a
+ * coarse vendor-SUBSTRING family rule (`deepseek` → DeepSeek's own rates, even
+ * for a resold model whose id merely contained the word) followed by a generic
+ * `$2/$8` last resort. Both fed a cost/savings figure shown in the UI, so an
+ * unpriced model silently acquired an invented price and a reader had no way to
+ * tell a measured cost from a fabricated one.
+ *
+ * The `priced` / `unpriced` reporting in {@link priceUsage} is what replaced the
+ * old `approximate` flag, where it now only ever means "no published rate
+ * exists" rather than "priced by a guess".
+ * @param model - the catalog model id.
  * @returns the resolved price plus which source won.
  */
 export function resolveModelPrice(model: string): ResolvedPrice {
@@ -309,15 +284,11 @@ export function resolveModelPrice(model: string): ResolvedPrice {
       }
     }
   }
-  const lower = (model || '').toLowerCase()
-  for (const [key, tuple] of FAMILY_RATES) {
-    if (lower.includes(key)) return { source: 'family', family: key, rates: toRates(tuple) }
-  }
-  return { source: 'default', rates: DEFAULT_RATES }
+  return { source: 'unpriced' }
 }
 
 /**
- * The rates one request is charged at.
+ * The rates one request is charged at, or undefined when the model is unpriced.
  *
  * A tiered row returns its matching band and does NOT then apply `peak`: the page
  * publishes those two dimensions independently, no row carries both today, and
@@ -327,9 +298,10 @@ export function resolveModelPrice(model: string): ResolvedPrice {
  * @param resolved - the resolved price.
  * @param at - the request time in epoch ms, or undefined when unknown (off-peak).
  * @param contextTokens - every prompt bucket of THIS request (input + cache read + cache write).
- * @returns the rates to bill with.
+ * @returns the rates to bill with, or undefined when no published rate exists.
  */
-export function ratesFor(resolved: ResolvedPrice, at: number | undefined, contextTokens: number): ModelRates {
+export function ratesFor(resolved: ResolvedPrice, at: number | undefined, contextTokens: number): ModelRates | undefined {
+  if (resolved.rates === undefined) return undefined
   const tier = resolved.tiers?.find(band => band.maxContext === undefined || contextTokens <= band.maxContext)
   if (tier !== undefined) return tier.rates
   if (resolved.peak !== undefined && at !== undefined && isPeakPricingHour(at)) return resolved.peak
@@ -346,16 +318,23 @@ export interface BilledUsage {
 
 /** What one request costs, and how complete that figure is. */
 export interface PricedUsage {
+  /**
+   * The cost in USD. ZERO when the model has no published rate — and
+   * {@link priced} is then false, so a caller can tell "this cost nothing" from
+   * "nobody published a price for this".
+   */
   usd: number
+  /** True only when a published row priced this request. */
+  priced: boolean
   source: PriceSource
-  /** The row/rule that priced it, for reporting. */
-  key: string
+  /** The row that priced it, for reporting; absent when unpriced. */
+  key?: string
   /** True when the row published a cache-write rate, so those tokens are inside `usd`. */
   pricedCacheWrite: boolean
   /** Cache-write tokens charged at nothing because no published rate exists. */
   unpricedCacheWriteTokens: number
-  /** True when the rate came from a family substring or the generic default. */
-  approximate: boolean
+  /** True when this request contributed no cost because no rate covers the model. */
+  unpriced: boolean
   /** The context band's upper bound, when a tiered row priced this request. */
   tierMaxContext?: number
 }
@@ -364,6 +343,10 @@ const finite = (value: unknown): number => (typeof value === 'number' && Number.
 
 /**
  * Price one request's usage.
+ *
+ * A model the published table does not carry contributes NO cost. It is reported
+ * as `unpriced` rather than being assigned a vendor-family or generic rate, so a
+ * savings figure can never silently include an invented amount.
  * @param model - the catalog model id the request ran on.
  * @param at - the request time in epoch ms, or undefined when the transcript carries none.
  * @param usage - the billed buckets.
@@ -377,6 +360,17 @@ export function priceUsage(model: string, at: number | undefined, usage: BilledU
   const cacheWrite = finite(usage.cacheWriteTokens)
   const contextTokens = input + cacheRead + cacheWrite
   const rates = ratesFor(resolved, at, contextTokens)
+  if (rates === undefined) {
+    // No published rate: contribute nothing rather than an invented amount.
+    return {
+      usd: 0,
+      priced: false,
+      source: 'unpriced',
+      pricedCacheWrite: false,
+      unpricedCacheWriteTokens: 0,
+      unpriced: true,
+    }
+  }
   const tier = resolved.tiers?.find(band => band.maxContext === undefined || contextTokens <= band.maxContext)
   const pricedCacheWrite = rates.cacheWrite !== undefined
   const usd = (
@@ -385,16 +379,14 @@ export function priceUsage(model: string, at: number | undefined, usage: BilledU
     + cacheRead * rates.cacheRead
     + (pricedCacheWrite ? cacheWrite * (rates.cacheWrite as number) : 0)
   ) / 1_000_000
-  const key = resolved.source === 'catalog'
-    ? resolved.price?.id ?? model
-    : resolved.source === 'family' ? `family:${resolved.family ?? ''}` : 'default'
   return {
     usd,
+    priced: true,
     source: resolved.source,
-    key,
+    ...resolved.price === undefined ? {} : { key: resolved.price.id },
     pricedCacheWrite,
     unpricedCacheWriteTokens: pricedCacheWrite ? 0 : cacheWrite,
-    approximate: resolved.source !== 'catalog',
+    unpriced: false,
     ...tier?.maxContext === undefined ? {} : { tierMaxContext: tier.maxContext },
   }
 }

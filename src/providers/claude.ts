@@ -63,8 +63,19 @@ export const CLAUDE_PROFILE_URL = 'https://api.anthropic.com/api/oauth/profile'
 export const CLAUDE_MODELS_URL = 'https://api.anthropic.com/v1/models?beta=true'
 export const CLAUDE_SCOPE = 'org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload'
 export const CLAUDE_CALLBACK_PATH = '/callback'
-const CLAUDE_CONTEXT_WINDOW = 200_000
-const CLAUDE_DEFAULT_MAX_TOKENS = 32_000
+// A fabricated window used to be declared here (`CLAUDE_CONTEXT_WINDOW = 200_000`)
+// and substituted when no source had described a model. Removed: the discovery read
+// never populated a window at all, so that constant WAS the reported window for every
+// Claude model, presented as the model's own figure.
+/**
+ * What the Anthropic Messages request's REQUIRED `max_tokens` falls back to.
+ *
+ * Kept at the request boundary on purpose. It is not the model's output cap and
+ * is never reported as one: `resolveOwnModel` omits `defaultMaxTokens` when no
+ * source supplied a value, so this figure cannot reach the settings list or the
+ * resolved metadata as a claim about the model.
+ */
+const REQUEST_DEFAULT_MAX_TOKENS = 32_000
 /** Refresh when the access token has less than this much life left. */
 export const CLAUDE_PREEMPT_MS = 5 * 60_000
 
@@ -679,15 +690,20 @@ export class ClaudeAdapter extends LlmAdapter {
     const disc = await this.discovered(model)
     const configured = this.options.models.find(entry => entry.id === model)
     const reasoning = mergeReasoning(this.options.defaultEffortOf?.(model), disc?.reasoning)
+    // `disc.contextWindow` is never populated by `fetchClaudeModels` (the catalog
+    // discloses no window), so the old `?? CLAUDE_CONTEXT_WINDOW` meant the
+    // invented 200000 shipped for EVERY model that had no config entry — not as a
+    // last resort but as the normal answer. Nothing is reported now unless a
+    // source actually disclosed it.
+    const contextWindow = disc?.contextWindow ?? configured?.contextWindow
+    const maxTokens = configured?.maxTokens
     return {
       provider,
       id: model,
       name: disc?.name ?? configured?.name ?? model,
       inputModalities: configured?.inputModalities ?? CLAUDE_MODALITIES,
-      context: {
-        contextWindow: disc?.contextWindow ?? configured?.contextWindow ?? CLAUDE_CONTEXT_WINDOW,
-      },
-      defaultMaxTokens: configured?.maxTokens ?? CLAUDE_DEFAULT_MAX_TOKENS,
+      ...contextWindow === undefined ? {} : { context: { contextWindow } },
+      ...maxTokens === undefined ? {} : { defaultMaxTokens: maxTokens },
       ...(reasoning === undefined ? {} : { reasoning }),
     }
   }
@@ -751,9 +767,14 @@ export class ClaudeAdapter extends LlmAdapter {
 
   private async request(options: GenerateOptions, session: ClaudeSession, signal: AbortSignal): Promise<Response> {
     const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal)
+    // The Anthropic Messages API REQUIRES `max_tokens`, so a request cannot be
+    // built without a number. This is the harness's own request requirement, not
+    // a claim about the model: `resolveOwnModel` reports no `defaultMaxTokens`
+    // when neither the catalog nor the config supplied one, so nothing presents
+    // this figure as the model's output capacity.
     const maxTokens = options.maxTokens
       ?? this.options.models.find(entry => entry.id === options.model)?.maxTokens
-      ?? CLAUDE_DEFAULT_MAX_TOKENS
+      ?? REQUEST_DEFAULT_MAX_TOKENS
     const disc = await this.discovered(options.model)
     const thinking = this.thinkingParam(disc?.thinkingType, maxTokens)
     const effort = options.reasoningEffort !== undefined && disc?.reasoning !== undefined

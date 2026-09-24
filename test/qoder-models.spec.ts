@@ -82,9 +82,15 @@ test('context defaults and fallback capacities stay separate from maximum capaci
     assert.equal(model!.maxContextWindow, 1_000_000)
     assert.equal(conflicts.length, expectedConflicts)
   }
+  // A model that declared nothing reports NOTHING. These two fields used to read
+  // 180000 and 32768: invented capacities attributed to the model, which made an
+  // unread window indistinguishable from a disclosed one.
   const [fallback] = normalizeQoderModels({ assistant: [{ key: 'model', enable: true }] })
-  assert.equal(fallback!.contextWindow, 180_000)
-  assert.equal(fallback!.maxTokens, 32_768)
+  assert.equal(fallback!.contextWindow, undefined, 'an undeclared window must be absent')
+  assert.equal(fallback!.maxTokens, undefined, 'an undeclared cap must be absent')
+  // `maxContextWindow` is a computed floor over values that were present, so it
+  // legitimately reports 0 when none were — that is not a capacity claim.
+  assert.equal(fallback!.maxContextWindow, 0)
 })
 
 test('thinking state follows a unique explicit default and otherwise the reasoning flag', () => {

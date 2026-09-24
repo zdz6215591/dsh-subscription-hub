@@ -18,7 +18,7 @@
 import type { LlmModelInfo } from '@deepseek-ai/dsh-llm'
 import { proxiedFetch } from '../../http.js'
 import { rateSuffix } from '../common.js'
-import type { FetchFn } from '../common.js'
+import type { FetchFn, ModelListNotFetched } from '../common.js'
 import {
   TRAE_CHAT_BASE,
   TRAE_IDE_DIRECTORY_FUNCTIONS,
@@ -58,17 +58,24 @@ export interface TraeModel {
   wireConfigName?: string
 }
 
-/** Models served when discovery is unavailable, so the picker is never empty. */
-export const TRAE_FALLBACK_MODELS: readonly TraeModel[] = [
-  { id: 'DeepSeek-V4-Flash-Official', name: 'DeepSeek-V4-Flash', contextWindow: 200_000, functionName: 'solo_work_remote', efforts: ['none', 'low', 'high', 'xhigh'] },
-  { id: 'DeepSeek-V4-Pro-Official', name: 'DeepSeek-V4-Pro', contextWindow: 200_000, functionName: 'solo_work_remote', efforts: ['none', 'low', 'high', 'xhigh'] },
-  { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 200_000, functionName: 'solo_work_remote', efforts: ['none', 'low', 'high', 'xhigh'] },
-  { id: 'glm-5.2', name: 'GLM-5.2', contextWindow: 200_000, functionName: 'solo_work_remote', efforts: ['none', 'high', 'xhigh'] },
-  { id: 'kimi-k3', name: 'Kimi-K3', contextWindow: 200_000, functionName: 'solo_work_remote', efforts: ['none', 'low', 'high', 'xhigh'] },
-  { id: 'kimi-k2.6', name: 'Kimi-K2.6', contextWindow: 200_000, functionName: 'solo_work_remote' },
-  { id: 'qwen3.8-max', name: 'Qwen3.8-Max', contextWindow: 200_000, functionName: 'solo_work_remote', efforts: ['none', 'low', 'high', 'xhigh'] },
-  { id: 'Doubao-Seed-2.1-Pro', name: 'Seed-2.1-Pro-0915', contextWindow: 256_000, functionName: 'solo_work_remote', efforts: ['none', 'low', 'high'] },
-]
+/**
+ * The outcome of one Trae catalog read.
+ *
+ * `models` is empty EXACTLY when discovery returned no roster, and that case
+ * carries {@link TraeCatalogRead.notFetched} instead of a substituted list.
+ *
+ * It used to return `TRAE_FALLBACK_MODELS` — eight hardcoded rows — whenever the
+ * read failed, so a broken directory fetch produced a full-looking picker with
+ * no rates, no per-model windows and no advertised reasoning levels. The user
+ * could not tell a broken route from a healthy one, which is the whole reason
+ * this is now an explicit "not fetched" instead of a plausible default.
+ */
+export interface TraeCatalogRead {
+  /** The callable roster, in skeleton order. */
+  models: TraeModel[]
+  /** Why the roster is empty, present only when it is. */
+  notFetched?: ModelListNotFetched
+}
 
 /** Discovery timeout. */
 const DISCOVERY_TIMEOUT_MS = 30_000
@@ -277,11 +284,12 @@ const TRAE_REMOTE_DIRECTORY_FUNCTIONS: readonly string[] = [
  * rely on the injected fetcher to resolve it, but `proxiedFetch` hands its input
  * straight to global `fetch`, which cannot parse a relative URL — so the call threw
  * every single time and the `catch` below turned it into `undefined`. Nothing
- * surfaced as an error, because `fetchTraeModels` treats a missing directory as a
- * reason to serve the static fallback: the route silently listed 8 hardcoded
- * models instead of the live roster, with no rates, no per-model context windows
- * and no advertised reasoning levels. The base comes from the region table, which
- * is the authority for the directory host on both regions.
+ * surfaced as an error, because `fetchTraeModels` then treated a missing directory
+ * as a reason to serve its hardcoded fallback: the route silently listed 8
+ * invented models instead of the live roster, with no rates, no per-model context
+ * windows and no advertised reasoning levels. The base comes from the region
+ * table, which is the authority for the directory host on both regions. (The
+ * fallback itself is gone; a read that returns nothing now reports that.)
  */
 export async function fetchRemoteModels(
   accessToken: string,
@@ -345,11 +353,11 @@ export async function fetchRemoteModels(
         if (typeof raw !== 'object' || raw === null) continue
         const id = typeof raw.name === 'string' ? raw.name : ''
         if (id === '') continue
-        // NOT filtered against the static table any more. The directory is the
-        // skeleton and the live wire roster decides callability (see
-        // `mergeTraeModelSources`), so a model this table has never heard of is
-        // still listed when the account can actually call it; the table's only
-        // remaining job is the offline fallback list.
+        // NOT filtered against the callability table any more. The directory is
+        // the skeleton and the live wire roster decides callability (see
+        // `mergeTraeModelSources`), so a model the table has never heard of is
+        // still listed when the account can actually call it. The table now only
+        // supplies the owning function for an id it happens to know.
         const functionName = TRAE_CALLABILITY[id] ?? TRAE_SOLO_DIRECTORY_FUNCTIONS[0]!
         const display = typeof raw.display_name === 'string' && raw.display_name !== '' ? raw.display_name : id
         const name = TRAE_DISPLAY_OVERRIDES[id] ?? display
@@ -363,7 +371,11 @@ export async function fetchRemoteModels(
             id,
             name,
             ...windows,
-            maxTokens: 32_000,
+            // NO `maxTokens` here. The directory does not publish an output cap,
+            // and this used to write the constant 32000 into every row — a
+            // fabricated cap presented as the model's. The real cap rides the
+            // WIRE roster (`sizesOf` reads `max_tokens`) and is folded in by
+            // `mergeTraeModelSources`.
             ...creditMultiplier === undefined ? {} : { creditMultiplier },
             functionName,
             ...efforts === undefined ? {} : { efforts },
@@ -404,10 +416,12 @@ export async function fetchRemoteModels(
         name: 'DeepSeek-V4.1-Flash',
         ...flash.contextWindow === undefined ? {} : { contextWindow: flash.contextWindow },
         ...flash.maxContextWindow === undefined ? {} : { maxContextWindow: flash.maxContextWindow },
-        maxTokens: flash.maxTokens ?? 32_000,
+        // Inherited from the row it aliases, never defaulted: an output cap or a
+        // level set this alias did not read is absent, not assumed.
+        ...flash.maxTokens === undefined ? {} : { maxTokens: flash.maxTokens },
         functionName: flash.functionName,
         wireConfigName: flash.id,
-        efforts: flash.efforts ?? ['none', 'low', 'high', 'xhigh'],
+        ...flash.efforts === undefined ? {} : { efforts: flash.efforts },
       })
     }
 
@@ -505,6 +519,11 @@ export function mergeTraeModelSources(remote: readonly TraeModel[], wire: readon
     const match = wireById.get(key(row.id)) ?? wireByName.get(key(row.name))
     // No config_name maps to this display id: the chat endpoint would reject it.
     if (match === undefined) continue
+    // The directory publishes no output cap, so the matched WIRE row's real
+    // `max_tokens` is the only read value there is. Taking it here is what keeps
+    // the row honest now that the directory no longer carries a fabricated
+    // constant, and the wire read always wins over nothing at all.
+    const maxTokens = row.maxTokens ?? match.maxTokens
     merged.push({
       id: row.id,
       // `row.name` stays UNDECORATED here: the rate is appended in
@@ -514,7 +533,7 @@ export function mergeTraeModelSources(remote: readonly TraeModel[], wire: readon
       name: row.name,
       ...row.contextWindow === undefined ? {} : { contextWindow: row.contextWindow },
       ...row.maxContextWindow === undefined ? {} : { maxContextWindow: row.maxContextWindow },
-      ...row.maxTokens === undefined ? {} : { maxTokens: row.maxTokens },
+      ...maxTokens === undefined ? {} : { maxTokens },
       // The rate comes from the DIRECTORY row (the wire roster does not publish
       // one). It has to be carried across this merge explicitly: the merge builds a
       // new object, so omitting a field here silently drops it, and the rate was
@@ -538,19 +557,25 @@ export function mergeTraeModelSources(remote: readonly TraeModel[], wire: readon
  * Both sources are fetched together because neither alone is usable — the
  * skeleton is not callable, and the wire roster is unfiltered.
  *
- * Degradation is deliberate. When the wire roster is UNAVAILABLE (every
- * directory function failed, e.g. the aggressive rate-limiting the reference
- * documents as an intermittent 401) the skeleton rows are returned verbatim
- * rather than dropped, because "cannot verify callability" is not the same as
- * "not callable", and collapsing the picker is the worse failure. When the wire
- * roster answers but nothing matches, the static list is returned so the picker
- * is never empty.
+ * Degradation is deliberate, and it stops at the last value that was actually
+ * READ. When the wire roster is UNAVAILABLE (every directory function failed,
+ * e.g. the aggressive rate-limiting the reference documents as an intermittent
+ * 401) the skeleton rows are returned verbatim rather than dropped, because
+ * "cannot verify callability" is not the same as "not callable", and the rows
+ * themselves are a real directory read. When NOTHING could be read, or the wire
+ * roster answered but matched no skeleton row, the answer is an EMPTY list plus
+ * the reason — never a hardcoded roster.
+ *
+ * That last part is the fix for a real, user-visible failure: this function used
+ * to answer an empty discovery with eight invented models, so a route whose
+ * directory fetch had broken listed a full fake roster and reported nothing. An
+ * absent roster now renders as absent.
  * @param accessToken - the account's access token.
  * @param userId - the Trae user id.
  * @param channel - selects the directory function set.
  * @param signal - optional cancellation.
  * @param fetchFn - injectable fetcher for tests.
- * @returns the catalog to show.
+ * @returns the catalog to show, plus why it is empty when it is.
  */
 export async function fetchTraeModels(
   accessToken: string,
@@ -559,30 +584,45 @@ export async function fetchTraeModels(
   signal?: AbortSignal,
   fetchFn: FetchFn = proxiedFetch,
   edition: TraeEdition = channel === 'solo' ? 'solo' : 'cn',
-): Promise<TraeModel[]> {
+): Promise<TraeCatalogRead> {
   const [remote, wire] = await Promise.all([
     fetchRemoteModels(accessToken, signal, fetchFn, edition),
     fetchWireRoster(accessToken, userId, channel, signal, fetchFn),
   ])
   if (wire === undefined) {
     // Callability is unknown: keep every skeleton row rather than hiding a model
-    // that may work perfectly.
-    if (remote !== undefined && remote.length > 0) return remote
-    return [...TRAE_FALLBACK_MODELS]
+    // that may work perfectly. These rows are a real directory read.
+    if (remote !== undefined && remote.length > 0) return { models: remote }
+    return {
+      models: [],
+      notFetched: {
+        what: 'Trae returned no model roster',
+        detail: 'the SOLO directory and every config-list function failed to answer',
+      },
+    }
   }
   const merged = mergeTraeModelSources(remote ?? [], wire)
-  return merged.length > 0 ? merged : [...TRAE_FALLBACK_MODELS]
+  if (merged.length > 0) return { models: merged }
+  return {
+    models: [],
+    notFetched: {
+      what: 'Trae returned no model roster',
+      detail: remote === undefined
+        ? 'the config list answered but the SOLO directory could not be read, so no advertised model could be matched to a callable config'
+        : 'the SOLO directory listed no model this account can call through a config-list function',
+    },
+  }
 }
 
 /**
  * Project one Trae model into the harness model-info shape.
  *
  * The ONE place the credit multiplier is appended, deliberately: `fetchTraeModels`
- * has three returns (the merged roster, the raw directory when the wire roster did
- * not answer, and the static fallback) and the adapter also serves a cached list,
- * so decorating at any single upstream point misses the others. Doing it here
- * covers all of them, and `resolveOwnModel` reads the same figure off the model
- * itself, so the picker and the resolved metadata cannot disagree.
+ * has two returns (the merged roster and the raw directory when the wire roster did
+ * not answer) and the adapter also serves a cached list, so decorating at any
+ * single upstream point misses the others. Doing it here covers all of them, and
+ * `resolveOwnModel` reads the same figure off the model itself, so the picker and
+ * the resolved metadata cannot disagree.
  *
  * `model.name` stays undecorated everywhere else, so joins and lookups keyed on the
  * upstream name keep working.
@@ -595,10 +635,4 @@ export function toTraeModelInfo(model: TraeModel, provider: string): LlmModelInf
     inputModalities: ['text'],
     ...model.contextWindow === undefined ? {} : { context: { contextWindow: model.contextWindow } },
   }
-}
-
-/** Merge discovered models with the fallback roster (empty discovery → fallback). */
-export function mergeTraeModels(discovered: readonly TraeModel[]): TraeModel[] {
-  if (discovered.length === 0) return [...TRAE_FALLBACK_MODELS]
-  return [...discovered]
 }

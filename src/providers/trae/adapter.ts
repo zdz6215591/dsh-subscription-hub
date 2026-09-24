@@ -29,7 +29,7 @@ import type { ProviderId, TraeSession } from '../../auth/store.js'
 import { proxiedFetch } from '../../http.js'
 import { AccountTokenManager } from '../accounts.js'
 import { httpLlmError, idleWatchdog, mapFetchFailure, mergeReasoning } from '../common.js'
-import type { FetchFn, ModelEntry } from '../common.js'
+import type { FetchFn, ModelEntry, ModelListNotFetched } from '../common.js'
 import type { PoolAdapter } from '../pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, subscriptionRetryPolicy } from '../rate-limit.js'
 import type { RateLimitWait } from '../rate-limit.js'
@@ -47,7 +47,7 @@ import {
 import type { TraeMessage } from './protocol.js'
 import { traeIdentityFor } from './identity.js'
 import { gatewaysFor } from './region.js'
-import { fetchTraeModels, mergeTraeModels, toTraeModelInfo } from './catalog.js'
+import { fetchTraeModels, toTraeModelInfo } from './catalog.js'
 import type { TraeModel } from './catalog.js'
 
 export const TRAE_PREEMPT_MS = 5 * 60_000
@@ -179,6 +179,11 @@ export class TraeAdapter extends LlmAdapter {
   private readonly catalogs = new Map<string, { at: number; models: TraeModel[] }>()
   /** The resolved wire entry for each model id, so the call replays its function. */
   private readonly resolved = new Map<string, TraeModel>()
+  /**
+   * Why each route's last discovery produced no roster, so a caller can show
+   * "not fetched" instead of an empty list that looks like "no models exist".
+   */
+  private readonly notFetched = new Map<string, ModelListNotFetched>()
   private readonly fetchFn: FetchFn
 
   constructor(private readonly options: TraeAdapterOptions) {
@@ -198,9 +203,20 @@ export class TraeAdapter extends LlmAdapter {
     if (account === undefined) {
       this.catalogs.clear()
       this.resolved.clear()
+      this.notFetched.clear()
     } else {
       this.catalogs.delete(account)
     }
+  }
+
+  /**
+   * Why this route's model list is empty, when it is empty because the read
+   * failed rather than because the account has no models.
+   * @param provider - the registered route.
+   * @returns the recorded reason, or undefined when the last read succeeded.
+   */
+  notFetchedReason(provider: string): ModelListNotFetched | undefined {
+    return this.notFetched.get(provider)
   }
 
   private catalogFor(model: string): TraeModel | undefined {
@@ -236,13 +252,21 @@ export class TraeAdapter extends LlmAdapter {
         }
     const override = this.options.defaultEffortOf?.(model)
     const merged = mergeReasoning(override, reasoning)
+    const contextWindow = entry?.contextWindow ?? configured?.contextWindow
+    const maxTokens = entry?.maxTokens ?? configured?.maxTokens
     return {
       provider,
       id: model,
       name: entry?.name ?? configured?.name ?? model,
       inputModalities: ['text'],
-      context: { contextWindow: entry?.contextWindow ?? configured?.contextWindow ?? 200_000 },
-      defaultMaxTokens: entry?.maxTokens ?? configured?.maxTokens ?? 32_000,
+      // Nothing is invented here any more. This used to answer `?? 200_000` and
+      // `?? 32_000`, which presented a constant as the model's own window and
+      // output cap — so a model whose window was never read looked identical to
+      // one that disclosed it. Both fields are optional in the harness contract;
+      // an unread value is ABSENT, and the settings list renders that as
+      // "not fetched".
+      ...contextWindow === undefined ? {} : { context: { contextWindow } },
+      ...maxTokens === undefined ? {} : { defaultMaxTokens: maxTokens },
       ...merged === undefined ? {} : { reasoning: merged },
     }
   }
@@ -269,7 +293,9 @@ export class TraeAdapter extends LlmAdapter {
       try {
         return await this.listOwnModels(provider, accounts[0], signal)
       } catch {
-        return mergeTraeModels([]).map(model => toTraeModelInfo(model, provider))
+        // Nothing was read AND the per-account call threw: report an empty
+        // roster rather than a substituted one (`notFetched` is recorded below).
+        return []
       }
     }
     if (!this.options.discovery) {
@@ -286,24 +312,43 @@ export class TraeAdapter extends LlmAdapter {
     }
     try {
       const credential = await this.options.tokens.session(account)
-      const discovered = await fetchTraeModels(
+      const read = await fetchTraeModels(
         credential.accessToken,
         credential.userId ?? '',
         this.options.channel,
         signal,
         this.fetchFn,
       )
-      const models = mergeTraeModels(discovered)
+      const models = read.models
       if (models.length > 0) {
         this.catalogs.set(account, { at: Date.now(), models })
         for (const model of models) this.resolved.set(model.id, model)
+        this.notFetched.delete(provider)
+      } else if (read.notFetched !== undefined) {
+        // Nothing was read. Say so through the visible channel instead of
+        // serving a made-up roster — the read that failed is now on the record.
+        this.reportNotFetched(provider, read.notFetched)
       }
       return models.map(model => toTraeModelInfo(model, provider))
     } catch (error) {
       if (cached !== undefined) return cached.models.map(model => toTraeModelInfo(model, provider))
-      this.options.onWarn?.(`trae catalog failed (${error instanceof Error ? error.message : String(error)})`)
-      return mergeTraeModels([]).map(model => toTraeModelInfo(model, provider))
+      const detail = error instanceof Error ? error.message : String(error)
+      this.options.onWarn?.(`trae catalog failed (${detail})`)
+      this.reportNotFetched(provider, { what: 'Trae returned no model roster', detail })
+      return []
     }
+  }
+
+  /**
+   * Record and surface a discovery failure.
+   *
+   * `onWarn` is the log; {@link notFetchedReason} is what the settings card can
+   * read, so the absence is visible where the user looks rather than only in a
+   * log they never open.
+   */
+  private reportNotFetched(provider: string, reason: ModelListNotFetched): void {
+    this.notFetched.set(provider, reason)
+    this.options.onWarn?.(`${reason.what} (${reason.detail})`)
   }
 
   streamAccount(options: GenerateOptions, account: string): AsyncIterable<StreamChunk> {

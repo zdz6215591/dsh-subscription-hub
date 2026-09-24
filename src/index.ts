@@ -72,7 +72,7 @@ import type {
   ZedSession,
 } from './auth/store.js'
 import { DISCOVERY_TIMEOUT_MS, validateModels, withTimeout } from './providers/common.js'
-import type { ModelEntry, ProviderUsage } from './providers/common.js'
+import type { ModelEntry, ModelListNotFetched, ProviderUsage } from './providers/common.js'
 import { AccountTokenManager } from './providers/accounts.js'
 import type { AccountAwareAdapter } from './providers/accounts.js'
 import { DEFAULT_RATE_LIMIT_MAX_WAIT_MS, resolveRateLimitWait } from './providers/rate-limit.js'
@@ -156,7 +156,6 @@ import {
 import {
   ClineAdapter,
   CLINE_BASE_URL,
-  CLINE_MODEL_CATALOG,
   CLINE_PREEMPT_MS,
   ClinePinStore,
   assertUsableClineKey,
@@ -198,7 +197,13 @@ import {
   refreshZed,
   sessionFromZedPaste,
 } from './providers/zed.js'
-import { filterVisible, hiddenIds, markProviderModelsRead, setModelVisible, syncDiscoveredModels } from './model-visibility.js'
+import {
+  filterVisible,
+  hiddenIds,
+  markProviderModelsRead,
+  setModelVisible,
+  syncDiscoveredModels,
+} from './model-visibility.js'
 import { registerSubCommand } from './command.js'
 import type { SubCommandDeps } from './command.js'
 import { QoderAdapter, isQoderPermanentRefreshError, probeQoderPat } from './providers/qoder/index.js'
@@ -248,7 +253,7 @@ export interface Config {
   streamIdleTimeoutMs?: number
   /** Whether and how long a route waits out a closed rate-limit window. */
   rateLimit?: RateLimitConfig
-  /** Advisory model catalogs overriding the built-in defaults, per provider. */
+  /** Advisory model catalogs for providers whose discovery you want to override, per provider. */
   models?: {
     codex?: ModelEntry[]
     claude?: ModelEntry[]
@@ -343,90 +348,27 @@ export const Config: z<Config> = z.object({
   }),
 })
 
-/** Built-in catalogs used when the config does not override a provider's models. */
-export const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
-  codex: [
-    { id: 'gpt-5.1-codex', name: 'GPT-5.1 Codex' },
-    { id: 'gpt-5.1-codex-mini', name: 'GPT-5.1 Codex Mini' },
-    { id: 'gpt-5.1', name: 'GPT-5.1' },
-  ],
-  claude: [
-    { id: 'claude-opus-5', name: 'Claude Opus 5', maxTokens: 128_000, contextWindow: 1_000_000 },
-    { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', maxTokens: 128_000, contextWindow: 1_000_000 },
-    { id: 'claude-fable-5', name: 'Claude Fable 5', maxTokens: 128_000, contextWindow: 1_000_000 },
-    { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5', maxTokens: 64_000, contextWindow: 200_000 },
-  ],
-  // Static fallback only: the live CLI catalog (`cli-chat-proxy.grok.com`) is
-  // authoritative and wins whenever discovery succeeds. The ids below are the
-  // roster that catalog actually serves (verified live), each with its real
-  // 500000-token window, so an offline start cannot offer retired ids or make
-  // the harness compact to the old 256000 fallback.
-  grok: [
-    { id: 'grok-4.7', name: 'Grok 4.7', contextWindow: 500_000, maxTokens: 32_000, inputModalities: ['text', 'image'] },
-    { id: 'grok-4.7-build-fast', name: 'Grok 4.7 Fast', contextWindow: 500_000, maxTokens: 32_000, inputModalities: ['text', 'image'] },
-    { id: 'grok-4.6', name: 'Grok 4.6', contextWindow: 500_000, maxTokens: 32_000, inputModalities: ['text', 'image'] },
-    { id: 'grok-4.5', name: 'Grok 4.5', contextWindow: 500_000, maxTokens: 32_000, inputModalities: ['text', 'image'] },
-  ],
-  // Static fallback only: the live /models catalog (with per-model vision
-  // flags and context windows) wins whenever discovery succeeds.
-  copilot: [
-    { id: 'gpt-4.1', name: 'GPT-4.1', inputModalities: ['text', 'image'] },
-    { id: 'gpt-4o', name: 'GPT-4o', inputModalities: ['text', 'image'] },
-    { id: 'claude-sonnet-4.5', name: 'Claude Sonnet 4.5', inputModalities: ['text', 'image'] },
-    { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', inputModalities: ['text', 'image'] },
-  ],
-  agy: [
-    { id: 'gemini-3.7-flash-tiered', name: 'Gemini 3.7 Flash', inputModalities: ['text', 'image'] },
-    { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', inputModalities: ['text', 'image'] },
-  ],
-  commandcode: [
-    { id: 'deepseek/deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
-    { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol' },
-  ],
-  // Static fallback only: the live recommended-models roster wins whenever
-  // discovery succeeds. Every entry needs a positive contextWindow or the
-  // whole provider catalog is rejected as INVALID_MODEL_CONTEXT.
-  cline: [
-    { id: 'cline-pass/deepseek-v4-flash', name: 'DeepSeek V4 Flash', contextWindow: 1_000_000 },
-    { id: 'cline-pass/glm-5.3-flash', name: 'GLM-5.3 Flash', contextWindow: 1_000_000 },
-    { id: 'cline-pass/kimi-k3', name: 'Kimi K3', contextWindow: 1_048_576 },
-  ],
-  codebuddy: [
-    { id: 'auto', name: 'CodeBuddy Auto' },
-  ],
-  // Static fallback only: the live `model/list` roster wins whenever discovery
-  // succeeds. Qoder's ids are SERVER-SIDE POOL names rather than vendor model
-  // ids — `auto` and `ultimate` are routed pools the upstream decides — which is
-  // why they carry no vendor attribution in the model list.
-  qoder: [
-    { id: 'cmodel', name: 'Cantus (Qoder)', contextWindow: 1_000_000 },
-    { id: 'auto', name: 'Qoder Auto', contextWindow: 180_000 },
-    { id: 'ultimate', name: 'Qoder Ultimate', contextWindow: 1_000_000 },
-    { id: 'performance', name: 'Qoder Performance', contextWindow: 1_000_000 },
-    { id: 'efficient', name: 'Qoder Efficient', contextWindow: 180_000 },
-    { id: 'lite', name: 'Qoder Lite', contextWindow: 180_000 },
-  ],
-  // Static fallback only: the live get_detail_param roster wins whenever
-  // discovery succeeds. Every entry needs a positive contextWindow or the
-  // whole provider catalog is rejected as INVALID_MODEL_CONTEXT.
-  trae: [
-    { id: 'DeepSeek-V4-Flash-Official', name: 'DeepSeek V4 Flash', contextWindow: 200_000 },
-    { id: 'DeepSeek-V4-Pro-Official', name: 'DeepSeek V4 Pro', contextWindow: 200_000 },
-    { id: 'glm-5.2', name: 'GLM-5.2', contextWindow: 200_000 },
-    { id: 'kimi-k2.6', name: 'Kimi K2.6', contextWindow: 200_000 },
-  ],
-  zed: [
-    { id: 'claude-sonnet-4', name: 'Claude Sonnet 4' },
-  ],
-}
-
-/** Validate and detach the model catalog for every provider. */
-function resolveCatalog(models: Config['models']): Record<ProviderId, ModelEntry[]> {  const resolve = (provider: ProviderId): ModelEntry[] => {
-    // Schemastery injects `[]` for omitted array fields, so an empty list
-    // cannot be told apart from an absent one: both mean the built-ins.
-    const configured = models?.[provider]
-    const entries = configured !== undefined && configured.length > 0 ? configured : DEFAULT_MODELS[provider]
-    return validateModels(entries, `${name}: models.${provider}`)
+/**
+ * Validate and detach the model catalog for every provider.
+ *
+ * The configured list is the ONLY source. There used to be a built-in
+ * `DEFAULT_MODELS` table here, substituted whenever a provider's config list was
+ * empty, and it was the single largest source of fabricated model data in this
+ * plugin: because `resolveCatalog` always returned a non-empty list, every
+ * adapter's "discovery failed" branch silently served that table as the
+ * account's roster — a full-looking picker of ids and context windows that
+ * upstream had never supplied. A reader could not tell a healthy route from a
+ * broken one, which is the failure this change exists to remove.
+ *
+ * A provider with nothing configured now resolves an EMPTY catalog, and a route
+ * whose discovery returns nothing lists nothing and says so (see the adapter's
+ * `notFetchedReason` and the `visibility` endpoint).
+ */
+function resolveCatalog(models: Config['models']): Record<ProviderId, ModelEntry[]> {
+  const resolve = (provider: ProviderId): ModelEntry[] => {
+    // Schemastery injects `[]` for omitted array fields, so an empty list and an
+    // absent one both mean "nothing configured".
+    return validateModels(models?.[provider] ?? [], `${name}: models.${provider}`)
   }
   return {
     codex: resolve('codex'),
@@ -1592,11 +1534,11 @@ export function apply(ctx: Context, config: Config): void {
     },
     async visibility(provider) {
       const adapter = adapters.get(provider)
-      if (adapter === undefined) return []
+      if (adapter === undefined) return { models: [] }
       const models = await adapter.listOwnModels(provider)
       const modelIds = models.map(m => m.id)
       const { hidden, unread } = await syncDiscoveredModels(provider, modelIds)
-      return models.map(model => {
+      const rows = models.map(model => {
         // The vendor is resolved here rather than in the browser, so the client
         // bundle carries no vendor table. It is absent when unknown, never guessed.
         const vendor = modelVendor(model.id)
@@ -1610,6 +1552,20 @@ export function apply(ctx: Context, config: Config): void {
           ...modalities === undefined ? {} : { inputModalities: [...modalities] },
         }
       })
+      // An empty roster is reported as an un-fetched one. The adapter's own
+      // reason wins when it has one (Trae, Cline and Qoder record which read
+      // failed); otherwise the absence itself is the fact worth stating, because
+      // an empty list renders identically to "this route has no models".
+      if (rows.length > 0) return { models: rows }
+      const reason = (adapter as { notFetchedReason?: (id: string) => ModelListNotFetched | undefined })
+        .notFetchedReason?.(provider)
+      return {
+        models: rows,
+        notFetched: reason ?? {
+          what: 'No model roster was fetched',
+          detail: 'the route returned no models and reported no error; check the plugin log for this provider\'s discovery',
+        },
+      }
     },
     async markModelsRead(provider) {
       if (provider !== undefined) {
@@ -1633,9 +1589,12 @@ export function apply(ctx: Context, config: Config): void {
         try {
           const models = await adapter.listOwnModels('cline')
           for (const m of models) known.add(m.id)
-        } catch { /* fallback to catalog */ }
+        } catch { /* the pin rows below still answer for the ids already recorded */ }
       }
-      for (const m of CLINE_MODEL_CATALOG) known.add(m.id)
+      // Only ids this machine actually discovered, or that carry a recorded pin
+      // or verdict, are listed. The pinned static catalog used to be added here,
+      // which put rows for models the account may not even be able to call in
+      // front of the user as if they were part of its roster.
       return [...known].map((model) => {
         const meta = clinePins.metaOf(model)
         const pin = pinned[model]

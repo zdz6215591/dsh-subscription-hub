@@ -283,20 +283,25 @@ test('parseGatewayModels only accepts prefixed entries', () => {
   )
 })
 
-test('clineModel synthesizes an entry for an unknown id rather than dropping it', () => {
-  const known = clineModel('cline-pass/kimi-k3')
-  assert.equal(known.name, 'Kimi K3')
-  // A model the pinned table predates still resolves, with display-ready casing.
+test('clineModel keeps an unknown id but invents NO capability for it', () => {
+  // An id no source described keeps its wire id and a display name derived from
+  // it — dropping the id would hide a model the user is paying for. Everything
+  // else is ABSENT: this used to attach a 200000 window, a 32000 cap and
+  // `reasoning: true`, i.e. three invented capabilities presented as the model's.
   const unknown = clineModel('cline-pass/muse-spark-1.3-contributor')
   assert.equal(unknown.name, 'Muse Spark 1.3 Contributor')
-  assert.ok(unknown.contextWindow > 0, 'the harness rejects a model without a window')
-  assert.ok(unknown.maxTokens > 0)
+  assert.equal(unknown.contextWindow, undefined, 'an unread window must be absent, not 200000')
+  assert.equal(unknown.maxTokens, undefined, 'an unread cap must be absent, not 32000')
+  assert.equal(unknown.reasoning, undefined, 'reasoning must not be assumed')
+  assert.equal(unknown.efforts, undefined, 'no effort set may be invented')
 })
 
 test('toClineModelInfo carries the input modalities', () => {
+  // `clineModel` no longer reads from a pinned table, so the modalities come from
+  // the conservative text-only default rather than a claimed image capability.
   const info = toClineModelInfo(clineModel('cline-pass/kimi-k3'), 'cline')
   assert.equal(info.provider, 'cline')
-  assert.deepEqual(info.inputModalities, ['text', 'image'])
+  assert.deepEqual(info.inputModalities, ['text'])
   assert.equal(info.id.startsWith(CLINE_MODEL_PREFIX), true)
 })
 
@@ -387,7 +392,7 @@ test('parseModelsDevEfforts reads the published reasoning levels', () => {
   assert.equal(parseModelsDevEfforts('cline-pass/unknown', registry), undefined)
 })
 
-test('mergeClineModel prefers models.dev levels and falls back to the static row', () => {
+test('mergeClineModel prefers models.dev levels and reports nothing it did not read', () => {
   const merged = mergeClineModel('cline-pass/glm-5.3', {
     cline: { contextWindow: 1_310_720, maxTokens: 131_072, input: ['text'], reasoning: true, source: 'cline' },
     modelsDev: { contextWindow: 1_000_000, maxTokens: 131_072, efforts: ['none', 'low', 'high', 'max'], reasoning: true, source: 'models.dev' },
@@ -396,10 +401,13 @@ test('mergeClineModel prefers models.dev levels and falls back to the static row
   assert.equal(merged.contextWindow, 1_000_000)
   assert.deepEqual(merged.efforts, ['none', 'low', 'high', 'max'])
   assert.equal(merged.source, 'models.dev')
-  // A model with no live row keeps the pinned table's numbers.
-  const fallback = mergeClineModel('cline-pass/kimi-k3', {})
-  assert.equal(fallback.source, 'static')
-  assert.equal(fallback.contextWindow, 1_048_576)
+  // A model with no live row names its id but claims NO capability. This used to
+  // read 1048576 out of the pinned table, which is the fabrication being removed.
+  const unread = mergeClineModel('cline-pass/kimi-k3', {})
+  assert.equal(unread.id, 'cline-pass/kimi-k3')
+  assert.equal(unread.contextWindow, undefined)
+  assert.equal(unread.maxTokens, undefined)
+  assert.equal(unread.reasoning, undefined)
 })
 
 test('discoverClineModels merges the roster with both official catalogs', async () => {
@@ -462,8 +470,12 @@ test('discoverClineModels merges the roster with both official catalogs', async 
   // Cline's own catalog still describes a model models.dev omits.
   assert.equal(brandNew.maxTokens, 64_000)
 
-  // The pinned table rides underneath as the offline safety net.
-  assert.equal(byId.has('cline-pass/kimi-k3'), true)
+  // No pinned table rides underneath any more. Ids it used to contribute are NOT
+  // listed, because nothing currently serves them and listing them is how a
+  // broken roster used to look full.
+  assert.equal(byId.has('cline-pass/kimi-k3'), false)
+  assert.equal(byId.has('cline-pass/minimax-m3'), false)
+  assert.equal(byId.size, 2, 'exactly the ids the two live endpoints listed')
 })
 
 test('parseClineUsage maps the four window types onto harness kinds', () => {

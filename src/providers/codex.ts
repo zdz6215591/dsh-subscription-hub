@@ -62,8 +62,10 @@ export const CODEX_TOKEN_URL = 'https://auth.openai.com/oauth/token'
 export const CODEX_API_URL = 'https://chatgpt.com/backend-api/codex/responses'
 const CODEX_SCOPE = 'openid profile email offline_access api.connectors.read api.connectors.invoke'
 const CODEX_CALLBACK_PATH = '/auth/callback'
-const CODEX_CONTEXT_WINDOW = 400_000
-const CODEX_DEFAULT_MAX_TOKENS = 128_000
+// A fabricated window and output cap used to be declared here (`400_000` /
+// `128_000`), substituted whenever the live catalog had not described a model — so a
+// codex model nobody had read was reported as 400K/128K as though those were its real
+// figures. Both are gone, and `resolveOwnModel` now omits a capacity it did not read.
 /** Refresh when the access token has less than this much life left. */
 export const CODEX_PREEMPT_MS = 5 * 60_000
 
@@ -858,14 +860,19 @@ export class CodexAdapter extends LlmAdapter {
       discovered?.reasoning ?? { efforts: CODEX_EFFORTS, defaultEffort: CODEX_DEFAULT_EFFORT },
       { extendable: discovered?.reasoning === undefined },
     )
+    const contextWindow = discovered?.contextWindow ?? configured?.contextWindow
+    const maxTokens = configured?.maxTokens
     return {
       provider,
       id: model,
       name: discovered?.name ?? configured?.name ?? model,
       ...discovered?.description === undefined ? {} : { description: discovered.description },
       inputModalities: configured?.inputModalities ?? CODEX_MODALITIES,
-      context: { contextWindow: discovered?.contextWindow ?? configured?.contextWindow ?? CODEX_CONTEXT_WINDOW },
-      defaultMaxTokens: configured?.maxTokens ?? CODEX_DEFAULT_MAX_TOKENS,
+      // Only what the catalog disclosed. The `?? 400_000` / `?? 128_000` that
+      // used to terminate these were invented capacities presented as the
+      // model's own; absent is honest and the settings list shows "not fetched".
+      ...contextWindow === undefined ? {} : { context: { contextWindow } },
+      ...maxTokens === undefined ? {} : { defaultMaxTokens: maxTokens },
       ...(reasoning === undefined ? {} : { reasoning }),
     }
   }

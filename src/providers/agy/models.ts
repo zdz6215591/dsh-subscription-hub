@@ -138,7 +138,15 @@ export function parseAgyQuotaUsage(dynamic: DiscoveredModels): ProviderUsage {
   return { supported: true, windows, remaining: worst, limit: 100 }
 }
 
-/** Catalog-only model list used when the endpoint is unreachable. */
+/**
+ * The pinned catalog's ids, as harness rows.
+ *
+ * NOT a fallback, and deliberately unreachable from {@link listAgyModels}. It exists
+ * so a caller can state which ids the pinned table describes — the visibility test uses
+ * it to prove the pinned CAPABILITY data is still intact for ids the live endpoint
+ * returns. Serving it as a roster is precisely the fabrication this module removed, so
+ * nothing on the model-listing path may call it.
+ */
 export function catalogModelList(): LlmModelInfo[] {
   return AGY_PUBLIC_MODELS.map((model) => ({
     provider: AGY_PROVIDER,
@@ -149,20 +157,39 @@ export function catalogModelList(): LlmModelInfo[] {
   }))
 }
 
-/** Adapter-facing listing: dynamic first, catalog fallback. */
+/**
+ * Adapter-facing listing: the live endpoint, and NOTHING ELSE.
+ *
+ * Every branch here used to return {@link catalogModelList} — twelve models carrying
+ * context windows — so a route with no token, an endpoint answering with an empty
+ * roster, and a transport failure all rendered as a complete, healthy model list. The
+ * caller could not tell them apart, which is exactly the failure the user reported:
+ * they had no way to know whether what they were looking at was real.
+ *
+ * A failure now PROPAGATES so the adapter can report WHICH read failed and show no
+ * roster, instead of being swallowed here. `catalogModel` is still used by
+ * `mergeModelCatalog`/`discoveredFromList` to enrich ids the endpoint DID return —
+ * a real disclosure rather than a substitute for one — which is why the pinned table
+ * itself is kept.
+ *
+ * @param accessToken - the credential's access token, when one exists.
+ * @param projectId - the project the roster is scoped to.
+ * @param fetchImpl - injectable fetcher for tests.
+ * @returns the endpoint's own rows, possibly none.
+ * @throws when no access token exists, or when the endpoint fails.
+ */
 export async function listAgyModels(
   accessToken: string | undefined,
   projectId: string | undefined,
   fetchImpl: typeof fetch = proxiedFetch,
 ): Promise<readonly LlmModelInfo[]> {
-  if (!accessToken) return catalogModelList()
-  try {
-    const dynamic = await fetchAvailableModels(accessToken, projectId, fetchImpl)
-    const merged = mergeModelCatalog(dynamic)
-    return merged.length > 0 ? merged : catalogModelList()
-  } catch {
-    return catalogModelList()
-  }
+  // Without a token there is nothing to read. Saying so lets the adapter report an
+  // un-fetched roster rather than presenting the pinned catalog as the account's own.
+  if (!accessToken) throw new Error('agy model list needs an access token; none is available')
+  const dynamic = await fetchAvailableModels(accessToken, projectId, fetchImpl)
+  // An endpoint that answered with nothing is reported as nothing. It is not evidence
+  // that the account has the pinned twelve models.
+  return mergeModelCatalog(dynamic)
 }
 
 /** Resolve one exact model's metadata (catalog-backed; dynamic ids pass through). */
@@ -171,13 +198,20 @@ export function resolveAgyModel(provider: string, model: string): LlmResolvedMod
   const isClaude = model.toLowerCase().startsWith('claude-')
   const cleanName = cleanAgyDisplayName(meta?.name ?? model)
   if (isLevelThinkingModel(model)) {
+    // Only the values the pinned table ACTUALLY describes are reported. This branch
+    // used to fill the gaps with invented figures — `?? 1048576` for a window and
+    // `isClaude ? 64000 : (meta?.maxOutputTokens ?? 65536)` for the cap — so an id
+    // nobody had described was presented as a 1M-context / 64K-output model. Those
+    // are gone; an unread capacity is omitted rather than guessed.
+    const contextWindow = meta?.contextLength
+    const maxOutputTokens = meta?.maxOutputTokens
     return {
       provider,
       id: model,
       name: cleanName,
       inputModalities: inputModalitiesFor(meta),
-      context: { contextWindow: meta?.contextLength ?? 1048576 },
-      defaultMaxTokens: isClaude ? 64000 : (meta?.maxOutputTokens ?? 65536),
+      ...contextWindow === undefined ? {} : { context: { contextWindow } },
+      ...maxOutputTokens === undefined ? {} : { defaultMaxTokens: maxOutputTokens },
       // Return a shallow copy so callers cannot mutate the frozen singleton.
       reasoning: { ...LEVEL_REASONING, efforts: [...LEVEL_REASONING.efforts] },
     }
@@ -187,6 +221,11 @@ export function resolveAgyModel(provider: string, model: string): LlmResolvedMod
     id: model,
     name: cleanName,
     inputModalities: inputModalitiesFor(meta),
-    ...(meta ? { context: { contextWindow: meta.contextLength }, defaultMaxTokens: isClaude ? 64000 : meta.maxOutputTokens } : {}),
+    // The pinned table's own figures, reported VERBATIM. This used to read
+    // `defaultMaxTokens: isClaude ? 64000 : meta.maxOutputTokens`, which overrode a
+    // genuinely read output cap with a hardcoded constant for every Claude model —
+    // so a table row declaring 65536 was reported as 64000. Overwriting a real
+    // measurement with a constant is the same fault as inventing one.
+    ...(meta === undefined ? {} : { context: { contextWindow: meta.contextLength }, defaultMaxTokens: meta.maxOutputTokens }),
   }
 }

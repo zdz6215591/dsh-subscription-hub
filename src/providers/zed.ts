@@ -499,24 +499,6 @@ function limitedCount(limitRaw: unknown): number | undefined {
   return numberish(limitRaw)
 }
 
-/** Default included LLM token allowance in USD for plans with bundled credit. */
-function planDefaultLimit(plan: unknown): number | undefined {
-  if (typeof plan !== 'string') return undefined
-  switch (plan.toLowerCase().trim()) {
-    case 'token_based_zed_student':
-    case 'zed_student':
-    case 'token_based_zed_pro':
-    case 'zed_pro':
-    case 'token_based_zed_pro_trial':
-    case 'zed_pro_trial':
-    case 'token_based_zed_vip':
-    case 'zed_vip':
-      return 10
-    default:
-      return undefined
-  }
-}
-
 /**
  * The dollar-spend bucket for a Zed cloud payload (the plan root, the nested
  * `usage` object, or an org billing response). Zed Pro / Zed Student bundles
@@ -559,33 +541,38 @@ function spendWindow(record: Record<string, unknown>, resetsAt?: number, planKey
     'spend_limit', 'limit', 'monthly_limit', 'spend_cap', 'credit_limit',
   ])
 
-  if (includedUsd === undefined && spendingLimitUsd === undefined) {
-    const defaultLimit = planDefaultLimit(planKey)
-    if (defaultLimit !== undefined) {
-      includedUsd = defaultLimit
-    }
-  }
+  // NO invented allowance. A `planDefaultLimit(planKey)` call used to sit here and
+// return a hardcoded **$10** for the pro/student/vip plan names whenever upstream
+// disclosed no included amount — so the card rendered "已经用 $2.50 / 总额 $10.00 ·
+// 25%" where BOTH the $10 and the 25% were fabricated. Verified by feeding this
+// parser a payload with a plan name and a spend figure but no allowance field at
+// all: it answered `limit: 10, usedPercent: 25`. A reader cannot tell an invented
+// denominator from a measured one, which is the deception this removes.
 
-  const cap = (includedUsd ?? 0) + (spendingLimitUsd ?? 0)
-  if (spentUsd === undefined) {
-    if (cap > 0) spentUsd = 0
-    else return []
-  }
+const cap = (includedUsd ?? 0) + (spendingLimitUsd ?? 0)
+if (spentUsd === undefined) {
+  if (cap > 0) spentUsd = 0
+  else return []
+}
 
-  const base: UsageWindow = {
-    kind: 'weekly',
-    scope: 'Hosted models',
-    usedPercent: cap > 0 ? usagePercent(spentUsd, cap) : 0,
-    used: spentUsd,
-    // DOLLARS: Zed's included LLM-token spend (cents arrived on the wire and were
-    // converted), which is what its own "已用 $x / 总额 $y" display shows.
-    unit: 'currency',
-    ...resetsAt === undefined ? {} : { resetsAt },
-  }
-  return [{
-    ...base,
-    ...cap > 0 ? { limit: cap, remaining: Math.max(cap - spentUsd, 0) } : {},
-  }]
+// A ratio needs a denominator, and when upstream disclosed none there IS no
+// percentage to state: "2.5% of something we were never told" is not a fact. So
+// nothing is emitted here rather than a window carrying a made-up 0% or a
+// made-up cap — the plan name still reaches the card through `usage.plan`, so a
+// reader learns which plan they are on and simply sees no quota bar.
+if (cap <= 0) return []
+
+const base: UsageWindow = {
+  kind: 'weekly',
+  scope: 'Hosted models',
+  usedPercent: usagePercent(spentUsd, cap),
+  used: spentUsd,
+  // DOLLARS: Zed's included LLM-token spend (cents arrived on the wire and were
+  // converted), which is what its own "已用 $x / 总额 $y" display shows.
+  unit: 'currency',
+  ...resetsAt === undefined ? {} : { resetsAt },
+}
+return [{ ...base, limit: cap, remaining: Math.max(cap - spentUsd, 0) }]
 }
 
 /** First number found across `*_cents` dollar keys, applied to /100. */

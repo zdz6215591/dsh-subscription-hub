@@ -209,7 +209,14 @@ test('visibility and check-in extras: empty catalog and provider gate', async ()
   const visibility = await handler('visibility', { provider: 'codex' }, signal)
   assert.equal(visibility.ok, true)
   if (visibility.ok) {
-    assert.deepEqual(visibility.value, { models: [] })
+    // An empty roster travels with its REASON. Returning a bare `[]` is what made
+    // a failed read look like "this route has no models", and the substituted
+    // default roster it used to be masked by is worse still.
+    const value = visibility.value as { models: unknown[]; notFetched?: { what: string; detail: string } }
+    assert.deepEqual(value.models, [])
+    assert.notEqual(value.notFetched, undefined)
+    assert.equal(typeof value.notFetched?.what, 'string')
+    assert.equal(typeof value.notFetched?.detail, 'string')
   }
   const checkin = await handler('checkin', { provider: 'codex', account: 'acct' }, signal)
   assert.equal(checkin.ok, true)

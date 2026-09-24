@@ -42,12 +42,12 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { proxiedFetch } from '../../http.js'
-import type { FetchFn, ModelEntry, ProviderUsage } from '../common.js'
+import type { FetchFn, ModelEntry, ModelListNotFetched, ProviderUsage } from '../common.js'
 import { rateSuffix } from '../common.js'
 import { DEFAULT_RATE_LIMIT_WAIT, DEFAULT_RETRY, subscriptionRetryPolicy } from '../rate-limit.js'
 import type { RateLimitWait } from '../rate-limit.js'
 import { QoderAuthService } from './auth.js'
-import { defaultModels, fetchQoderModels } from './catalog.js'
+import { fetchQoderModels } from './catalog.js'
 import type { QoderCatalogModel } from './catalog.js'
 import { streamQoderChat } from './chat.js'
 import type { QoderChatDependencies } from './chat.js'
@@ -188,6 +188,8 @@ export class QoderAdapter extends LlmAdapter {
   private readonly onJobTokenRefreshFailed: QoderAdapterOptions['onJobTokenRefreshFailed']
   /** Discovered catalogs, keyed `region:account:PAT-hash` so one account's clear cannot drop a sibling's. */
   private readonly catalogs = new Map<string, { at: number; models: readonly QoderCatalogModel[] }>()
+  /** Why the last catalog read produced no roster, so a caller can say so. */
+  private readonly notFetched = new Map<string, ModelListNotFetched>()
   private readonly modelFlights = new SingleFlight<readonly QoderCatalogModel[]>()
   /**
    * Set when the self-heal exchanged a fresh job token, cleared when a chat
@@ -367,19 +369,39 @@ export class QoderAdapter extends LlmAdapter {
 
   /**
    * The catalog a request should be resolved against: discovered when possible,
-   * the configured list otherwise.
+   * otherwise the models the USER configured.
+   *
+   * A failed discovery used to fall through to a built-in six-row table
+   * (`defaultModels`), so a broken catalog read listed a full roster of invented
+   * pool names and windows. When nothing was discovered and nothing was
+   * configured the answer is now an EMPTY list, and the failure is recorded so
+   * the settings card can say the roster was not fetched.
    */
   private async effectiveCatalog(signal?: AbortSignal, account?: string): Promise<readonly QoderCatalogModel[]> {
     if (!this.options.discovery) return this.configuredCatalog()
     try {
-      return await this.discoverModels(signal, account)
-    } catch {
+      const models = await this.discoverModels(signal, account)
+      this.notFetched.delete('qoder')
+      return models
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      this.notFetched.set('qoder', { what: 'Qoder returned no model roster', detail })
+      this.options.onWarn?.(`Qoder model discovery failed (${detail})`)
       return this.configuredCatalog()
     }
   }
 
+  /**
+   * Why this route's model list is empty, when it is empty because the read
+   * failed rather than because the account has no models.
+   * @param provider - the registered route.
+   * @returns the recorded reason, or undefined when the last read succeeded.
+   */
+  notFetchedReason(provider: string): ModelListNotFetched | undefined {
+    return this.notFetched.get(provider)
+  }
+
   private configuredCatalog(): QoderCatalogModel[] {
-    if (this.options.models.length === 0) return defaultModels
     return this.options.models.map(model => ({
       id: model.id,
       name: model.name ?? model.id,
@@ -428,8 +450,13 @@ export class QoderAdapter extends LlmAdapter {
     const catalog = await this.effectiveCatalog(signal)
     const entry = catalog.find(candidate => candidate.id === model)
     const configured = this.options.models.find(candidate => candidate.id === model)
-    const contextWindow = entry?.contextWindow ?? configured?.contextWindow ?? 180_000
-    const maxTokens = entry?.maxTokens ?? configured?.maxTokens ?? 32_768
+    // Nothing is invented: this used to answer `?? 180_000` and `?? 32_768`, so a
+    // model whose capacities were never read reported constants as its own.
+    // Both fields are optional in the harness contract, and the settings list
+    // renders an absent one as "not fetched". `contextOptions` (when the catalog
+    // published tiers) still supplies the largest tier.
+    const contextWindow = entry?.maxContextWindow ?? entry?.contextWindow ?? configured?.contextWindow
+    const maxTokens = entry?.maxTokens ?? configured?.maxTokens
     const efforts = entry?.reasoningEfforts
     const defaultEffort = entry?.defaultReasoningEffort
     // The runtime rejects a `defaultEffort` outside `efforts`
@@ -463,9 +490,10 @@ export class QoderAdapter extends LlmAdapter {
       // `context_config` offers 200K/400K/1M with 200K marked default, and the
       // reference's own preference for the maximum is `z.boolean().default(true)`
       // — declaring 200K caps a 1M model at a fifth of its window. The request's
-      // tier selection is aligned in `serialize.ts`.
-      context: { contextWindow: entry?.maxContextWindow ?? contextWindow },
-      defaultMaxTokens: maxTokens,
+      // tier selection is aligned in `serialize.ts`. Omitted entirely when no
+      // source declared a window.
+      ...contextWindow === undefined ? {} : { context: { contextWindow } },
+      ...maxTokens === undefined ? {} : { defaultMaxTokens: maxTokens },
       ...reasoning === undefined ? {} : { reasoning },
     }
   }

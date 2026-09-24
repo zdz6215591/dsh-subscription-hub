@@ -1144,6 +1144,15 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   /** Providers whose visible-models disclosure is open. */
   const [visibilityOpen, setVisibilityOpen] = useState<Partial<Record<SubscriptionProvider, boolean>>>({})
   const [visibilityModels, setVisibilityModels] = useState<Partial<Record<SubscriptionProvider, VisibleModelView[]>>>({})
+  /**
+   * Why a route's roster is empty, when it is empty because the read failed.
+   * Kept apart from `visibilityError`: a transport error and an upstream read
+   * that returned no roster are different facts, and the second is the one that
+   * used to be hidden behind a substituted model list.
+   */
+  const [visibilityNotFetched, setVisibilityNotFetched] = useState<
+    Partial<Record<SubscriptionProvider, { what: string; detail: string } | undefined>>
+  >({})
   const [visibilityLoading, setVisibilityLoading] = useState<Partial<Record<SubscriptionProvider, boolean>>>({})
   const [visibilityError, setVisibilityError] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const visibilityInflightRef = useRef(new Set<SubscriptionProvider>())
@@ -1416,9 +1425,13 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     visibilityInflightRef.current.add(provider)
     setVisibilityLoading(prev => ({ ...prev, [provider]: true }))
     try {
-      const response = await callSubscriptionsAuth<{ models: VisibleModelView[] }>(rpc, 'visibility', { provider })
+      const response = await callSubscriptionsAuth<{
+        models: VisibleModelView[]
+        notFetched?: { what: string; detail: string }
+      }>(rpc, 'visibility', { provider })
       if (!mountedRef.current) return
       setVisibilityModels(prev => ({ ...prev, [provider]: response.models }))
+      setVisibilityNotFetched(prev => ({ ...prev, [provider]: response.notFetched }))
       setVisibilityError(prev => {
         const next = { ...prev }
         delete next[provider]
@@ -2717,6 +2730,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
             {accounts.length > 0 && (() => {
               const open = visibilityOpen[id] === true
               const models = visibilityModels[id]
+              const notFetched = visibilityNotFetched[id]
               const visibleCount = (models ?? []).filter(model => model.visible).length
               const hasUnread = (models ?? []).some(model => model.unread === true)
               return (
@@ -2734,7 +2748,11 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                     <span style={styles.usagePlan}>
                       {models === undefined
                         ? (visibilityLoading[id] === true ? t('visibilityLoading') : '')
-                        : t('visibilitySummary', { visible: visibleCount, total: models.length })}
+                        : notFetched !== undefined
+                          // The count is not shown when nothing was fetched: "0 of 0
+                          // shown" reads like a fact about the account, and it is not.
+                          ? t('visibilityNotFetchedShort')
+                          : t('visibilitySummary', { visible: visibleCount, total: models.length })}
                     </span>
                     <span style={styles.defaultEffortChevron} aria-hidden="true">
                       {open ? '▲' : '▼'}
@@ -2769,7 +2787,16 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                       {visibilityLoading[id] === true && models === undefined && (
                         <p style={styles.statusLine}>{t('visibilityLoading')}</p>
                       )}
-                      {models !== undefined && models.length === 0 && (
+                      /* The absence is stated where the list would have been, rather than
+                          leaving an empty box that reads as "no models". Nothing is
+                          substituted: no greyed-out rows, no placeholder ids. */
+                      {notFetched !== undefined && (
+                        <p style={styles.errorLine}>
+                          {t('visibilityNotFetched', { what: notFetched.what })}
+                          {notFetched.detail !== '' && ` (${notFetched.detail})`}
+                        </p>
+                      )}
+                      {models !== undefined && models.length === 0 && notFetched === undefined && (
                         <p style={styles.statusLine}>{t('visibilityEmpty')}</p>
                       )}
                       {models !== undefined && models.length > 0 && (

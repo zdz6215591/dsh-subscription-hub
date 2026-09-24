@@ -109,8 +109,6 @@ export type { QoderCampaign, QoderCheckinOutcome, QoderCheckinState, QoderChecki
 export type { QoderAuthServiceOptions, QoderJobToken, QoderPatProbe } from './auth.js'
 
 export {
-  defaultMaxTokens,
-  defaultModels,
   fetchQoderModels,
   hasSameQoderDiscoveryMetadata,
   mergeQoderDiscoveryMetadata,

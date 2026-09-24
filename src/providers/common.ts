@@ -474,6 +474,25 @@ export interface ProviderUsage {
 /** Every input modality this hub can describe. */
 export type { InputModality } from './modality.js'
 import type { InputModality } from './modality.js'
+/**
+ * Why a route could not fetch its model roster.
+ *
+ * The shared vocabulary for an ABSENT model list, so a route that read nothing
+ * says so instead of substituting a plausible default. This exists because the
+ * alternative was tried and failed in the field: a broken directory fetch served
+ * eight hardcoded Trae models, so a dead route rendered exactly like a healthy
+ * one and the user had no way to tell which numbers were real.
+ *
+ * A route's `listOwnModels` answers an empty list in this case, and the reason
+ * travels beside it to the surface the user actually reads.
+ */
+export interface ModelListNotFetched {
+  /** Short, user-facing statement that no roster was retrieved. */
+  what: string
+  /** The diagnostic detail: which read failed, and why. */
+  detail: string
+}
+
 export interface DiscoveredModel {
   /** Wire model id. */
   id: string

@@ -96,17 +96,22 @@ test('a published row wins over a vendor-family substring', () => {
   assert.deepEqual(luna.rates, { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 })
   // A resold model resolves by its own id rather than by the vendor name inside it.
   assert.equal(resolveModelPrice('cline-pass/deepseek-v4.1-flash').price?.id, 'deepseek-v4.1-flash')
-  // A model neither the page nor a family rule covers stays UNPUBLISHED and is
-  // reported as approximate, instead of being quietly priced as something else.
+  // A model the published table does not carry is UNPRICED, and contributes no
+  // cost. It used to take a generic $2/$8 rate (and, before the table existed, a
+  // vendor-substring family rate) — so an invented figure entered a savings total
+  // that a reader takes as measured.
   const mimo = resolveModelPrice('cline-pass/mimo-v2.6-pro')
-  assert.equal(mimo.source, 'default')
-  assert.equal(priceUsage('cline-pass/mimo-v2.6-pro', undefined, { inputTokens: 1_000_000 }).approximate, true)
-  // A family hit is explicitly marked approximate, and is only reached after the
-  // published table misses.
-  const family = priceUsage('z-ai/glm-5.3-flashx', undefined, { inputTokens: 1_000_000 })
-  assert.equal(family.source, 'family')
-  assert.equal(family.key, 'family:glm')
-  assert.equal(family.approximate, true)
+  assert.equal(mimo.source, 'unpriced')
+  assert.equal(mimo.rates, undefined)
+  const mimoUsage = priceUsage('cline-pass/mimo-v2.6-pro', undefined, { inputTokens: 1_000_000 })
+  assert.equal(mimoUsage.priced, false)
+  assert.equal(mimoUsage.unpriced, true)
+  assert.equal(mimoUsage.usd, 0, 'no published rate means no cost, not a guessed one')
+  // A vendor-name substring no longer prices anything: this id used to match the
+  // `glm` family rule and be charged GLM's own rates.
+  const family = resolveModelPrice('z-ai/glm-5.3-flashx')
+  assert.equal(family.source, 'unpriced')
+  assert.equal(priceUsage('z-ai/glm-5.3-flashx', undefined, { inputTokens: 1_000_000 }).usd, 0)
   // The page keeps the vendor segment on one row: the bare catalog id must still find it.
   assert.equal(resolveModelPrice('hy4-preview').price?.id, 'tencent/hy4-preview')
   // A decorating suffix the page does not carry is trimmed only after the exact miss.
@@ -114,10 +119,10 @@ test('a published row wins over a vendor-family substring', () => {
   // ...and trimming never shadows the longer sibling, which has its own row.
   assert.equal(resolveModelPrice('deepseek-v4-flash-fast').price?.id, 'deepseek-v4-flash-fast')
   assert.equal(resolveModelPrice('deepseek-v4-flash-vision-exp').price?.id, 'deepseek-v4-flash-vision-exp')
-  // An unpublished model falls back, and says that is what happened.
+  // An unpublished model reports no rates at all, rather than the generic $2/$8.
   const unknown = resolveModelPrice('stealth/ox-alpha')
-  assert.equal(unknown.source, 'default')
-  assert.equal(unknown.rates.input, 2)
+  assert.equal(unknown.source, 'unpriced')
+  assert.equal(unknown.rates, undefined)
   // Candidates are most-specific-first and de-duplicated.
   assert.deepEqual(priceSlugCandidates('z-ai/GLM-5.3'), ['z-ai/glm-5.3', 'glm-5.3'])
   assert.deepEqual(priceSlugCandidates('glm5.3-flash'), ['glm5.3-flash', 'glm-5.3-flash'])

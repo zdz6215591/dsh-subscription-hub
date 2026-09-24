@@ -31,6 +31,17 @@ import type { QoderWireMessage, QoderWireRequest, QoderWireTool } from './wire-t
 import type { QoderCatalogModel } from './catalog.js'
 import type { CosyCredentials } from './cosy.js'
 
+/**
+ * What the wire's required `max_tokens` field falls back to when NEITHER the
+ * catalog nor the caller supplied one.
+ *
+ * The Qoder envelope has no optional spelling of this field, so a request cannot
+ * be built without a number — unlike `resolveOwnModel`, which is free to omit
+ * it. This is therefore the harness's own request requirement, kept deliberately
+ * here at the request boundary rather than dressed up as the model's capacity.
+ */
+const REQUEST_DEFAULT_MAX_TOKENS = 32_768
+
 function stableHash(prefix: string, ...inputs: string[]): string {
   const hash = crypto.createHash('sha256')
   hash.update(prefix)
@@ -158,7 +169,13 @@ export async function buildQoderRequestBody(
   }
   const modelKey = options.model || 'cmodel'
   const messages = translatedMessages ?? await validateQoderRequest(options, model, attachments)
-  const modelMaxTokens = model?.maxTokens ?? 32_768
+  // The wire REQUIRES a number here (`parameters.max_tokens` and
+// `model_config.max_output_tokens` are both non-optional), so when the catalog
+// published no cap the caller's own request value is used and, failing that,
+// the harness's per-request ceiling. This is a REQUEST requirement, not a claim
+// about the model: `resolveOwnModel` reports no `defaultMaxTokens` in that case,
+// so nothing presents the number as the model's own capacity.
+  const modelMaxTokens = model?.maxTokens ?? options.maxTokens ?? REQUEST_DEFAULT_MAX_TOKENS
   const maxTokens = Math.min(options.maxTokens ?? modelMaxTokens, modelMaxTokens)
   const isReasoning = options.reasoningEffort !== undefined || (model?.isReasoning ?? false)
   const tools = translateTools(options.tools)

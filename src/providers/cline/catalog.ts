@@ -18,8 +18,13 @@ import type { InputModality } from '../modality.js'
  *     read. It is the only source that publishes the per-model reasoning levels
  *     (`reasoning_options[].values`).
  *
- * The static {@link CLINE_MODEL_CATALOG} is a last resort for offline starts
- * only; a live read always wins.
+ * The roster is whatever the two official endpoints list, and each row carries
+ * only what a source actually described. There is deliberately NO pinned table
+ * underneath: the static `CLINE_MODEL_CATALOG` that used to sit here was unioned
+ * into the live roster — so invented ids appeared available even when both reads
+ * succeeded — and served as the entire answer on a total outage, which made a
+ * broken route indistinguishable from a healthy one. A model no source describes
+ * now yields NO row, and the caller reports the gap instead of filling it.
  *
  * Ported from yhshzh/dsh-cline-pass (MIT) `lib/catalog.js`,
  * GooDAnDReaDY/dsh-clinebot (MIT) `lib/models.js`, and
@@ -58,11 +63,20 @@ export interface ClineModel {
   /** Full wire id, `cline-pass/<slug>`. */
   id: string
   name: string
-  contextWindow: number
-  maxTokens: number
+  /**
+   * Advertised context window. ABSENT when no source described the model — the
+   * field used to be a required number defaulted to 200000, which presented an
+   * invented window as the model's own.
+   */
+  contextWindow?: number
+  /** Advertised output cap; absent when no source described it. */
+  maxTokens?: number
   input: InputModality[]
-  /** Whether the gateway accepts a `reasoning_effort` for it at all. */
-  reasoning: boolean
+  /**
+   * Whether the gateway accepts a `reasoning_effort` for it at all. Absent when
+   * no source said — offering levels on a guess risks a rejected turn.
+   */
+  reasoning?: boolean
   /**
    * Selectable reasoning levels. Absent means "not disclosed" — the adapter
    * then offers the gateway-wide list rather than hiding levels that do work.
@@ -71,31 +85,6 @@ export interface ClineModel {
   /** Source the row's metadata came from. */
   source: ClineCatalogSource
 }
-
-/**
- * Pinned roster used when every live source is unreachable. Every row carries a
- * positive context window: the harness rejects a catalog whose models lack one.
- */
-export const CLINE_MODEL_CATALOG: readonly ClineModel[] = Object.freeze([
-  { id: 'cline-pass/deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', contextWindow: 1_000_000, maxTokens: 384_000, input: ['text', 'image'], reasoning: true, source: 'static' },
-  { id: 'cline-pass/deepseek-v4-flash', name: 'DeepSeek V4 Flash', contextWindow: 1_000_000, maxTokens: 384_000, input: ['text'], reasoning: true, source: 'static' },
-  { id: 'cline-pass/deepseek-v4-pro', name: 'DeepSeek V4 Pro', contextWindow: 1_000_000, maxTokens: 384_000, input: ['text'], reasoning: true, source: 'static' },
-  { id: 'cline-pass/glm-5.3', name: 'GLM-5.3', contextWindow: 1_000_000, maxTokens: 131_072, input: ['text'], reasoning: true, source: 'static' },
-  { id: 'cline-pass/glm-5.3-flash', name: 'GLM-5.3 Flash', contextWindow: 1_000_000, maxTokens: 131_072, input: ['text', 'image'], reasoning: true, source: 'static' },
-  { id: 'cline-pass/kimi-k3', name: 'Kimi K3', contextWindow: 1_048_576, maxTokens: 131_072, input: ['text', 'image'], reasoning: true, source: 'static' },
-  { id: 'cline-pass/kimi-k2.7-code', name: 'Kimi K2.7 Code', contextWindow: 262_144, maxTokens: 262_144, input: ['text', 'image'], reasoning: true, source: 'static' },
-  { id: 'cline-pass/minimax-m3', name: 'MiniMax-M3', contextWindow: 1_048_576, maxTokens: 512_000, input: ['text', 'image'], reasoning: true, source: 'static' },
-  { id: 'cline-pass/qwen3.8-max', name: 'Qwen3.8 Max', contextWindow: 1_000_000, maxTokens: 131_072, input: ['text', 'image'], reasoning: true, source: 'static' },
-  { id: 'cline-pass/qwen3.7-max', name: 'Qwen3.7 Max', contextWindow: 1_000_000, maxTokens: 65_536, input: ['text'], reasoning: true, source: 'static' },
-  { id: 'cline-pass/qwen3.7-plus', name: 'Qwen3.7 Plus', contextWindow: 1_000_000, maxTokens: 64_000, input: ['text', 'image'], reasoning: true, source: 'static' },
-  { id: 'cline-pass/mimo-v2.5-pro', name: 'MiMo-V2.5-Pro', contextWindow: 1_048_576, maxTokens: 131_072, input: ['text'], reasoning: true, source: 'static' },
-  { id: 'cline-pass/mimo-v2.5', name: 'MiMo-V2.5', contextWindow: 1_048_576, maxTokens: 131_072, input: ['text', 'image'], reasoning: true, source: 'static' },
-])
-
-/** Default context window for a model no source describes. */
-const FALLBACK_CONTEXT_WINDOW = 200_000
-/** Default output cap for a model no source describes. */
-const FALLBACK_MAX_TOKENS = 32_000
 
 /**
  * Models whose underlying catalog slug cannot be derived from the subscription
@@ -109,8 +98,6 @@ const CLINE_SLUG_OVERRIDES: Readonly<Record<string, string>> = Object.freeze({
 const CLINE_SLUG_NAMESPACES: readonly string[] = Object.freeze([
   'z-ai', 'zai', 'deepseek', 'moonshotai', 'minimax', 'qwen', 'alibaba', 'xiaomi', 'meta', 'openai', 'anthropic',
 ])
-
-const BY_ID = new Map(CLINE_MODEL_CATALOG.map(model => [model.id, model]))
 
 /** Normalize one model id to the `cline-pass/<slug>` spelling. */
 function normalizeId(value: unknown): string | undefined {
@@ -267,33 +254,44 @@ export function parseModelsDevEfforts(clinePassId: string, registry: unknown): P
   }
 }
 
-/** Merge the discovered metadata for one id over the static fallback row. */
+/**
+ * Merge the discovered metadata for one id.
+ *
+ * There is no static base row any more: every field comes from a source that
+ * actually described this id, and a field no source described stays ABSENT. The
+ * id and its display name are the only facts guaranteed here — the id came from
+ * Cline's own roster, and the name is derived from that id rather than invented.
+ */
 export function mergeClineModel(id: string, live: { cline?: Partial<ClineModel>; modelsDev?: Partial<ClineModel> }): ClineModel {
-  const fallback = BY_ID.get(id)
-  const base: ClineModel = fallback ?? {
-    id,
-    name: id.slice(CLINE_MODEL_PREFIX.length).replace(/[-_]/g, ' ').replace(/\b\w/g, char => char.toUpperCase()),
-    contextWindow: FALLBACK_CONTEXT_WINDOW,
-    maxTokens: FALLBACK_MAX_TOKENS,
-    input: ['text'],
-    reasoning: true,
-    source: 'static',
-  }
   // models.dev publishes the reasoning levels and wins where both speak;
   // Cline's own catalog fills whatever it leaves out.
   const dev = live.modelsDev ?? {}
   const own = live.cline ?? {}
   const efforts = dev.efforts ?? own.efforts
+  const contextWindow = dev.contextWindow ?? own.contextWindow
+  const maxTokens = dev.maxTokens ?? own.maxTokens
+  const reasoning = dev.reasoning ?? own.reasoning
   return {
-    id: base.id,
-    name: base.name,
-    contextWindow: dev.contextWindow ?? own.contextWindow ?? base.contextWindow,
-    maxTokens: dev.maxTokens ?? own.maxTokens ?? base.maxTokens,
-    input: dev.input ?? own.input ?? base.input,
-    reasoning: dev.reasoning ?? own.reasoning ?? base.reasoning,
+    id,
+    name: own.name ?? dev.name ?? displayNameOf(id),
+    ...contextWindow === undefined ? {} : { contextWindow },
+    ...maxTokens === undefined ? {} : { maxTokens },
+    // Text is the only modality that can be assumed for a request the harness
+    // may send; an extra modality is a claim and is only ever read.
+    input: own.input ?? dev.input ?? ['text'],
+    ...reasoning === undefined ? {} : { reasoning },
     ...efforts === undefined ? {} : { efforts },
-    source: dev.contextWindow !== undefined || dev.efforts !== undefined ? 'models.dev' : own.contextWindow !== undefined ? 'cline' : base.source,
+    source: dev.contextWindow !== undefined || dev.efforts !== undefined
+      ? 'models.dev'
+      : own.contextWindow !== undefined ? 'cline' : 'static',
   }
+}
+
+/** The display name derived from a `cline-pass/<slug>` wire id. */
+function displayNameOf(id: string): string {
+  return id.startsWith(CLINE_MODEL_PREFIX)
+    ? id.slice(CLINE_MODEL_PREFIX.length).replace(/[-_]/g, ' ').replace(/\b\w/g, char => char.toUpperCase())
+    : id
 }
 
 /** Project one catalog model into the harness model-info shape. */
@@ -323,26 +321,23 @@ export function toClineModelInfo(model: ClineModel, provider: string): LlmModelI
 }
 
 /**
- * A model id this plugin recognizes: the resolved catalog row when the id is
- * known, otherwise a synthesized entry that keeps the id but carries
- * conservative defaults.
+ * A model id this plugin recognizes, carrying ONLY what was read about it.
  *
- * Synthesis is required because the gateway ships models (e.g.
- * `muse-spark-1.3-contributor`) that no pinned table predates; dropping them
- * would hide a model the user is paying for.
+ * Dropping an id the pinned table never knew would hide a model the user is
+ * paying for, so the id and its derived display name are kept. Nothing else is:
+ * this used to attach a 200000 window, a 32000 cap and `reasoning: true` to
+ * every unrecognized id, which presented three invented capabilities as the
+ * model's own and also offered it a reasoning selector it may reject. An id no
+ * source described now resolves to an entry with no capability claims at all,
+ * and the settings list shows those fields as not fetched.
+ * @param id - the `cline-pass/<slug>` wire id.
+ * @returns the row, with every unread capability ABSENT.
  */
 export function clineModel(id: string): ClineModel {
-  const known = BY_ID.get(id)
-  if (known !== undefined) return known
   return {
     id,
-    name: id.startsWith(CLINE_MODEL_PREFIX)
-      ? id.slice(CLINE_MODEL_PREFIX.length).replace(/[-_]/g, ' ').replace(/\b\w/g, char => char.toUpperCase())
-      : id,
-    contextWindow: FALLBACK_CONTEXT_WINDOW,
-    maxTokens: FALLBACK_MAX_TOKENS,
+    name: displayNameOf(id),
     input: ['text'],
-    reasoning: true,
     source: 'static',
   }
 }
@@ -363,7 +358,10 @@ async function readJson(url: string, fetchFn: FetchFn, headers: Record<string, s
  *
  * The roster id set is the union of the recommended list and the gateway's own
  * `/models`, so a model the recommendation endpoint lags behind is still
- * offered. The pinned table is added underneath as the offline safety net.
+ * offered. The pinned table is NO LONGER added underneath: it used to be unioned
+ * in, which meant ids nobody currently serves were listed as available even when
+ * both reads succeeded, and it also became the entire answer on a total outage.
+ * An empty roster is returned as empty, so the caller can say the read failed.
  */
 export async function discoverClineModels(
   apiKey: string,
@@ -382,10 +380,8 @@ export async function discoverClineModels(
   for (const id of [...parseRecommendedModels(recommended), ...parseGatewayModels(gateway)]) {
     if (!ids.includes(id)) ids.push(id)
   }
-  for (const model of CLINE_MODEL_CATALOG) {
-    if (!ids.includes(model.id)) ids.push(model.id)
-  }
-  if (ids.length === 0) return [...CLINE_MODEL_CATALOG]
+  // Nothing was listed: report an empty roster rather than a substituted one.
+  if (ids.length === 0) return []
 
   const models: ClineModel[] = []
   for (const id of ids) {

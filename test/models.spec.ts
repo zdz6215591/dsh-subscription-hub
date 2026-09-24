@@ -19,48 +19,25 @@ import { AccountTokenManager } from '../src/providers/accounts.js'
 import type { CatalogPersistence, CatalogSnapshot, FetchFn } from '../src/providers/common.js'
 import type { ClaudeSession, CodexSession, CopilotSession, GrokSession } from '../src/auth/store.js'
 import { withTimeout } from '../src/providers/common.js'
-import { DEFAULT_MODELS } from '../src/index.js'
 
 // ---------------------------------------------------------------------------
-// The built-in catalogs must describe the roster each provider actually serves.
-// These are the tables an offline start (or a failed discovery) falls back to,
-// so a retired id or a wrong window here is the error the user sees.
+// There is NO built-in catalog any more.
+//
+// `DEFAULT_MODELS` used to supply a per-provider roster whenever the config was
+// empty, and because `resolveCatalog` therefore always returned a non-empty list,
+// every adapter's "discovery failed" branch served that table as the account's
+// models. A broken route rendered exactly like a healthy one. The tests below pin
+// the replacement rule: an unread fact is ABSENT, never a plausible default.
 // ---------------------------------------------------------------------------
 
-test('the built-in grok catalog matches the live CLI roster and its window', () => {
-  // Verified live against cli-chat-proxy.grok.com/v1/models: exactly these four
-  // ids, each advertising context_window 500000.
-  assert.deepEqual(
-    DEFAULT_MODELS.grok.map(entry => entry.id),
-    ['grok-4.7', 'grok-4.7-build-fast', 'grok-4.6', 'grok-4.5'],
+test('no built-in model catalog is exported, so a route cannot fall back to one', async () => {
+  const plugin = await import('../src/index.js')
+  assert.equal(
+    'DEFAULT_MODELS' in plugin,
+    false,
+    'a static per-provider roster is exactly the fabrication being removed',
   )
-  for (const entry of DEFAULT_MODELS.grok) {
-    assert.equal(entry.contextWindow, 500_000, `${entry.id} must carry the live window`)
-    assert.equal(entry.maxTokens, 32_000)
-    assert.deepEqual(entry.inputModalities, ['text', 'image'])
-  }
 })
-
-test('a catalog entry that needs a window carries one, so no row falls back to a wrong default', () => {
-  // Every provider whose adapter resolves `configured?.contextWindow ?? <provider constant>`
-  // must state the window per model: otherwise a model with a larger real window
-  // silently inherits the smaller provider-level constant.
-  const mustCarryWindow: ProviderWithWindow[] = ['claude', 'grok', 'cline', 'trae']
-  for (const provider of mustCarryWindow) {
-    for (const entry of DEFAULT_MODELS[provider]) {
-      assert.ok(
-        typeof entry.contextWindow === 'number' && entry.contextWindow > 0,
-        `${provider}/${entry.id} needs an explicit contextWindow`,
-      )
-    }
-  }
-  // claude's rows differ per model, which is exactly why the constant is wrong.
-  const claude = new Map(DEFAULT_MODELS.claude.map(entry => [entry.id, entry]))
-  assert.equal(claude.get('claude-opus-5')?.contextWindow, 1_000_000)
-  assert.equal(claude.get('claude-haiku-4-5-20251001')?.contextWindow, 200_000)
-})
-
-type ProviderWithWindow = keyof typeof DEFAULT_MODELS
 
 const STATIC_CODEX = [{ id: 'gpt-5.1-codex', name: 'GPT-5.1 Codex' }]
 const STATIC_CLAUDE = [{ id: 'claude-opus-4-5', name: 'Claude Opus 4.5' }]
@@ -247,10 +224,11 @@ test('resolveModel prefers discovered context window and reasoning efforts', asy
     ['low', 'high'],
   )
   assert.equal(resolved.reasoning?.defaultEffort, 'high')
-  // A model the catalog did not advertise falls back to static defaults.
+  // A model the catalog did not advertise reports NO window. It used to report
+  // the invented 400000 constant, which made an unread capacity look like a fact.
   const fallback = await adapter.resolveModel('codex', 'gpt-unknown')
-  assert.equal(fallback.context?.contextWindow, 400_000)
-  assert.equal(fallback.reasoning?.efforts.length, 5)
+  assert.equal(fallback.context, undefined, 'an unread window must be absent, not 400000')
+  assert.equal(fallback.reasoning?.efforts.length, 5, 'the effort list is a documentable last resort')
 })
 
 test('a configured default effort wins over the discovered one (codex)', async () => {
@@ -673,11 +651,11 @@ test('grok discovery merges CLI-catalog reasoning metadata by model id', async (
   const g45 = await adapter.resolveModel('grok', 'grok-4.5')
   assert.deepEqual(g45.reasoning?.efforts.map(effort => effort.id), ['high', 'medium', 'low'])
 
-  // A model the CLI catalog does not cover exposes no efforts, and falls back
-  // to the family window the live catalog reports for every model it serves.
+  // A model the CLI catalog does not cover exposes no efforts AND no window: it
+  // used to inherit the invented 500000 family constant here.
   const build = await adapter.resolveModel('grok', 'grok-build-0.1')
   assert.equal(build.reasoning, undefined)
-  assert.equal(build.context?.contextWindow, 500_000)
+  assert.equal(build.context, undefined, 'an undescribed model reports no window')
 })
 
 test('grok discovery survives a CLI catalog failure with a warning', async () => {
@@ -921,9 +899,9 @@ test('grok resolveModel survives discovery failure with no persisted catalog', a
   })
   const resolved = await adapter.resolveModel('grok', 'grok-4.6')
   assert.equal(resolved.reasoning, undefined)
-  // With nothing discovered the family window still applies, not the retired
-  // 256000 the constant used to carry.
-  assert.equal(resolved.context?.contextWindow, 500_000)
+  // With nothing discovered there is no window to report. The 500000 that used to
+  // appear here (and the retired 256000 before it) was a constant, not a reading.
+  assert.equal(resolved.context, undefined)
 })
 
 test('grok discovery writes the fetched catalog through to the store', async () => {
@@ -1196,9 +1174,12 @@ test('copilot resolveModel serves discovered context windows and modalities', as
   const resolved = await adapter.resolveModel('copilot', 'gpt-4.1')
   assert.equal(resolved.context?.contextWindow, 1_000_000)
   assert.deepEqual(resolved.inputModalities, ['text', 'image'])
-  // A model the catalog filtered out falls back to static/defaults.
+  // A model the catalog filtered out reports NO window and no output cap. It used
+  // to report the invented 128000/16000 constants, and this catalog publishes no
+  // output cap at all — so 16000 was the only value that line ever produced.
   const missing = await adapter.resolveModel('copilot', 'policy-disabled')
-  assert.equal(missing.context?.contextWindow, 128_000)
+  assert.equal(missing.context, undefined)
+  assert.equal(missing.defaultMaxTokens, undefined)
   assert.deepEqual(missing.inputModalities, ['text'])
 })
 

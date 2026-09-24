@@ -1372,32 +1372,29 @@ export class CommandCodeAdapter extends LlmAdapter {
     let live = await this.catalogEntry(model)
     if (live === undefined) {
       // Prime the live catalog on the resolve path so a caller that resolves a
-      // model before discovery runs still gets the real context/output caps
-      // instead of the static fallbacks. Failures are non-fatal here.
+      // model before discovery runs still gets the REAL context/output caps.
+      // Failures are non-fatal here. This is the "make it work properly" half of
+      // the contract and is deliberately kept: it removes the need for a
+      // fabricated default rather than adding one.
       try {
         const accounts = (await this.options.tokens.list()).map(entry => entry.key)
         if (accounts.length > 0) await this.listOwnModels(provider, accounts[0])
         live = await this.catalogEntry(model)
       } catch { /* best-effort warm */ }
     }
-    if (live !== undefined) {
-      return {
-        provider,
-        id: model,
-        name: live.name ?? configured?.name ?? model,
-        inputModalities: configured?.inputModalities ?? (isCommandCodeVisionModel(model) ? ['text', 'image'] : ['text']),
-        context: { contextWindow: live.contextWindow },
-        defaultMaxTokens: Math.min(live.maxTokens, DEFAULT_GENERATE_MAX_TOKENS),
-        ...reasoning === undefined ? {} : { reasoning },
-      }
-    }
+    // Only a value that was read or configured. The no-live branch used to
+    // terminate on `?? 128_000` — an invented window for a model whose live entry
+    // was unavailable — and the live branch clamped a GENUINELY READ cap with the
+    // invented constant 64000.
+    const contextWindow = live?.contextWindow ?? configured?.contextWindow
+    const maxTokens = live?.maxTokens ?? configured?.maxTokens
     return {
       provider,
       id: model,
-      name: configured?.name ?? model,
+      name: live?.name ?? configured?.name ?? model,
       inputModalities: configured?.inputModalities ?? (isCommandCodeVisionModel(model) ? ['text', 'image'] : ['text']),
-      context: { contextWindow: configured?.contextWindow ?? 128_000 },
-      defaultMaxTokens: Math.min(configured?.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_GENERATE_MAX_TOKENS),
+      ...contextWindow === undefined ? {} : { context: { contextWindow } },
+      ...maxTokens === undefined ? {} : { defaultMaxTokens: maxTokens },
       ...reasoning === undefined ? {} : { reasoning },
     }
   }

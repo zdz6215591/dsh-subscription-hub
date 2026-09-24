@@ -338,7 +338,13 @@ describe('zed paste and catalog', () => {
     assert.equal(Math.round(usage.windows?.[0]?.usedPercent ?? -1), 17)
   })
 
-  it('maps /client/users/me zed_student bundled $10 credit when no spent_cents reported', () => {
+  it('does NOT invent a bundled $10 credit when the payload discloses no allowance', () => {
+    // This test used to assert `limit: 10` / `remaining: 10` / `usedPercent: 0` for
+    // this exact payload — i.e. it pinned the FABRICATION. The payload names a plan
+    // (`zed_student`) and reports no spend and no allowance, so the old code filled
+    // the denominator from the plan name and the card rendered "已经用 $0.00 / 总额
+    // $10.00" for a figure upstream never stated. A test pinning a guess is how the
+    // guess survived, so this now asserts the ABSENCE instead.
     const usage = parseZedUsage({
       plan: {
         plan_v3: 'zed_student',
@@ -353,13 +359,13 @@ describe('zed paste and catalog', () => {
       plans_by_organization: { org_01m1jhg6vxysd7sbeyf7z8zmyv: 'zed_student' },
     })
     assert.equal(usage.supported, true)
+    // The plan is a real disclosure and still reported.
     assert.equal(usage.plan, 'Zed Student')
-    assert.equal(usage.windows?.length, 1)
-    assert.equal(usage.windows?.[0]?.scope, 'Hosted models')
-    assert.equal(usage.windows?.[0]?.used, 0)
-    assert.equal(usage.windows?.[0]?.limit, 10)
-    assert.equal(usage.windows?.[0]?.remaining, 10)
-    assert.equal(usage.windows?.[0]?.usedPercent, 0)
+    // But no quota window: a ratio needs a denominator, and upstream gave none.
+    for (const window of usage.windows ?? []) {
+      assert.equal(window.limit, undefined, 'no window may carry an invented cap')
+      assert.equal(window.remaining, undefined, 'no window may carry an invented remaining')
+    }
   })
 
   it('maps dashboard /frontend/billing/usage token_spend ($0.21 used of $10)', () => {

@@ -78,8 +78,10 @@ export const COPILOT_API_URL = 'https://api.githubcopilot.com/chat/completions'
 export const COPILOT_RESPONSES_URL = 'https://api.githubcopilot.com/responses'
 export const COPILOT_MODELS_URL = 'https://api.githubcopilot.com/models'
 const COPILOT_SCOPE = 'read:user'
-const COPILOT_CONTEXT_WINDOW = 128_000
-const COPILOT_DEFAULT_MAX_TOKENS = 16_000
+// A fabricated window and output cap used to be declared here (`128_000` / `16_000`),
+// and Copilot's wire shape publishes no output cap at all — so those numbers were the
+// ONLY values those lines ever produced, presented as the model's own capacity. Both
+// are gone; the route now reports only what the model entry disclosed.
 /** Refresh when the Copilot API token has less than this much life left. */
 export const COPILOT_PREEMPT_MS = 5 * 60_000
 
@@ -921,14 +923,20 @@ export class CopilotAdapter extends LlmAdapter {
     // A configured default effort still merges in: the picker then
     // preselects it even for models the catalog does not cover.
     const reasoning = mergeReasoning(this.options.defaultEffortOf?.(model), discovered?.reasoning)
+    const contextWindow = discovered?.contextWindow ?? configured?.contextWindow
+    const maxTokens = configured?.maxTokens
     return {
       provider,
       id: model,
       name: discovered?.name ?? configured?.name ?? model,
       ...discovered?.description === undefined ? {} : { description: discovered.description },
       inputModalities: discovered?.inputModalities ?? configured?.inputModalities ?? ['text'],
-      context: { contextWindow: discovered?.contextWindow ?? configured?.contextWindow ?? COPILOT_CONTEXT_WINDOW },
-      defaultMaxTokens: configured?.maxTokens ?? COPILOT_DEFAULT_MAX_TOKENS,
+      // Only what the catalog disclosed: the `?? 128_000` / `?? 16_000` these
+      // used to end on were invented capacities, and this catalog publishes no
+      // output cap at all — so 16000 was not a last resort, it was the only
+      // value this line ever produced. Absent is honest.
+      ...contextWindow === undefined ? {} : { context: { contextWindow } },
+      ...maxTokens === undefined ? {} : { defaultMaxTokens: maxTokens },
       ...reasoning === undefined ? {} : { reasoning },
     }
   }
