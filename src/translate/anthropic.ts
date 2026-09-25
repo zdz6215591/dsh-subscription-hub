@@ -18,6 +18,7 @@ import type {
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import { parseSse } from './sse.js'
+import { toolResultOf } from './resolved.js'
 import type { ResolvedToolResultBlock, TranslatableMessage } from './resolved.js'
 
 /**
@@ -146,55 +147,65 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[]): A
     // owns those. A later one rides here so the cached prefix ahead of it
     // stays byte-identical.
     if (message.role === 'system' && index < start) continue
-    const role = message.role === 'system' ? 'user' : message.role
+    const role: 'user' | 'assistant' = message.role === 'assistant' ? 'assistant' : 'user'
     const blocks: Record<string, unknown>[] = []
-    for (const block of message.content) {
-      switch (block.type) {
-        case 'text':
-          blocks.push({
-            type: 'text',
-            text: message.role === 'system'
-              ? `${SYSTEM_REMINDER_OPEN}${block.text}${SYSTEM_REMINDER_CLOSE}`
-              : block.text,
-          })
-          break
-        case 'tool-call':
-          // Anthropic accepts `tool_use` only in assistant messages, and only
-          // when a matching `tool_result` follows. A tool call in any other
-          // role is replayed narrative — a settled subagent's closing message
-          // spliced into the parent as a user-role notice carries the calls it
-          // died holding, which no result will ever answer — so it rides as
-          // descriptive text instead of a call the API would reject.
-          blocks.push(role === 'assistant'
-            ? {
-                type: 'tool_use',
-                id: String(block.id),
-                name: block.name,
-                input: parseToolInput(block.arguments),
-              }
-            : { type: 'text', text: `[tool call ${block.name}: ${block.arguments}]` })
-          break
-        case 'tool-result':
-          blocks.push({
-            type: 'tool_result',
-            tool_use_id: String(block.toolCallId),
-            content: toolResultContent(block),
-            ...block.isError === true ? { is_error: true } : {},
-          })
-          break
-        case 'image':
-          if ('dataBase64' in block) {
+    if (message.role === 'tool') {
+      const toolCallId = message.toolCallId ?? (message as unknown as { source?: { callId?: string } }).source?.callId ?? ''
+      blocks.push({
+        type: 'tool_result',
+        tool_use_id: String(toolCallId),
+        content: toolResultContent({ content: message.content as any, isError: message.isError } as any),
+        ...message.isError === true ? { is_error: true } : {},
+      })
+    } else {
+      for (const block of message.content) {
+        switch (block.type) {
+          case 'text':
             blocks.push({
-              type: 'image',
-              source: { type: 'base64', media_type: block.mediaType, data: block.dataBase64 },
+              type: 'text',
+              text: message.role === 'system'
+                ? `${SYSTEM_REMINDER_OPEN}${block.text}${SYSTEM_REMINDER_CLOSE}`
+                : block.text,
             })
-          }
-          // An unresolved ImageBlock carries only an attachment reference; the
-          // adapter resolves images before translation, so this is skipped.
-          break
-        default:
-          // reasoning (not replayed), unknown blocks.
-          break
+            break
+          case 'tool-call':
+            // Anthropic accepts `tool_use` only in assistant messages, and only
+            // when a matching `tool_result` follows. A tool call in any other
+            // role is replayed narrative — a settled subagent's closing message
+            // spliced into the parent as a user-role notice carries the calls it
+            // died holding, which no result will ever answer — so it rides as
+            // descriptive text instead of a call the API would reject.
+            blocks.push(role === 'assistant'
+              ? {
+                  type: 'tool_use',
+                  id: String(block.id),
+                  name: block.name,
+                  input: parseToolInput(block.arguments),
+                }
+              : { type: 'text', text: `[tool call ${block.name}: ${block.arguments}]` })
+            break
+          case 'tool-result':
+            blocks.push({
+              type: 'tool_result',
+              tool_use_id: String(block.toolCallId),
+              content: toolResultContent(block),
+              ...block.isError === true ? { is_error: true } : {},
+            })
+            break
+          case 'image':
+            if ('dataBase64' in block) {
+              blocks.push({
+                type: 'image',
+                source: { type: 'base64', media_type: block.mediaType, data: block.dataBase64 },
+              })
+            }
+            // An unresolved ImageBlock carries only an attachment reference; the
+            // adapter resolves images before translation, so this is skipped.
+            break
+          default:
+            // reasoning (not replayed), unknown blocks.
+            break
+        }
       }
     }
     if (blocks.length === 0) continue

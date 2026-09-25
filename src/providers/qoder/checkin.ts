@@ -293,7 +293,7 @@ export async function autoCheckinQoder(
   const state = await readQoderCheckinState()
 
   if (state.lastDate === todayStr) {
-    const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
+    const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000)
     const tomorrowStr = qoderBenefitDay(tomorrow)
     if (state.scheduledDate !== tomorrowStr || state.scheduledTime === undefined) {
       state.scheduledDate = tomorrowStr
@@ -358,7 +358,7 @@ export interface QoderCheckinStatusView {
  */
 export async function recordQoderCheckin(message: string, now = new Date()): Promise<void> {
   const todayStr = qoderBenefitDay(now)
-  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
+  const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000)
   const previous = await readQoderCheckinState()
   await writeQoderCheckinState({
     ...previous,
@@ -384,7 +384,7 @@ export async function getQoderCheckinStatusView(now = new Date()): Promise<Qoder
   const todayStr = qoderBenefitDay(now)
   const state = await readQoderCheckinState()
   if (state.lastDate === todayStr) {
-    const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
+    const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000)
     const tomorrowStr = qoderBenefitDay(tomorrow)
     if (state.scheduledDate !== tomorrowStr || state.scheduledTime === undefined) {
       state.scheduledDate = tomorrowStr

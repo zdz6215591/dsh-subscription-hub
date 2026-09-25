@@ -28,6 +28,77 @@ export interface ResolvedToolResultBlock extends Omit<ToolResultBlock, 'content'
   content: readonly TranslatableBlock[]
 }
 
+/** The tool result one message answers (unified view across DSH versions). */
+export interface ToolResultView {
+  readonly toolCallId: string
+  readonly isError?: boolean | undefined
+  readonly content: readonly (ContentBlock | TranslatableBlock)[]
+}
+
+/**
+ * Extract all tool results from a message.
+ * Supports both DSH 0.1.7 native `role: 'tool'` messages (one result per message)
+ * and legacy DSH <=0.1.5 `role: 'user'` messages containing one or more `tool-result` blocks.
+ */
+export function toolResultsOf(message: Message | TranslatableMessage): ToolResultView[] {
+  const current = message as unknown as {
+    role: string
+    toolCallId?: string
+    isError?: boolean
+    content: readonly (ContentBlock | TranslatableBlock)[]
+  }
+  if (current.role === 'tool') {
+    if (typeof current.toolCallId !== 'string' || current.toolCallId === '') return []
+    return [{ toolCallId: current.toolCallId, isError: current.isError ?? false, content: current.content }]
+  }
+  if (message.role !== 'user') return []
+  const results: ToolResultView[] = []
+  for (const block of message.content) {
+    if (block?.type === 'tool-result') {
+      results.push({
+        toolCallId: (block as ToolResultBlock).toolCallId,
+        isError: (block as ToolResultBlock).isError ?? false,
+        content: (block as ToolResultBlock).content as readonly (ContentBlock | TranslatableBlock)[],
+      })
+    }
+  }
+  return results
+}
+
+/**
+ * Extract the primary tool result from a message, or undefined if none.
+ */
+export function toolResultOf(message: Message | TranslatableMessage): ToolResultView | undefined {
+  return toolResultsOf(message)[0]
+}
+
+/**
+ * Collect the tool calls that have a paired tool result, plus each call's name.
+ */
+export function pairedToolCalls(messages: readonly (Message | TranslatableMessage)[]): {
+  ids: Set<string>
+  names: Map<string, string>
+} {
+  const callIds = new Set<string>()
+  const names = new Map<string, string>()
+  const resultIds = new Set<string>()
+  for (const message of messages) {
+    const results = toolResultsOf(message)
+    for (const result of results) {
+      if (result.toolCallId && result.toolCallId.trim() !== '') {
+        resultIds.add(result.toolCallId)
+      }
+    }
+    for (const block of message.content) {
+      if (message.role === 'assistant' && block.type === 'tool-call') {
+        callIds.add(block.id)
+        if (block.name) names.set(block.id, block.name)
+      }
+    }
+  }
+  return { ids: new Set([...callIds].filter((id) => resultIds.has(id))), names }
+}
+
 /**
  * Wires with text-only tool outputs receive images in a following user turn.
  * Defer that turn until all consecutive user messages have been processed:
@@ -44,11 +115,11 @@ export function withToolResultImages(messages: readonly TranslatableMessage[]): 
   for (const message of messages) {
     if (message.role === 'assistant') flush()
     out.push(message)
-    for (const block of message.content) {
-      if (block.type !== 'tool-result') continue
-      const parts = block.content.filter((part): part is ResolvedImagePart => part.type === 'image' && 'dataBase64' in part)
+    const results = toolResultsOf(message)
+    for (const result of results) {
+      const parts = result.content.filter((part): part is ResolvedImagePart => part.type === 'image' && 'dataBase64' in part)
       if (parts.length > 0) {
-        images.push({ type: 'text', text: `Images from tool result ${String(block.toolCallId)}:` }, ...parts)
+        images.push({ type: 'text', text: `Images from tool result ${String(result.toolCallId)}:` }, ...parts)
       }
     }
   }
@@ -58,10 +129,12 @@ export function withToolResultImages(messages: readonly TranslatableMessage[]): 
 
 /** Translator input message: role plus resolved blocks. */
 export interface TranslatableMessage {
-  role: 'system' | 'user' | 'assistant'
+  role: 'system' | 'user' | 'assistant' | 'tool'
   content: readonly TranslatableBlock[]
   /** Preserved for adapters whose provider-private replay metadata is required. */
   source?: Message['source']
+  toolCallId?: string
+  isError?: boolean
 }
 
 /**
@@ -113,8 +186,14 @@ export async function resolveImages(
     }]
   }
   return Promise.all(messages.map(async (message): Promise<TranslatableMessage> => ({
-    role: message.role,
+    role: message.role as TranslatableMessage['role'],
     source: message.source,
     content: (await Promise.all(message.content.map(resolveBlock))).flat(),
+    ...('toolCallId' in message && typeof (message as { toolCallId?: string }).toolCallId === 'string'
+      ? { toolCallId: (message as { toolCallId: string }).toolCallId }
+      : {}),
+    ...('isError' in message && typeof (message as { isError?: boolean }).isError === 'boolean'
+      ? { isError: (message as { isError: boolean }).isError }
+      : {}),
   })))
 }

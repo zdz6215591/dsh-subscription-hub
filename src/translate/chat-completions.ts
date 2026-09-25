@@ -15,7 +15,7 @@ import type {
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import { parseSse } from './sse.js'
-import { withToolResultImages } from './resolved.js'
+import { toolResultOf, withToolResultImages } from './resolved.js'
 import type { ResolvedToolResultBlock, TranslatableMessage } from './resolved.js'
 
 /** Flatten a tool result's content to plain text for a `tool` message. */
@@ -46,6 +46,15 @@ export function toChatMessages(
       for (const block of message.content) {
         if (block.type === 'text') systemTexts.push(block.text)
       }
+      continue
+    }
+    const result = toolResultOf(message)
+    if (result) {
+      out.push({
+        role: 'tool',
+        tool_call_id: String(result.toolCallId),
+        content: toolResultText(result as unknown as ResolvedToolResultBlock),
+      })
       continue
     }
     if (message.role === 'user') {

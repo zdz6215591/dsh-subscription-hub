@@ -37,7 +37,7 @@ import type { FetchFn, ModelEntry, ModelListNotFetched } from '../common.js'
 import type { PoolAdapter } from '../pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, subscriptionRetryPolicy } from '../rate-limit.js'
 import type { RateLimitWait } from '../rate-limit.js'
-import { resolveImages, withToolResultImages } from '../../translate/resolved.js'
+import { pairedToolCalls, resolveImages, toolResultOf, withToolResultImages } from '../../translate/resolved.js'
 import type { TranslatableBlock, TranslatableMessage } from '../../translate/resolved.js'
 import {
   CLINE_BASE_URL,
@@ -714,22 +714,7 @@ export class ClineAdapter extends LlmAdapter {
     if (options.system !== undefined) messages.push({ role: 'system', content: options.system })
 
     // Find valid paired tool calls so neither orphaned nor empty tool calls/results are emitted
-    const paired = new Set<string>()
-    const callIds = new Set<string>()
-    const resultIds = new Set<string>()
-    for (const message of resolved) {
-      for (const block of message.content) {
-        if (message.role === 'assistant' && block.type === 'tool-call' && block.name && block.name.trim() !== '' && block.id && block.id.trim() !== '') {
-          callIds.add(block.id)
-        }
-        if (block.type === 'tool-result' && block.toolCallId && block.toolCallId.trim() !== '') {
-          resultIds.add(block.toolCallId)
-        }
-      }
-    }
-    for (const id of callIds) {
-      if (resultIds.has(id)) paired.add(id)
-    }
+    const { ids: paired } = pairedToolCalls(resolved)
 
     for (const message of withToolResultImages(resolved) as readonly TranslatableMessage[]) {
       if (message.role === 'system') continue
@@ -759,31 +744,36 @@ export class ClineAdapter extends LlmAdapter {
         })
         continue
       }
-      const parts: Record<string, unknown>[] = []
-      const texts: string[] = []
-      const toolResults: Record<string, unknown>[] = []
-      for (const block of message.content) {
-        if (block.type === 'text') texts.push(block.text)
-        else if (block.type === 'image' && 'dataBase64' in block) {
-          parts.push({ type: 'image_url', image_url: { url: `data:${block.mediaType};base64,${block.dataBase64}` } })
-        } else if (block.type === 'tool-result') {
-          if (!block.toolCallId || block.toolCallId.trim() === '' || !paired.has(block.toolCallId)) continue
-          const text = block.content
-            .map(part => (part.type === 'text' ? part.text : ''))
-            .filter(Boolean)
-            .join('')
-          toolResults.push({
-            role: 'tool',
-            tool_call_id: String(block.toolCallId),
-            content: text === '' ? '(no output)' : text,
-          })
-        }
+
+      const result = toolResultOf(message)
+      if (result) {
+        if (!paired.has(result.toolCallId)) continue
+        const text = result.content
+          .map(part => (part.type === 'text' ? part.text : ''))
+          .filter(Boolean)
+          .join('')
+        messages.push({
+          role: 'tool',
+          tool_call_id: String(result.toolCallId),
+          content: text === '' ? '(no output)' : text,
+        })
+        continue
       }
-      messages.push(...toolResults)
-      if (parts.length > 0) {
-        messages.push({ role: 'user', content: [...texts.length === 0 ? [] : [{ type: 'text', text: texts.join('') }], ...parts] })
-      } else if (texts.length > 0) {
-        messages.push({ role: 'user', content: texts.join('') })
+
+      if (message.role === 'user') {
+        const parts: Record<string, unknown>[] = []
+        const texts: string[] = []
+        for (const block of message.content) {
+          if (block.type === 'text') texts.push(block.text)
+          else if (block.type === 'image' && 'dataBase64' in block) {
+            parts.push({ type: 'image_url', image_url: { url: `data:${block.mediaType};base64,${block.dataBase64}` } })
+          }
+        }
+        if (parts.length > 0) {
+          messages.push({ role: 'user', content: [...texts.length === 0 ? [] : [{ type: 'text', text: texts.join('') }], ...parts] })
+        } else if (texts.length > 0) {
+          messages.push({ role: 'user', content: texts.join('') })
+        }
       }
     }
     return messages

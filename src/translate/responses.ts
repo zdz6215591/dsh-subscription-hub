@@ -21,7 +21,7 @@ import type {
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import { parseSse } from './sse.js'
-import { withToolResultImages } from './resolved.js'
+import { toolResultOf, withToolResultImages } from './resolved.js'
 import type { ResolvedToolResultBlock, TranslatableMessage } from './resolved.js'
 
 /** Assembled `instructions` + `input` pair for one Responses request. */
@@ -94,6 +94,15 @@ export function toResponsesInput(
       for (const block of message.content) {
         if (block.type === 'text') systemTexts.push(block.text)
       }
+      continue
+    }
+    const result = toolResultOf(message)
+    if (result) {
+      input.push({
+        type: 'function_call_output',
+        call_id: String(result.toolCallId),
+        output: toolResultText(result as unknown as ResolvedToolResultBlock),
+      })
       continue
     }
     const role = message.role

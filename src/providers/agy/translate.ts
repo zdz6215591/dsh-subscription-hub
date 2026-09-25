@@ -16,11 +16,36 @@
 
 import { createHash, randomBytes } from 'node:crypto'
 import type { ContentBlock, GenerateOptions, Message, ToolSchema } from '@deepseek-ai/dsh-llm'
+import { pairedToolCalls, toolResultOf } from '../../translate/resolved.js'
+import type { ToolResultView } from '../../translate/resolved.js'
 import { catalogModel, isLevelThinkingModel } from './catalog.js'
 import { getToolSignature } from './signature-cache.js'
 
 function generateAntigravityRequestId(): string {
   return `agent/${Date.now()}/${randomBytes(4).toString('hex')}`
+}
+
+const SKIP_THOUGHT_SIGNATURE_VALIDATOR = 'skip_thought_signature_validator'
+
+function requiresThoughtSignatures(model?: string): boolean {
+  return model !== undefined && /^gemini-3(?:[.-]|$)/i.test(model)
+}
+
+function toolResultValue(result: ToolResultView): Record<string, unknown> {
+  const text = result.content
+    .filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')
+    .map(b => b.text)
+    .join('\n')
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return { result: text, ...result.isError === true ? { is_error: true } : {} }
+  }
+  if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    return parsed as Record<string, unknown>
+  }
+  return { output: parsed, ...result.isError === true ? { is_error: true } : {} }
 }
 
 export type AgyPart =
@@ -169,6 +194,7 @@ function blockToParts(
   block: ContentBlock,
   toolNames: Map<string, string>,
   images: Map<string, AgyResolvedImage>,
+  model?: string,
 ): AgyPart[] {
   switch (block.type) {
     case 'text':
@@ -210,14 +236,14 @@ function blockToParts(
     case 'tool-result': {
       const name = toolNames.get(block.toolCallId) ?? block.toolCallId
       if (!name || name.trim() === '') return []
-      const text = block.content
-        .filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')
-        .map((b) => b.text)
-        .join('\n')
       return [{
         functionResponse: {
           name,
-          response: { result: text, is_error: block.isError === true },
+          response: toolResultValue({
+            toolCallId: block.toolCallId,
+            ...block.isError === undefined ? {} : { isError: block.isError },
+            content: block.content,
+          }),
         },
       }]
     }
@@ -239,14 +265,30 @@ function messageToContent(
   message: Message,
   toolNames: Map<string, string>,
   images: Map<string, AgyResolvedImage>,
+  model?: string,
 ): AgyContent | null {
+  const result = toolResultOf(message)
+  if (result) {
+    const name = toolNames.get(result.toolCallId) ?? result.toolCallId
+    if (!name || name.trim() === '') return null
+    return {
+      role: 'user',
+      parts: [{
+        functionResponse: {
+          name,
+          response: toolResultValue(result as unknown as ToolResultView),
+        },
+      }],
+    }
+  }
+
   const parts = message.content.flatMap((block) =>
     // Non-user images are out of scope by policy (docs ANTIGRAVITY-API §3.2):
     // skip them like any other untranslatable block instead of tripping the
     // unresolved-map guard, which protects only the user-image invariant.
     block.type === 'image' && message.role !== 'user'
       ? []
-      : blockToParts(block, toolNames, images),
+      : blockToParts(block, toolNames, images, model),
   )
   if (parts.length === 0) return null
   const role = message.role === 'assistant' ? 'model' : 'user'
@@ -300,10 +342,10 @@ export function toAgyRequestBody(
   options: GenerateOptions,
   context: { projectId?: string; sessionId?: string; images?: Map<string, AgyResolvedImage> },
 ): AgyRequestBody {
-  const toolNames = buildToolNameIndex(options.messages)
+  const { names: toolNames } = pairedToolCalls(options.messages)
   const images = context.images ?? new Map<string, AgyResolvedImage>()
   let contents = options.messages
-    .map((message) => messageToContent(message, toolNames, images))
+    .map((message) => messageToContent(message, toolNames, images, options.model))
     .filter((c): c is AgyContent => c !== null)
   if (isClaudeModel(options.model)) {
     contents = stripTrailingModelTurn(contents)

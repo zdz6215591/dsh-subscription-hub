@@ -33,6 +33,7 @@ import type { FetchFn, ModelEntry, ModelListNotFetched } from '../common.js'
 import type { PoolAdapter } from '../pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, subscriptionRetryPolicy } from '../rate-limit.js'
 import type { RateLimitWait } from '../rate-limit.js'
+import { pairedToolCalls, toolResultsOf } from '../../translate/resolved.js'
 import { TRAE_CLIENT_VERSION } from './protocol.js'
 import {
   TRAE_CHAT_BASE,
@@ -93,30 +94,6 @@ function blockText(block: ContentBlock): string {
   return block.type === 'text' || block.type === 'reasoning' ? block.text : ''
 }
 
-/** Collect the ids of tool calls that have a matching result in this history. */
-function pairedToolCalls(messages: readonly Message[]): Set<string> {
-  const callIds = new Set<string>()
-  const resultIds = new Set<string>()
-  for (const message of messages) {
-    for (const block of message.content) {
-      if (message.role === 'assistant' && block.type === 'tool-call' && block.name && block.name.trim() !== '' && block.id && block.id.trim() !== '') {
-        callIds.add(block.id)
-      }
-      if (block.type === 'tool-result' && block.toolCallId && block.toolCallId.trim() !== '') {
-        resultIds.add(block.toolCallId)
-      }
-    }
-  }
-  return new Set([...callIds].filter(id => resultIds.has(id)))
-}
-
-function isToolResultMessage(message: Message): boolean {
-  if (message.role !== 'user') return false
-  const kind: string | undefined = message.source?.kind
-  if (kind !== undefined) return kind === 'tool'
-  return message.content?.[0]?.type === 'tool-result'
-}
-
 /**
  * Convert harness messages into Trae's envelope.
  *
@@ -126,7 +103,7 @@ function isToolResultMessage(message: Message): boolean {
  */
 export function toTraeMessages(messages: readonly Message[], system?: string): TraeMessage[] {
   const out: TraeMessage[] = []
-  const paired = pairedToolCalls(messages)
+  const { ids: paired } = pairedToolCalls(messages)
   if (system !== undefined && system !== '') out.push({ role: 'system', text: system })
   for (const message of messages) {
     if (message.role === 'system') {
@@ -134,7 +111,23 @@ export function toTraeMessages(messages: readonly Message[], system?: string): T
       if (text !== '') out.push({ role: 'system', text })
       continue
     }
-    if (message.role === 'user' && !isToolResultMessage(message)) {
+    const results = toolResultsOf(message)
+    if (results.length > 0) {
+      for (const result of results) {
+        if (!result.toolCallId || result.toolCallId.trim() === '' || !paired.has(result.toolCallId)) continue
+        const text = result.content
+          .map(part => (part.type === 'text' ? part.text : ''))
+          .filter(Boolean)
+          .join('\n')
+        out.push({
+          role: 'tool',
+          text: text === '' ? '(no output)' : text,
+          toolCallId: String(result.toolCallId),
+        })
+      }
+      continue
+    }
+    if (message.role === 'user') {
       const text = message.content.map(blockText).filter(Boolean).join('\n')
       if (text !== '') out.push({ role: 'user', text })
       continue
@@ -155,20 +148,6 @@ export function toTraeMessages(messages: readonly Message[], system?: string): T
         ...toolCalls.length === 0 ? {} : { toolCalls },
       })
       continue
-    }
-    if (isToolResultMessage(message)) {
-      for (const block of message.content) {
-        if (block.type !== 'tool-result' || !block.toolCallId || block.toolCallId.trim() === '' || !paired.has(block.toolCallId)) continue
-        const text = block.content
-          .map(part => (part.type === 'text' ? part.text : ''))
-          .filter(Boolean)
-          .join('\n')
-        out.push({
-          role: 'tool',
-          text: text === '' ? '(no output)' : text,
-          toolCallId: String(block.toolCallId),
-        })
-      }
     }
   }
   return out

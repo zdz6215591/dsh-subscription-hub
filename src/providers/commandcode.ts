@@ -33,8 +33,8 @@ import type { FetchFn, ModelEntry, ProviderUsage } from './common.js'
 import type { PoolAdapter } from './pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, subscriptionRetryPolicy } from './rate-limit.js'
 import type { RateLimitWait, RetryDefaults } from './rate-limit.js'
-import { resolveImages, withToolResultImages } from '../translate/resolved.js'
-import type { TranslatableBlock, TranslatableMessage } from '../translate/resolved.js'
+import { pairedToolCalls, resolveImages, toolResultOf, withToolResultImages } from '../translate/resolved.js'
+import type { ToolResultView, TranslatableBlock, TranslatableMessage } from '../translate/resolved.js'
 
 export const COMMANDCODE_PREEMPT_MS = 365 * 24 * 60 * 60 * 1000
 export const COMMANDCODE_API_BASE = 'https://api.commandcode.ai'
@@ -219,33 +219,6 @@ function recordOrEmpty(value: unknown): Record<string, unknown> {
  * Matches Mars-Sea/dsh-commandcode-provider: only paired tool calls are
  * replayed; unpaired ones would leave the wire conversation dangling.
  */
-function pairedToolCalls(messages: readonly Message[]): {
-  ids: Set<string>
-  names: Map<string, string>
-} {
-  const callIds = new Set<string>()
-  const names = new Map<string, string>()
-  const resultIds = new Set<string>()
-  for (const message of messages) {
-    for (const block of message.content) {
-      if (message.role === 'assistant' && block.type === 'tool-call' && block.name && block.name.trim() !== '' && block.id && block.id.trim() !== '') {
-        callIds.add(block.id)
-        names.set(block.id, block.name)
-      }
-      if (block.type === 'tool-result' && block.toolCallId && block.toolCallId.trim() !== '') resultIds.add(block.toolCallId)
-    }
-  }
-  return { ids: new Set([...callIds].filter((id) => resultIds.has(id))), names }
-}
-
-function isToolResultMessage(message: Message | TranslatableMessage): boolean {
-  if (message.role !== 'user') return false
-  const source = 'source' in message ? message.source : undefined
-  const kind: string | undefined = source?.kind
-  if (kind !== undefined) return kind === 'tool'
-  return message.content?.[0]?.type === 'tool-result'
-}
-
 function toolParametersSchema(parameters: unknown): Record<string, unknown> {
   if (!isRecord(parameters)) return { type: 'object', properties: {}, additionalProperties: true }
   if (parameters.type === 'object') return parameters
@@ -262,7 +235,7 @@ function blockText(block: ContentBlock | TranslatableBlock): string {
   return block.type === 'text' || block.type === 'reasoning' ? block.text : ''
 }
 
-function toolResultText(block: { content: readonly (ContentBlock | TranslatableBlock)[]; isError?: boolean }): string {
+function toolResultText(block: ToolResultView | { content: readonly (ContentBlock | TranslatableBlock)[]; isError?: boolean }): string {
   return block.content.map(blockText).filter(Boolean).join('\n')
 }
 
@@ -342,12 +315,31 @@ export function isCommandCodeVisionModel(modelId: string): boolean {
 
 export function messagesToCommandCode(messages: readonly (Message | TranslatableMessage)[]): unknown[] {
   const out: unknown[] = []
-  const { ids: paired, names: toolNames } = pairedToolCalls(messages as readonly Message[])
+  const { ids: paired, names: toolNames } = pairedToolCalls(messages)
 
   for (const message of withToolResultImages(messages as readonly TranslatableMessage[])) {
     if (message.role === 'system') continue
 
-    if (message.role === 'user' && !isToolResultMessage(message)) {
+    const result = toolResultOf(message)
+    if (result) {
+      if (!paired.has(result.toolCallId)) continue
+      out.push({
+        role: 'tool',
+        content: [
+          {
+            type: 'tool-result',
+            toolCallId: result.toolCallId,
+            toolName: toolNames.get(result.toolCallId) || 'unknown',
+            output: result.isError
+              ? { type: 'error-text', value: toolResultText(result) }
+              : { type: 'text', value: toolResultText(result) },
+          },
+        ],
+      })
+      continue
+    }
+
+    if (message.role === 'user') {
       const parts: unknown[] = []
       for (const block of message.content) {
         if (block.type === 'text') {
@@ -397,24 +389,6 @@ export function messagesToCommandCode(messages: readonly (Message | Translatable
       if (parts.length > 0) out.push({ role: 'assistant', content: parts })
       continue
     }
-
-    if (isToolResultMessage(message)) {
-      const block = message.content[0]
-      if (!block || block.type !== 'tool-result' || !paired.has(block.toolCallId)) continue
-      out.push({
-        role: 'tool',
-        content: [
-          {
-            type: 'tool-result',
-            toolCallId: block.toolCallId,
-            toolName: toolNames.get(block.toolCallId) || 'unknown',
-            output: block.isError
-              ? { type: 'error-text', value: toolResultText(block) }
-              : { type: 'text', value: toolResultText(block) },
-          },
-        ],
-      })
-    }
   }
   return out
 }
@@ -435,12 +409,23 @@ function projectSlugFromPath(pathName: string): string {
  */
 export function messagesToOpenAI(messages: readonly (Message | TranslatableMessage)[]): unknown[] {
   const out: unknown[] = []
-  const { ids: paired } = pairedToolCalls(messages as readonly Message[])
+  const { ids: paired } = pairedToolCalls(messages)
 
   for (const message of withToolResultImages(messages as readonly TranslatableMessage[])) {
     if (message.role === 'system') continue
 
-    if (message.role === 'user' && !isToolResultMessage(message)) {
+    const result = toolResultOf(message)
+    if (result) {
+      if (!paired.has(result.toolCallId)) continue
+      out.push({
+        role: 'tool',
+        tool_call_id: result.toolCallId,
+        content: toolResultText(result),
+      })
+      continue
+    }
+
+    if (message.role === 'user') {
       const hasImage = message.content.some(b => b.type === 'image' && 'dataBase64' in b)
       if (hasImage) {
         const parts: unknown[] = []
@@ -489,16 +474,6 @@ export function messagesToOpenAI(messages: readonly (Message | TranslatableMessa
       if (toolCalls.length > 0) assistant.tool_calls = toolCalls
       out.push(assistant)
       continue
-    }
-
-    if (isToolResultMessage(message)) {
-      const block = message.content[0]
-      if (!block || block.type !== 'tool-result' || !paired.has(block.toolCallId)) continue
-      out.push({
-        role: 'tool',
-        tool_call_id: block.toolCallId,
-        content: toolResultText(block),
-      })
     }
   }
   return out

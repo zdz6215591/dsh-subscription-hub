@@ -26,6 +26,8 @@ import type { ContentBlock, ImageBlock, Message, ToolResultBlock, ToolSchema } f
 import type { AttachmentStore, RequestImageAttachment } from '@deepseek-ai/dsh-attachment'
 import { qoderError, QODER_ABORTED_CODE, QODER_UNSUPPORTED_CODE } from './errors.js'
 import { requestImagePolicy } from '../../translate/image-request.js'
+import { toolResultOf } from '../../translate/resolved.js'
+import type { ToolResultView } from '../../translate/resolved.js'
 import type { CosyCredentials } from './cosy.js'
 import type {
   QoderWireImagePart,
@@ -65,7 +67,7 @@ function unsupported(message: string): Error {
   return qoderError(message, QODER_UNSUPPORTED_CODE)
 }
 
-function toolResultText(block: ToolResultBlock): string {
+function toolResultText(block: ToolResultBlock | ToolResultView): string {
   let text = ''
   for (const nested of block.content) {
     if (nested.type === 'image') continue
@@ -86,12 +88,18 @@ function toolResultText(block: ToolResultBlock): string {
  */
 export function validateMessageShapes(messages: readonly Message[]): void {
   for (const message of messages) {
+    const result = toolResultOf(message)
+    if (result) {
+      toolResultText(result)
+      continue
+    }
+
     const toolResults = message.content.filter((block): block is ToolResultBlock => block.type === 'tool-result')
     if (toolResults.length > 0) {
       if (message.role !== 'user' || toolResults.length !== message.content.length) {
         throw unsupported('Qoder tool-result messages cannot contain sibling content or use a non-user role.')
       }
-      for (const result of toolResults) toolResultText(result)
+      for (const res of toolResults) toolResultText(res)
       continue
     }
 
@@ -214,18 +222,42 @@ export async function validateAndTranslateMessages(
   }
 
   for (const message of messages) {
+    const result = toolResultOf(message)
+    if (result) {
+      output.push({
+        role: 'tool',
+        tool_call_id: String(result.toolCallId),
+        content: toolResultText(result),
+      })
+      const images = result.content.filter((block): block is ImageBlock => block.type === 'image')
+      if (images.length > 0) {
+        if (attachments !== undefined) enforceImageLimits(images, attachments)
+        output.push({
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: `[${images.length} image${images.length === 1 ? '' : 's'} returned by the previous tool call]`,
+            },
+            ...await Promise.all(images.map(image => resolveImagePart(image, context))),
+          ],
+        })
+      }
+      continue
+    }
+
     const toolResults = message.content.filter((block): block is ToolResultBlock => block.type === 'tool-result')
     if (toolResults.length > 0) {
       if (message.role !== 'user' || toolResults.length !== message.content.length) {
         throw unsupported('Qoder tool-result messages cannot contain sibling content or use a non-user role.')
       }
-      for (const result of toolResults) {
+      for (const res of toolResults) {
         output.push({
           role: 'tool',
-          tool_call_id: String(result.toolCallId),
-          content: toolResultText(result),
+          tool_call_id: String(res.toolCallId),
+          content: toolResultText(res),
         })
-        const images = result.content.filter((block): block is ImageBlock => block.type === 'image')
+        const images = res.content.filter((block): block is ImageBlock => block.type === 'image')
         if (images.length > 0) {
           if (attachments !== undefined) enforceImageLimits(images, attachments)
           output.push({

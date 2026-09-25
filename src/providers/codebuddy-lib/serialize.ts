@@ -11,6 +11,7 @@
 
 import { contentHasImage, LlmError } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
+import { toolResultOf } from '../../translate/resolved.js'
 import type { WireMessage, WireRequest, WireTool } from './types.js'
 
 /** Join the text blocks of one message. */
@@ -85,20 +86,19 @@ export function serializeMessages(
       wire.push(serializeAssistant(message))
       continue
     }
-    const toolResults = message.content.filter((block): block is Extract<ContentBlock, { type: 'tool-result' }> =>
-      block.type === 'tool-result' && typeof block.toolCallId === 'string' && block.toolCallId.trim() !== ''
-    )
-    const text = flattenText(message.content)
-    if (text.length > 0 || toolResults.length === 0) {
-      wire.push({ role: 'user', content: text })
-    }
-    for (const result of toolResults) {
+    const result = toolResultOf(message)
+    if (result) {
       wire.push({
         role: 'tool',
-        tool_call_id: result.toolCallId as unknown as string,
-        // Empty output still needs some content on the wire.
-        content: flattenText(result.content) || '(no output)',
+        tool_call_id: result.toolCallId,
+        content: flattenText(result.content as readonly ContentBlock[]) || '(no output)',
       })
+      continue
+    }
+    if (message.role === 'user') {
+      const text = flattenText(message.content)
+      wire.push({ role: 'user', content: text })
+      continue
     }
   }
   return wire
