@@ -572,14 +572,16 @@ export class ClineAdapter extends LlmAdapter {
             const payload = frame.payload ?? {}
             const error = frameError(payload)
             if (error !== undefined) {
+              const verdict = classifyUpstreamError(error)
               // An error frame BEFORE any content is still a routing failure, so
               // it must fail over rather than end the turn. Once content has been
               // yielded the stream is the answer and the error is fatal.
               if (!yielded) {
-                this.options.pins.learnUpstream(options.model, attempt.upstream, classifyUpstreamError(error), error, 0)
+                this.options.pins.learnUpstream(options.model, attempt.upstream, verdict, error, 0)
                 if (attempt.upstream === null) this.options.pins.learnAvailableProviders(options.model, error)
               }
-              throw new LlmError(error, 'PROVIDER_HTTP_ERROR')
+              const code = verdict === 'limited' ? 'RATE_LIMIT' : verdict === 'auth' ? 'AUTH' : 'SERVER'
+              throw new LlmError(error, code)
             }
             const routing = parseRouting(payload)
             this.options.pins.learnRouting(options.model, routing)
@@ -777,12 +779,12 @@ export class ClineAdapter extends LlmAdapter {
           })
         }
       }
+      messages.push(...toolResults)
       if (parts.length > 0) {
         messages.push({ role: 'user', content: [...texts.length === 0 ? [] : [{ type: 'text', text: texts.join('') }], ...parts] })
       } else if (texts.length > 0) {
         messages.push({ role: 'user', content: texts.join('') })
       }
-      messages.push(...toolResults)
     }
     return messages
   }
