@@ -1094,6 +1094,10 @@ export function apply(ctx: Context, config: Config): void {
           onWarn,
           resolveAttachments,
           catalogStore: catalogStore('agy'),
+          // The Settings page's per-model thinking level. Antigravity's levels come
+          // from the pinned family table rather than a live disclosure, so without
+          // this the picker could only ever open on the table's own `medium` hint.
+          defaultEffortOf: (model: string) => defaultEffortOf('agy', model),
           pool: () => poolAdapter,
         })
         registerTrackedAdapter('agy', adapter)

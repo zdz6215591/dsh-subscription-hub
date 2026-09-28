@@ -465,10 +465,23 @@ export interface ProviderUsage {
   windows?: UsageWindow[]
   /** Plan name the usage endpoint reported, when present. */
   plan?: string
-  /** Total remaining credits across windows, when the provider reports a credit pool. */
+  /** Total remaining allowance across windows, in the units {@link unit} names. */
   remaining?: number
-  /** Total credit cap matching {@link remaining}, when disclosed. */
+  /** Total cap matching {@link remaining}, in the same units. */
   limit?: number
+  /**
+   * What {@link remaining} and {@link limit} are COUNTED IN — the same contract
+   * as {@link UsageWindow.unit}, for the same reason: the provider-level pair is
+   * a total over the very same amounts, so guessing its unit from the numbers is
+   * the same fault one level up.
+   *
+   * The renderer used to hardcode the credit wording on this row, which printed
+   * "剩余积分" over CommandCode's DOLLAR balance ($10 on the Go plan) and over
+   * AGY's percentage. Every route that reports this pair declares it now; the
+   * field stays optional so an adapter that omits it still renders (with the
+   * historical credit wording) instead of inventing a symbol.
+   */
+  unit?: UsageWindow['unit']
 }
 
 /** Every input modality this hub can describe. */

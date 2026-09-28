@@ -24,6 +24,7 @@ import {
   isDiscoveryAborted,
   isMissingOrInvalidCredential,
   mapFetchFailure,
+  mergeReasoning,
   ModelCatalogCache,
   OAuthEndpointError,
   oauthEndpointError,
@@ -443,7 +444,7 @@ export async function fetchAgyUsage(
       const windows = parseAgyUserQuotaSummary(payload)
       if (windows.length > 0) {
         const worst = Math.min(...windows.map(w => w.remaining ?? 100))
-        return { supported: true, windows, remaining: worst, limit: 100 }
+        return { supported: true, windows, remaining: worst, limit: 100, unit: 'percent' }
       }
     }
   } catch { /* fall through to fetchAvailableModels */ }
@@ -642,8 +643,26 @@ export class AgyAdapter extends LlmAdapter {
     return this.notFetched.get(provider)
   }
 
+  /**
+   * One Antigravity model's metadata, with the user's configured thinking level
+   * folded in as the default.
+   *
+   * `resolveAgyModel` can only report the PINNED table's own hint, which is
+   * `medium` for every family that offers one. The Settings page's per-model
+   * "default thinking level" is a user setting, exactly as it is on every other
+   * route, so it has to be merged on top — and here it simply was not: this
+   * adapter declared `defaultEffortOf` and never called it, so a model whose
+   * default was set to `high` (e.g. `gemini-3.8-flash-tiered`) kept opening on
+   * `medium` with no setting able to change it.
+   *
+   * `mergeReasoning` keeps the runtime's `defaultEffort ∈ efforts` invariant, and
+   * drops a level the table does not list rather than sending it on every turn.
+   */
   async resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
-    return resolveAgyModel(provider, model)
+    const info = resolveAgyModel(provider, model)
+    const reasoning = mergeReasoning(this.options.defaultEffortOf?.(model), info.reasoning)
+    if (reasoning === undefined) return info
+    return { ...info, reasoning }
   }
 
   streamAccount(options: GenerateOptions, account: string): AsyncIterable<StreamChunk> {

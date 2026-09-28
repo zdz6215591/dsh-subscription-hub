@@ -93,6 +93,12 @@ export interface ProviderUsage {
   plan?: string
   remaining?: number
   limit?: number
+  /**
+   * What {@link remaining} and {@link limit} are counted in, as the HOST
+   * declared it — the same contract as {@link UsageWindow.unit}, because this
+   * pair is a total over those same amounts. Absent means the host did not say.
+   */
+  unit?: UsageWindow['unit']
 }
 
 /** One model's default-effort picker state as answered by `modelDefaults`. */
@@ -883,6 +889,39 @@ function unitLabel(unit: UsageWindow['unit']): string {
     case 'percent': return '%'
     default: return ''
   }
+}
+
+/**
+ * The provider-level row's wording, in the units the HOST declared for it.
+ *
+ * This row names the remaining allowance, and it used to call every provider's
+ * total "credits" — which put the credit word over CommandCode's dollar balance
+ * (`$10` on the Go plan) and over AGY's percentage. The unit is what decides the
+ * wording, exactly as it decides the symbol on the amount.
+ * @param t - section translate.
+ * @param unit - what the host declared the pair is counted in.
+ * @returns the localized label.
+ */
+function usageTotalLabel(t: SubscriptionsSectionInjected['t'], unit: ProviderUsage['unit']): string {
+  switch (unit) {
+    case 'currency': return t('usageBalance')
+    case 'percent': return t('usageQuota')
+    default: return t('usageCredits')
+  }
+}
+
+/**
+ * Format one amount of the provider-level row: the declared symbol, and nothing
+ * else. Unlike a window row this one carries no unit word after each number —
+ * the row's own label already says what is being counted — so a percentage is
+ * the one suffix that has to ride the number itself.
+ * @param value - the amount.
+ * @param unit - what the host declared it is counted in.
+ * @returns the formatted amount.
+ */
+function formatTotalAmount(value: number, unit: ProviderUsage['unit']): string {
+  if (unit === 'percent') return `${formatUnitAmount(value, unit)}%`
+  return formatUnitAmount(value, unit)
 }
 
 function usageAmountText(t: SubscriptionsSectionInjected['t'], window: UsageWindow): string {
@@ -2304,11 +2343,17 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                       {usage?.remaining !== undefined && (
                         <div style={styles.usageRow}>
                           <div style={styles.usageMeta}>
-                            <span>{t('usageCredits')}</span>
+                            <span>{usageTotalLabel(t, usage.unit)}</span>
                             <span>
-                              {usage.limit !== undefined
-                                ? t('usageRemaining', { remaining: formatAmount(usage.remaining), limit: formatAmount(usage.limit) })
-                                : t('usageRemainingOnly', { remaining: formatAmount(usage.remaining) })}
+                              {/* A percentage pair's cap is definitionally 100, so it is
+                                  left out of the reading rather than printed as a
+                                  tautology (`52.8% / 100%`). */}
+                              {usage.limit !== undefined && usage.unit !== 'percent'
+                                ? t('usageRemaining', {
+                                  remaining: formatTotalAmount(usage.remaining, usage.unit),
+                                  limit: formatTotalAmount(usage.limit, usage.unit),
+                                })
+                                : t('usageRemainingOnly', { remaining: formatTotalAmount(usage.remaining, usage.unit) })}
                               {(() => {
                                 const primaryWindow = usage.windows?.find(w => w.kind === 'session') ?? usage.windows?.[0]
                                 return primaryWindow?.resetsAt !== undefined

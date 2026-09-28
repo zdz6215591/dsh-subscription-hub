@@ -734,6 +734,11 @@ export function parseCommandCodeCredits(
         : 0,
       remaining: monthlyRemaining,
       ...cap === undefined ? {} : { limit: cap },
+      // The monthly allowance is the PLAN'S MONEY: `monthlyCredits` is a dollar
+      // balance (Go is `$10`, and the live endpoint reports exactly `10`), so it
+      // is declared in the same unit as the spend windows below rather than left
+      // for the renderer to read as a credit count.
+      unit: 'currency',
       ...periodEnd === undefined ? {} : { resetsAt: periodEnd },
     })
   }
@@ -745,7 +750,8 @@ export function parseCommandCodeCredits(
   if (weeklyWindow !== undefined) windows.push(weeklyWindow)
   const onDemand = purchased + free
   if (onDemand > 0) {
-    windows.push({ kind: 'other', scope: 'on-demand', usedPercent: 0, remaining: onDemand })
+    // Purchased and bonus credits are money too — the same balance, bought on top.
+    windows.push({ kind: 'other', scope: 'on-demand', usedPercent: 0, remaining: onDemand, unit: 'currency' })
   }
   if (windows.length === 0) return { supported: false }
   const plan = planName ?? info?.name
@@ -754,6 +760,8 @@ export function parseCommandCodeCredits(
     windows,
     ...monthlyRemaining === undefined ? {} : { remaining: monthlyRemaining },
     ...monthlyLimit === undefined ? {} : { limit: monthlyLimit },
+    // The summary pair restates the monthly balance, so it carries the same unit.
+    ...monthlyRemaining === undefined ? {} : { unit: 'currency' as const },
     ...plan === undefined ? {} : { plan },
   }
 }

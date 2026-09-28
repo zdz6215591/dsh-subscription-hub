@@ -13,8 +13,35 @@ import assert from 'node:assert/strict'
 import './keep-alive.js'
 import { antigravityEfforts, isLevelThinkingModel } from '../src/providers/agy/catalog.js'
 import { resolveAgyModel } from '../src/providers/agy/models.js'
+import { AccountTokenManager } from '../src/providers/accounts.js'
+import { AgyAdapter } from '../src/providers/agy.js'
+import type { AgySession } from '../src/auth/store.js'
 
 const levels = (model: string): readonly string[] => resolveAgyModel('agy', model).reasoning?.efforts?.map(e => e.id) ?? []
+
+/**
+ * One adapter with no credentials: `resolveOwnModel` reads nothing but the pinned
+ * table, so only the configured-default wiring is under test here.
+ */
+function adapterWith(defaultEffortOf?: (model: string) => string | undefined): AgyAdapter {
+  const tokens = new AccountTokenManager<AgySession>({
+    provider: 'agy',
+    displayName: 'Antigravity',
+    makeOptions: () => ({
+      preemptMs: 5 * 60_000,
+      refresh: async (session: AgySession) => session,
+      isPermanent: () => false,
+    }),
+    onAccountRemoved: () => undefined,
+  })
+  return new AgyAdapter({
+    models: [],
+    streamIdleTimeoutMs: 30_000,
+    tokens,
+    discovery: false,
+    ...defaultEffortOf === undefined ? {} : { defaultEffortOf },
+  })
+}
 
 test('each family offers exactly the levels it accepts', () => {
   // claude and gpt-oss take ONE budget each, so offering three would let the user pick
@@ -74,4 +101,32 @@ test('the default effort is always one of the offered levels', () => {
     assert.notEqual(reasoning, undefined, model)
     assert.equal(reasoning!.efforts.some(e => e.id === reasoning!.defaultEffort), true, model)
   }
+})
+
+test('the configured default thinking level reaches the resolved model', async () => {
+  // This is the fix for "set the default to high, the picker keeps opening on
+  // medium": the adapter declared `defaultEffortOf` and never called it, so the
+  // pinned table's own `medium` hint was the only default Antigravity could ever
+  // report. The override has to survive all the way to `resolveModel`, which is
+  // what the model picker and the request path both read.
+  const configured = adapterWith(model => (model === 'gemini-3.8-flash-tiered' ? 'high' : undefined))
+  const resolved = await configured.resolveOwnModel('agy', 'gemini-3.8-flash-tiered')
+  assert.equal(resolved.reasoning?.defaultEffort, 'high')
+  // The LEVELS stay the table's, not the override's: an override is a default, not
+  // a capability claim.
+  assert.deepEqual(resolved.reasoning?.efforts.map(e => e.id), ['off', 'low', 'medium', 'high'])
+
+  // No configured level: the table's own hint stands (medium, not the first entry).
+  const plain = await adapterWith().resolveOwnModel('agy', 'gemini-3.8-flash-tiered')
+  assert.equal(plain.reasoning?.defaultEffort, 'medium')
+
+  // A configured level the family does not accept is DROPPED, not appended: it
+  // would otherwise ride on every request and be rejected upstream.
+  const stale = await adapterWith(() => 'ultra').resolveOwnModel('agy', 'gemini-3.5-flash-low')
+  assert.deepEqual(stale.reasoning?.efforts.map(e => e.id), ['off', 'low'])
+  assert.equal(stale.reasoning?.defaultEffort, 'low')
+
+  // A model with no picker gains none from an override.
+  const noLevels = await adapterWith(() => 'high').resolveOwnModel('agy', 'gemini-2.5-flash-lite')
+  assert.equal(noLevels.reasoning, undefined)
 })

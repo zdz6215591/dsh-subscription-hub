@@ -119,6 +119,8 @@ export function parseMeterUsage(raw: unknown): ProviderUsage | undefined {
         windows: parsed.windows,
         remaining: parsed.remaining,
         limit: parsed.limit,
+        // The same 积分 the windows above declare, totalled.
+        unit: 'credits',
       }
     }
   }
@@ -133,6 +135,7 @@ export function parseMeterUsage(raw: unknown): ProviderUsage | undefined {
     supported: true,
     remaining: left,
     limit,
+    unit: 'credits',
     windows: [{
       kind: 'weekly',
       scope: 'enterprise',

@@ -514,11 +514,16 @@ describe('commandcode credits', () => {
     assert.equal(usage.remaining, 8.5)
     assert.equal(usage.limit, 10)
     assert.equal(usage.plan, 'Go')
+    // All of these amounts are MONEY: `monthlyCredits` is the plan's dollar balance
+    // ($10 on Go) and the window caps are dollar spend limits. Declaring the unit is
+    // what stops the renderer from putting the credit wording over the balance.
+    assert.equal(usage.unit, 'currency')
     assert.equal(usage.windows?.[0]?.scope, 'monthly')
+    assert.equal(usage.windows?.[0]?.unit, 'currency')
     assert.equal(usage.windows?.[0]?.remaining, 8.5)
     assert.equal(usage.windows?.[0]?.resetsAt, 1_800_200_000_000)
     assert.equal(usage.windows?.[1]?.kind, 'session')
-    assert.equal(usage.windows?.some(window => window.scope === 'on-demand'), true)
+    assert.equal(usage.windows?.find(window => window.scope === 'on-demand')?.unit, 'currency')
   })
 })
 
@@ -833,6 +838,8 @@ describe('agy request body EOTP', () => {
     assert.equal(usage.supported, true)
     assert.equal(usage.windows?.some(window => window.scope === 'Gemini'), true)
     assert.equal(usage.windows?.some(window => window.scope === 'Claude'), true)
+    // A percentage of the quota: the summary row must not call it credits.
+    assert.equal(usage.unit, 'percent')
   })
 
   it('omits project when projectId is absent', () => {

@@ -145,7 +145,9 @@ export function parseAgyQuotaUsage(dynamic: DiscoveredModels): ProviderUsage {
   }))
   if (windows.length === 0) return { supported: false }
   const worst = Math.min(...windows.map(window => window.remaining ?? 100))
-  return { supported: true, windows, remaining: worst, limit: 100 }
+  // A percentage of the quota, not a credit count: the summary row reads its
+  // wording off this unit.
+  return { supported: true, windows, remaining: worst, limit: 100, unit: 'percent' }
 }
 
 /**

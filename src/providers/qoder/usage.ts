@@ -354,6 +354,8 @@ export function qoderProviderUsage(account: QoderAccountInfo): ProviderUsage {
     windows,
     remaining,
     limit,
+    // A total over the credit pools above, so it is counted in the same 积分.
+    unit: 'credits',
     ...plan === undefined ? {} : { plan },
   }
 }

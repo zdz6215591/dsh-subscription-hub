@@ -498,6 +498,9 @@ test('parseClineUsage maps the four window types onto harness kinds', () => {
   // Quota is reported as consumption, so the pill shows the complement.
   assert.equal(usage.remaining, 52.8)
   assert.equal(usage.limit, 100)
+  // Percentages of the plan's quota, not credits: the summary row reads its
+  // wording (and its `%`) off the unit.
+  assert.equal(usage.unit, 'percent')
   assert.equal(usage.plan, 'ClinePass ($9.99/mo)')
 })
 

@@ -99,6 +99,9 @@ export function parseClineUsage(payload: unknown, plan?: string): ProviderUsage 
     // Quota is reported as consumption, so "remaining" is the complement.
     remaining: Math.max(0, Math.round((100 - session.usedPercent) * 10) / 10),
     limit: 100,
+    // A percentage of the plan's quota, not a credit count: the summary row reads
+    // its wording (and its `%`) off this unit.
+    unit: 'percent',
     ...plan === undefined || plan === '' ? {} : { plan },
   }
 }

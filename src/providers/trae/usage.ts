@@ -172,6 +172,8 @@ export function traeUsageToProviderUsage(snapshot: TraeUsageSnapshot): ProviderU
     windows,
     remaining: snapshot.available,
     limit: snapshot.total,
+    // The same 积分 the windows above declare: this pair totals those pools.
+    unit: 'credits',
     plan: 'Trae 积分',
   }
 }
