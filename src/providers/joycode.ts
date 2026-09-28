@@ -65,7 +65,7 @@ import { joyCodeAnthropicId, joyCodeModel, joyCodePathFor } from './joycode/cata
 import { joyCodeCredentialOf } from './joycode-session.js'
 import type { JoyCodeRosterEntry } from './joycode/models.js'
 import { fetchJoyCodeModels, joyCodeModelInfo } from './joycode/models.js'
-import { unwrapDoubleWrappedSse } from './joycode/translate.js'
+import { normalizeChatSse, unwrapDoubleWrappedSse } from './joycode/translate.js'
 
 /** Route identity. */
 export const JOYCODE_PROVIDER = 'joycode'
@@ -316,7 +316,11 @@ export class JoyCodeAdapter extends LlmAdapter {
       }
       switch (path) {
         case 'chat':
-          yield* streamChatCompletions(response.body, watchdog.pulse)
+          // The chat path may answer with bare JSON lines, and may omit the
+          // `[DONE]` terminator entirely — the normalizer fixes both before the
+          // translator sees them (a bare-JSON body otherwise reads as "no events"
+          // and surfaces as a bare STREAM_CLOSED).
+          yield* streamChatCompletions(normalizeChatSse(response.body, watchdog.pulse), watchdog.pulse)
           return
         case 'responses':
           // This path double-wraps every event in another `data:`/`event:` layer.

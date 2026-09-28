@@ -41,7 +41,7 @@ import {
 } from '../src/providers/joycode/client.js'
 import { joyCodeStateDbCandidates, parseJoyCodeStateValue, readJoyCodeStateDb } from '../src/providers/joycode/credentials.js'
 import { fetchJoyCodeModels } from '../src/providers/joycode/models.js'
-import { joyCodeSseLine, unwrapDoubleWrappedSse } from '../src/providers/joycode/translate.js'
+import { joyCodeChatFrame, joyCodeSseLine, normalizeChatSse, unwrapDoubleWrappedSse } from '../src/providers/joycode/translate.js'
 import {
   JOYCODE_LOGIN_URL,
   joyCodeLoginUrl,
@@ -57,6 +57,7 @@ import {
   validateJoyCodeCredential,
 } from '../src/providers/joycode-session.js'
 import { streamResponses } from '../src/translate/responses.js'
+import { streamChatCompletions } from '../src/translate/chat-completions.js'
 import { resolveModelPrice } from '../src/stats/model-prices.js'
 
 const CREDENTIAL = {
@@ -613,6 +614,68 @@ test('joycode models are priced, so their spend is not silently zero', () => {
   }
   // The one model nobody could price stays UNPRICED rather than guessed at.
   assert.equal(resolveModelPrice('JoyAI-Code-1.5').source, 'unpriced')
+})
+
+test('joycode reframes the chat path\'s bare JSON lines and supplies the missing terminator', () => {
+  // The reported failure: JoyCode's chat stream arrived as bare JSON lines with NO
+  // `[DONE]` and no finish reason, so an SSE-only reader saw zero events and the
+  // turn died with "chat completions SSE stream ended before a finish chunk".
+  assert.deepEqual(joyCodeChatFrame('{"choices":[{"delta":{"content":"Hi"}}]}'), {
+    frame: 'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n', terminal: false, toolCall: false,
+  })
+  // The envelope nests on this path too.
+  assert.equal(joyCodeChatFrame('data: data: {"choices":[]}')?.frame, 'data: {"choices":[]}\n\n')
+  assert.equal(joyCodeChatFrame('data: [DONE]')?.terminal, true)
+  assert.equal(joyCodeChatFrame('event: message')?.frame, undefined)
+  assert.equal(joyCodeChatFrame('{"choices":[{"delta":{},"finish_reason":"stop"}]}')?.terminal, true)
+  assert.equal(joyCodeChatFrame('{"choices":[{"delta":{"tool_calls":[{"id":"c1"}]}}]}')?.toolCall, true)
+})
+
+test('joycode\'s chat normalizer ends a terminator-less stream with a real finish', async () => {
+  const ndjson = '{"choices":[{"delta":{"content":"Hi "}}]}\n'
+    + '{"choices":[{"delta":{"content":"there"}}]}\n'
+  const body = (text: string): ReadableStream<Uint8Array> => new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(text))
+      controller.close()
+    },
+  })
+
+  const chunks: StreamChunk[] = []
+  for await (const chunk of streamChatCompletions(normalizeChatSse(body(ndjson)))) chunks.push(chunk)
+  const blocks = chunks.filter(chunk => chunk.type === 'block-end') as { block?: { type: string, text?: string } }[]
+  // Consecutive text deltas coalesce into ONE text block, as on every other route.
+  assert.deepEqual(blocks.map(entry => entry.block?.text), ['Hi there'])
+  const finish = chunks.find(chunk => chunk.type === 'finish') as { reason?: { kind: string } } | undefined
+  assert.equal(finish?.reason?.kind, 'stop')
+
+  // Tool calls must close as tool-calls, or the harness would drop them.
+  const toolNdjson = '{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"bash","arguments":"{\\"cmd\\":\\"ls\\"}"}}]}}]}\n'
+  const toolChunks: StreamChunk[] = []
+  for await (const chunk of streamChatCompletions(normalizeChatSse(body(toolNdjson)))) toolChunks.push(chunk)
+  const toolFinish = toolChunks.find(chunk => chunk.type === 'finish') as { reason?: { kind: string } } | undefined
+  assert.equal(toolFinish?.reason?.kind, 'tool-calls')
+
+  // A body with no payload at all says so, instead of the bare STREAM_CLOSED the
+  // user saw when the wire shape was not the one this route reads.
+  await assert.rejects(async () => {
+    for await (const chunk of streamChatCompletions(normalizeChatSse(body('<html>not a stream</html>\n')))) void chunk
+  }, (error: unknown) => error instanceof LlmError && error.code === 'MALFORMED_RESPONSE')
+})
+
+test('joycode streams a terminator-less chat answer end to end', async () => {
+  // The whole reported path: adapter -> bare-JSON upstream -> harness finish.
+  const adapter = new JoyCodeAdapter({
+    models: [],
+    streamIdleTimeoutMs: 5_000,
+    tokens: tokensOf(new Map([['100001', sessionOf()]])),
+    discovery: true,
+    fetchFn: (async () => new Response('{"choices":[{"delta":{"content":"ok"}}]}\n', { status: 200 })) as typeof fetch,
+  })
+  const chunks: StreamChunk[] = []
+  for await (const chunk of adapter.stream(request('GLM-5.3'))) chunks.push(chunk)
+  assert.ok(chunks.some(chunk => chunk.type === 'text-delta'))
+  assert.ok(chunks.some(chunk => chunk.type === 'finish'))
 })
 
 // ------------------------------------------------------------------ adapter
