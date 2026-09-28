@@ -84,7 +84,10 @@ export class PoolUsageTracker {
   private readonly inflight = new Map<string, Promise<ProviderUsage>>()
 
   constructor(
-    private readonly fetcherFor: (provider: ProviderId, account: string) => (() => Promise<ProviderUsage>) | undefined,
+    private readonly fetcherFor: (
+      provider: ProviderId,
+      account: string,
+    ) => ((force?: boolean) => Promise<ProviderUsage>) | undefined,
     private readonly ttlMs = USAGE_TTL_MS,
   ) {}
 
@@ -133,7 +136,10 @@ export class PoolUsageTracker {
    * @param provider - the account's provider.
    * @param account - the account key.
    * @param force - bypass a fresh cached SNAPSHOT for an honest re-check (the
-   *   manual Refresh button). A live failure cooldown is never bypassed —
+   *   manual Refresh button). It is passed on to the route's own fetcher too,
+   *   because a route can hold a snapshot of its own in front of the endpoint
+   *   (Qoder's 60s reader cache) — a refresh that stops at this layer would
+   *   still answer from that one. A live failure cooldown is never bypassed —
    *   retrying through it is exactly what turns a 429 into a permanent
    *   lockout, so even a forced call still answers from the negative cache.
    * @returns `{ supported: false }` when the provider has no usage fetcher.
@@ -157,7 +163,7 @@ export class PoolUsageTracker {
       }
     }
     try {
-      return await this.refresh(key, fetcher)
+      return await this.refresh(key, force ? () => fetcher(true) : fetcher)
     } catch (error: unknown) {
       // Same fallback as the already-cooling-down branch above, for the
       // fetch that just failed on THIS call: `refresh` recorded whatever

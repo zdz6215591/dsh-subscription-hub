@@ -601,6 +601,45 @@ test('QoderAdapter reads usage through the hub shape, and degrades instead of th
   assert.equal(usage.limit, 300)
 })
 
+test('QoderAdapter refreshes usage on demand and drops its snapshot after a claim', async () => {
+  // The reported bug: a check-in minted 100 credits, the card said so, and the
+  // balance next to it did not move — because the reader keeps a 60s snapshot and
+  // neither a forced refresh nor the claim itself could get past it.
+  let remaining = 270
+  let quotaReads = 0
+  const transport = adapter({
+    personalToken: () => Promise.resolve('pt-claim'),
+    fetchFn: (async (input: URL | Request): Promise<Response> => {
+      const url = String(input)
+      if (url.includes('/jobToken/exchange')) return new Response(JSON.stringify({ token: 'jt-claim' }))
+      if (url.includes('/userinfo')) return new Response(JSON.stringify({ id: 'user-claim', name: 'U' }))
+      if (url.includes('/quota/usage')) {
+        quotaReads += 1
+        return new Response(JSON.stringify({
+          userQuota: { total: 300, used: 300 - remaining, remaining, unit: 'credits' },
+        }))
+      }
+      if (url.includes('/user/plan')) return new Response(JSON.stringify({ user_type: 'pro', plan_tier_name: 'Pro' }))
+      if (url.includes('/user/status')) return new Response(JSON.stringify({ featureSwitches: { allow_byok: 1 } }))
+      throw new Error(`unexpected URL: ${url}`)
+    }) as typeof fetch,
+  })
+
+  assert.equal((await transport.readUsage()).remaining, 270)
+  // Inside the TTL a plain read answers from the snapshot — which is why the pill
+  // and a reopened card could still show the pre-claim balance.
+  remaining = 370
+  assert.equal((await transport.readUsage()).remaining, 270)
+  assert.equal(quotaReads, 1)
+  // An explicit refresh does not, because the RPC's `force` now reaches here.
+  assert.equal((await transport.readUsage(undefined, undefined, true)).remaining, 370)
+  // And the claim itself invalidates the snapshot, so even the NEXT unforced read
+  // (the card reopened, the pill's poll) is already fresh.
+  remaining = 470
+  await transport.clearUsageCache()
+  assert.equal((await transport.readUsage()).remaining, 470)
+})
+
 test('QoderAdapter resolves the region per account so one route serves both deployments', async () => {
   const seen: Record<string, string[]> = { global: [], china: [] }
   const transport = new QoderAdapter({

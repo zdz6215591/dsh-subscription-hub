@@ -2305,6 +2305,11 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                                 .then(result => {
                                   setProviderError(id, result.ok ? t('checkinOk', { message: result.message }) : t('checkinFail', { message: result.message }))
                                   void loadCheckinStatus(id)
+                                  // A check-in MINTS credits, and this row is where they
+                                  // show: re-read the usage (forced, so no cached
+                                  // snapshot answers) instead of leaving the pre-claim
+                                  // balance on screen next to "claimed 100 credits".
+                                  if (result.ok) void loadUsage(id, account.key, true)
                                 })
                                 .catch(error => { setProviderError(id, t('checkinFail', { message: messageOf(error) })) })
                             }}

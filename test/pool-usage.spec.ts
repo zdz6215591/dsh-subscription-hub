@@ -94,6 +94,23 @@ test('snapshotFor: force bypasses a fresh SUCCESS cache for an honest re-check',
   assert.equal(calls.count, 2, 'a forced call re-fetches regardless of freshness')
 })
 
+test('snapshotFor: force is passed DOWN to the route fetcher, not just applied here', async () => {
+  // The tracker is only the first snapshot in front of the endpoint; a route can
+  // hold one of its own (Qoder's reader keeps 60s). Stopping the flag at this
+  // layer left an explicit refresh — and the reload after a check-in — answering
+  // from that inner cache, so the balance a claim had just changed stayed put.
+  const seen: boolean[] = []
+  const tracker = new PoolUsageTracker((provider: ProviderId, account: string) =>
+    provider === 'qoder' && account === 'a1'
+      ? (force?: boolean) => { seen.push(force === true); return Promise.resolve(OK_USAGE) }
+      : undefined)
+  await tracker.snapshotFor('qoder', 'a1')
+  await tracker.snapshotFor('qoder', 'a1')
+  assert.deepEqual(seen, [false], 'the second plain call is answered from this cache')
+  await tracker.snapshotFor('qoder', 'a1', true)
+  assert.deepEqual(seen, [false, true])
+})
+
 test('snapshotFor: a provider without a usage fetcher answers supported:false', async () => {
   const tracker = new PoolUsageTracker(() => undefined)
   const usage = await tracker.snapshotFor('grok', 'a1')

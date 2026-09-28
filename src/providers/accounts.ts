@@ -49,6 +49,16 @@ export interface AccountAwareAdapter extends LlmAdapter {
   resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo>
   /** Drop cached catalogs: one account, or every account when omitted (login/logout). */
   clearAccountCatalog(account?: string): void
+  /**
+   * Drop cached USAGE snapshots: one account, or every account when omitted.
+   *
+   * Exists because a daily check-in MINTS credits without touching a credential:
+   * nothing else in front of the quota endpoint notices, so a route that caches
+   * its usage read goes on answering the pre-claim balance until its TTL expires
+   * (the reported "claimed 100 credits but the number did not move"). Optional —
+   * only routes that cache have one.
+   */
+  clearUsageCache?(account?: string): void | Promise<void>
 }
 
 /** Options for {@link unionAccountCatalogs}. */

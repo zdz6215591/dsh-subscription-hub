@@ -432,7 +432,7 @@ function planOf(provider: ProviderId, session: StoredSession): string | undefine
 }
 
 /** Per-provider per-account usage lookup; providers without a usage endpoint are absent. */
-type UsageFetchers = Partial<Record<ProviderId, (account: string, signal: AbortSignal) => Promise<ProviderUsage>>>
+type UsageFetchers = Partial<Record<ProviderId, (account: string, signal: AbortSignal, force?: boolean) => Promise<ProviderUsage>>>
 
 /**
  * Auth operations behind the `/subscriptions-auth` RPC channel: start/complete
@@ -499,7 +499,11 @@ export class SubscriptionsAuthController implements AuthController {
   usage(provider: ProviderId, account: string, signal: AbortSignal, force = false): Promise<ProviderUsage> {
     const fetcher = this.usageFetchers[provider]
     if (fetcher === undefined) return Promise.resolve({ supported: false })
-    if (this.poolUsage === undefined) return fetcher(account, signal)
+    // `force` is the caller's "read the source, not a snapshot" and has to reach
+    // the fetcher too: a route with its own reader cache (Qoder, 60s) would
+    // otherwise answer an explicit refresh from that cache and the card would
+    // show the balance from before whatever the user just did.
+    if (this.poolUsage === undefined) return fetcher(account, signal, force)
     return this.poolUsage.snapshotFor(provider, account, force)
   }
 
@@ -1231,7 +1235,7 @@ export function apply(ctx: Context, config: Config): void {
           onWarn,
           resolveAttachments,
         })
-        usageFetchers.qoder = async (account, signal) => adapter.readUsage(signal, account)
+        usageFetchers.qoder = async (account, signal, force) => adapter.readUsage(signal, account, force)
         registerTrackedAdapter('qoder', adapter)
         break
       }
@@ -1341,10 +1345,13 @@ export function apply(ctx: Context, config: Config): void {
     // Copilot has no usage endpoint, so its accounts resolve no fetcher and
     // score zero urgency — the natural last resort. Every other provider delegates
     // to its registered usage fetcher.
-    const fetcherFor = (provider: ProviderId, account: string): (() => Promise<ProviderUsage>) | undefined => {
+    const fetcherFor = (provider: ProviderId, account: string): ((force?: boolean) => Promise<ProviderUsage>) | undefined => {
       const fetcher = usageFetchers[provider]
       if (fetcher === undefined) return undefined
-      return () => fetcher(account, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
+      // `force` travels all the way down: the tracker's own cache is only the
+      // first snapshot in front of the endpoint, and a route that keeps one of
+      // its own (Qoder) has to see the flag too.
+      return (force?: boolean) => fetcher(account, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS), force)
     }
     poolHealth = new PoolHealthRegistry()
     poolUsage = new PoolUsageTracker(fetcherFor)
@@ -1499,37 +1506,49 @@ export function apply(ctx: Context, config: Config): void {
     test: payload => proxyTestConnection(payload.url, payload.proxy, payload.providers),
   }, modelDefaults, {
     async checkin(provider, account) {
-      if (provider === 'codebuddy') {
-        const tokens = accountTokens.get('codebuddy')
-        if (tokens === undefined) return { ok: false, message: 'CodeBuddy is not registered' }
-        const res = await checkinCodeBuddy(await tokens.session(account) as CodeBuddySession)
-        if (res.ok) await recordManualCheckin(res.message).catch(() => undefined)
-        return res
-      }
-      if (provider === 'trae') {
-        const tokens = accountTokens.get('trae')
-        if (tokens === undefined) return { ok: false, message: 'Trae is not registered' }
-        const session = await tokens.session(account) as TraeSession
-        const res = await claimTraeCheckin(session.accessToken, session.userId ?? '')
-        if (res.ok) await recordTraeCheckin(res.message).catch(() => undefined)
-        return { ok: res.ok, message: res.message }
-      }
-      if (provider === 'qoder') {
-        const tokens = accountTokens.get('qoder') as AccountTokenManager<QoderSession> | undefined
-        if (tokens === undefined) return { ok: false, message: 'Qoder is not registered' }
-        const session = await tokens.session(account)
-        const outcome = await claimQoderCheckin(session.refreshToken, session.region)
-        // The ledger is only advanced on a real claim, so a manual attempt that
-        // finds the day already claimed does not rewrite the recorded message.
-        // Written through the SAME helper the scheduler uses, so a manual claim
-        // leaves the ledger exactly as an automatic one would: same day key,
-        // same next window.
-        if (outcome.status === 'claimed') {
-          await recordQoderCheckin(outcome.message).catch(() => undefined)
+      const result = await (async (): Promise<{ ok: boolean; message: string }> => {
+        if (provider === 'codebuddy') {
+          const tokens = accountTokens.get('codebuddy')
+          if (tokens === undefined) return { ok: false, message: 'CodeBuddy is not registered' }
+          const res = await checkinCodeBuddy(await tokens.session(account) as CodeBuddySession)
+          if (res.ok) await recordManualCheckin(res.message).catch(() => undefined)
+          return res
         }
-        return { ok: outcome.ok, message: outcome.message }
+        if (provider === 'trae') {
+          const tokens = accountTokens.get('trae')
+          if (tokens === undefined) return { ok: false, message: 'Trae is not registered' }
+          const session = await tokens.session(account) as TraeSession
+          const res = await claimTraeCheckin(session.accessToken, session.userId ?? '')
+          if (res.ok) await recordTraeCheckin(res.message).catch(() => undefined)
+          return { ok: res.ok, message: res.message }
+        }
+        if (provider === 'qoder') {
+          const tokens = accountTokens.get('qoder') as AccountTokenManager<QoderSession> | undefined
+          if (tokens === undefined) return { ok: false, message: 'Qoder is not registered' }
+          const session = await tokens.session(account)
+          const outcome = await claimQoderCheckin(session.refreshToken, session.region)
+          // The ledger is only advanced on a real claim, so a manual attempt that
+          // finds the day already claimed does not rewrite the recorded message.
+          // Written through the SAME helper the scheduler uses, so a manual claim
+          // leaves the ledger exactly as an automatic one would: same day key,
+          // same next window.
+          if (outcome.status === 'claimed') {
+            await recordQoderCheckin(outcome.message).catch(() => undefined)
+          }
+          return { ok: outcome.ok, message: outcome.message }
+        }
+        return { ok: false, message: 'Check-in is only available for CodeBuddy, Trae and Qoder' }
+      })()
+      if (result.ok) {
+        // A claim MINTS credits without touching a credential, and every cache in
+        // front of the usage endpoint still holds the pre-claim balance: the
+        // route's own reader snapshot (Qoder's 60s one) and the pool's usage
+        // cache. Nothing else drops them on this path, so the card went on showing
+        // the old number after a check-in that had already succeeded.
+        await adapters.get(provider)?.clearUsageCache?.(account)
+        poolUsage?.invalidate(provider, account)
       }
-      return { ok: false, message: 'Check-in is only available for CodeBuddy, Trae and Qoder' }
+      return result
     },
     async checkinStatus(provider) {
       if (provider === 'trae') return getTraeCheckinStatusView()
@@ -1938,6 +1957,14 @@ export function apply(ctx: Context, config: Config): void {
         const outcome = await autoCheckinQoder(sessions)
         if (outcome !== undefined && !outcome.ok && outcome.status === 'error') {
           onWarn(`qoder check-in failed: ${outcome.message}`)
+        }
+        if (outcome !== undefined && outcome.ok) {
+          // The scheduler mints credits exactly as the manual button does, so it
+          // owes the same invalidation: the snapshot in front of the quota
+          // endpoint predates the claim and nothing else drops it. Every account
+          // is dropped because the aggregate outcome names only the last one.
+          await adapters.get('qoder')?.clearUsageCache?.()
+          poolUsage?.invalidate('qoder')
         }
       }).catch(() => undefined)
     }

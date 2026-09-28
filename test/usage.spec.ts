@@ -376,3 +376,23 @@ test('usage(): with no pool tracker (pool disabled), every call hits the raw fet
   await controller.usage('codex', 'a1', new AbortController().signal)
   assert.equal(calls, 2, 'unchanged prior behavior when the pool usage cache is unavailable')
 })
+
+test('usage(): the force flag reaches the provider fetcher, not only the pool cache', async () => {
+  // A route can keep its own snapshot in front of the endpoint (Qoder keeps a 60s
+  // one). Dropping `force` on the way in made the card's refresh button — and the
+  // reload that follows a check-in — answer from that snapshot, so a claim that
+  // had already minted credits left the old balance on screen.
+  const seen: boolean[] = []
+  const controller = new SubscriptionsAuthController(
+    new OAuthFlowManager(), new DeviceFlowManager(), () => {}, () => undefined,
+    {
+      qoder: async (_account, _signal, force) => {
+        seen.push(force === true)
+        return { supported: true, windows: [] }
+      },
+    },
+  )
+  await controller.usage('qoder', 'a1', new AbortController().signal)
+  await controller.usage('qoder', 'a1', new AbortController().signal, true)
+  assert.deepEqual(seen, [false, true])
+})

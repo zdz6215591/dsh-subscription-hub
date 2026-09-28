@@ -587,17 +587,30 @@ export class QoderUsageReader {
  * read that degrades (503 on the quota route, a revoked PAT) still leaves the
  * card renderable.
  * @param reader - the reader to use.
+/**
+ * Read one account's usage for the RPC layer.
+ *
+ * @param reader - the region's reader.
  * @param pat - the account's Personal Access Token.
  * @param signal - caller cancellation.
+ * @param force - bypass the reader's cache (a refresh the user asked for).
  * @returns the hub-facing usage.
  */
 export async function fetchQoderUsage(
   reader: QoderUsageReader,
   pat: string,
   signal?: AbortSignal,
+  force?: boolean,
 ): Promise<ProviderUsage> {
   try {
-    return qoderProviderUsage(await reader.readAccount(pat, { ...signal === undefined ? {} : { signal } }))
+    return qoderProviderUsage(await reader.readAccount(pat, {
+      // The caller's `force` has to REACH the reader: this snapshot is the one
+      // the Settings card's refresh button and the post-check-in reload both
+      // mean to bypass, and a refresh that answers from a 60s-old snapshot is
+      // exactly the "the number did not move" report.
+      ...force === undefined ? {} : { force },
+      ...signal === undefined ? {} : { signal },
+    }))
   } catch (error) {
     // Cancellation is the caller's own business; anything else is "no usage to show".
     if (error instanceof LlmError && error.code === QODER_ABORTED_CODE) throw error

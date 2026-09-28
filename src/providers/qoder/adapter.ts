@@ -509,12 +509,38 @@ export class QoderAdapter extends LlmAdapter {
    * Read this account's usage, projected onto the hub's shape.
    * @param signal - caller cancellation.
    * @param account - the hub's account key, or undefined for the default account.
+   * @param force - bypass the reader's cache (an explicit refresh).
    * @returns the usage; `supported: false` when there is nothing to show.
    */
-  async readUsage(signal?: AbortSignal, account?: string): Promise<ProviderUsage> {
+  async readUsage(signal?: AbortSignal, account?: string, force?: boolean): Promise<ProviderUsage> {
     const pat = await this.requirePat(account, signal)
     const region = await this.regionFor(account)
-    return fetchQoderUsage(this.usageFor(region), pat, signal)
+    return fetchQoderUsage(this.usageFor(region), pat, signal, force)
+  }
+
+  /**
+   * Drop cached usage snapshots: one account's, or every account's when omitted.
+   *
+   * The daily check-in mints credits with no credential change, so nothing else
+   * in front of the quota endpoint invalidates the snapshot the card reads — and
+   * the card then keeps showing the pre-claim balance until the reader's 60s TTL
+   * expires. The account's region and PAT are what key the reader's own cache, so
+   * they are resolved here rather than demanded of the caller.
+   * @param account - the hub's account key, or undefined to drop every account's.
+   */
+  async clearUsageCache(account?: string): Promise<void> {
+    if (account === undefined) {
+      for (const reader of this.usageByRegion.values()) reader.clear()
+      return
+    }
+    const pat = (await this.resolvePat(account))?.trim()
+    if (pat === undefined || pat === '') {
+      // An account whose credential cannot be read has nothing keyed to its PAT;
+      // dropping the region's entries is the honest equivalent of "no snapshot".
+      for (const reader of this.usageByRegion.values()) reader.clear()
+      return
+    }
+    this.usageByRegion.get(await this.regionFor(account))?.clear(pat)
   }
 
   /** Resolve the PAT, or fail with the hub's logged-out code. */
