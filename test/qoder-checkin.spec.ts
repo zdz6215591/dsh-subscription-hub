@@ -117,7 +117,17 @@ test('a claimable campaign is claimed and the amount is reported', async () => {
       return Response.json({ status: 'CLAIMED', benefit: { amount: 100 } })
     }
     if (url.includes('/campaigns')) {
-      return Response.json({ campaigns: [{ campaignId: 'c1', campaignKey: 'daily', actionType: 'CLAIM_BENEFIT', claimStatus: 'CLAIMABLE', benefit: { amount: 100 } }] })
+      // The live shape: the campaign states the grant's own lifetime. That is the
+      // only expiry the check-in credits have — the quota endpoint reports the
+      // add-on pool as a bare balance — so the message carries it rather than
+      // leaving the card to imply the plan's reset date applies.
+      return Response.json({ campaigns: [{
+        campaignId: 'c1',
+        campaignKey: 'daily',
+        actionType: 'CLAIM_BENEFIT',
+        claimStatus: 'CLAIMABLE',
+        benefit: { kind: 'CREDITS', amount: 100, validity: { mode: 'RELATIVE_DAYS', days: 30 } },
+      }] })
     }
     return new Response('not found', { status: 404 })
   }) as unknown as FetchFn
@@ -126,7 +136,7 @@ test('a claimable campaign is claimed and the amount is reported', async () => {
   assert.equal(outcome.ok, true)
   assert.equal(outcome.status, 'claimed')
   assert.equal(outcome.amount, 100)
-  assert.match(outcome.message, /100 credits/)
+  assert.match(outcome.message, /100 credits \(valid 30 days\)/)
   // list → claim, both against the China deployment.
   assert.ok(calls.some(url => url.includes('/campaigns/c1/claim')), calls.join('\n'))
 })

@@ -139,12 +139,41 @@ test('QoderUsageReader maps the credit packages onto the hub usage shape', async
     // `unit` is CREDITS, and it is asserted here precisely because its ABSENCE is
     // what put a currency symbol on the progress bar: the renderer treated any
     // window carrying `used` and `limit` as dollars, and these pools are 积分.
+    //
+    // ONLY the plan pool carries the reset: the account's period is the one expiry
+    // this read attributes. The org pool's expiry is not disclosed, and the add-on
+    // pool could not have one — it is a stack of DAILY grants, each valid 30 days
+    // from its own grant, which is why the check-in credits must not be labelled
+    // with the plan's date.
     { kind: 'other', scope: 'plan', usedPercent: 3, remaining: 2916, limit: 3000, used: 84, unit: 'credits', resetsAt: 1790756471159 },
-    { kind: 'other', scope: 'org', usedPercent: 0, remaining: 3000, limit: 3000, used: 0, unit: 'credits', resetsAt: 1790756471159 },
-    { kind: 'other', scope: 'add-on', usedPercent: 100, remaining: 0, limit: 100, used: 100, unit: 'credits', resetsAt: 1790756471159 },
+    { kind: 'other', scope: 'org', usedPercent: 0, remaining: 3000, limit: 3000, used: 0, unit: 'credits' },
+    { kind: 'other', scope: 'add-on', usedPercent: 100, remaining: 0, limit: 100, used: 100, unit: 'credits' },
   ])
   assert.equal(usage.remaining, 5916)
   assert.equal(usage.limit, 6100)
+})
+
+test('qoderProviderUsage prefers the plan record’s own end date over the account-level expiry', () => {
+  const account: QoderAccountInfo = {
+    profile: { id: 'u', name: 'U', email: '' },
+    usage: {
+      userQuota: { total: 300, used: 0, remaining: 300, percentage: 0, unit: 'credits' },
+      addOnQuota: { total: 400, used: 0, remaining: 400, percentage: 0, unit: 'credits' },
+      expiresAt: '2026-10-07T10:12:22.829Z',
+    },
+    plan: {
+      userType: 'personal_professional_trial',
+      planTierName: 'Pro Trial',
+      isPersonalVersion: true,
+      endDate: '2026-09-30T00:00:00.000Z',
+    },
+    updatedAt: new Date().toISOString(),
+  }
+  const windows = qoderProviderUsage(account).windows ?? []
+  assert.equal(windows[0]?.resetsAt, Date.parse('2026-09-30T00:00:00.000Z'))
+  // The add-on pool is never given one, so a check-in credit row cannot inherit
+  // the plan's date — the reported confusion ("they show the same reset time").
+  assert.equal(windows[1]?.resetsAt, undefined)
 })
 
 test('qoderProviderUsage clamps a wild upstream percentage rather than rendering past the bar', () => {

@@ -98,7 +98,18 @@ export interface QoderCampaign {
   campaignKey?: string
   actionType?: string
   claimStatus?: string
-  benefit?: { kind?: string; amount?: number }
+  benefit?: {
+    kind?: string
+    amount?: number
+    /**
+     * How long the grant lives, as the campaign itself declares it. The daily
+     * benefit reads `{ mode: 'RELATIVE_DAYS', days: 30 }`, which is the ONLY
+     * statement of when check-in credits expire — the quota endpoint reports the
+     * add-on pool as a bare balance with no expiry, and the pool is a stack of
+     * these grants rather than one window.
+     */
+    validity?: { mode?: string; days?: number }
+  }
 }
 
 /** The outcome of one check-in attempt. */
@@ -213,11 +224,16 @@ export async function claimQoderCheckin(
       // rather than dressed up as a success.
       return { ok: false, status: 'none', message: 'no claimable benefit campaign for this account today' }
     }
+    // The grant's own lifetime, when the campaign states one: check-in credits
+    // expire per grant, so this is what the card should say instead of the plan's
+    // reset date (which says nothing about them).
+    const validDays = benefit.benefit?.validity?.days
+    const validitySuffix = validDays === undefined || validDays <= 0 ? '' : ` (valid ${String(validDays)} days)`
     if (benefit.claimStatus === 'CLAIMED') {
       return {
         ok: true,
         status: 'already',
-        message: 'already claimed today',
+        message: `already claimed today${validitySuffix}`,
         ...benefit.benefit?.amount === undefined ? {} : { amount: benefit.benefit.amount },
       }
     }
@@ -229,8 +245,8 @@ export async function claimQoderCheckin(
         ok: true,
         status: replayed ? 'already' : 'claimed',
         message: replayed
-          ? 'already claimed today'
-          : `claimed ${String(amount ?? '')} credits`.trim(),
+          ? `already claimed today${validitySuffix}`
+          : `claimed ${String(amount ?? '')} credits${validitySuffix}`.trim(),
         ...amount === undefined ? {} : { amount },
       }
     }

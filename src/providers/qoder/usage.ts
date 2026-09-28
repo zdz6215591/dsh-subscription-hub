@@ -315,6 +315,20 @@ function quotaWindow(kind: string, quota: QoderQuota | undefined, resetsAt: numb
 }
 
 /**
+ * The first real instant among the given ISO strings / epoch numbers.
+ * @param values - candidates, in preference order.
+ * @returns epoch milliseconds, or undefined when none parse.
+ */
+function instantOf(...values: readonly (string | number | undefined)[]): number | undefined {
+  for (const value of values) {
+    if (value === undefined) continue
+    const parsed = typeof value === 'number' ? value : Date.parse(value)
+    if (Number.isFinite(parsed) && parsed > 0) return parsed
+  }
+  return undefined
+}
+
+/**
  * Project one usage read onto the hub's `ProviderUsage` shape.
  *
  * Each credit package becomes its own window, and `remaining`/`limit` are the
@@ -322,14 +336,23 @@ function quotaWindow(kind: string, quota: QoderQuota | undefined, resetsAt: numb
  * holds, which is what the composer pill shows. `supported` is false only when
  * the read carried no package at all (the endpoint answered, the account has
  * nothing to report, or the read degraded).
+ *
+ * ONLY the plan pool is given a reset, because the account's period is the one
+ * expiry this read actually attributes: it is the plan record's own `end_date`,
+ * with the quota endpoint's account-level `expiresAt` as the fallback (they agree
+ * on a live account). The org and add-on pools get none — the payload states no
+ * expiry for either. The add-on pool could not carry one anyway: it is a STACK of
+ * daily grants, each valid 30 days from its own grant (the check-in campaign
+ * declares `validity: { mode: RELATIVE_DAYS, days: 30 }`), so no single instant
+ * describes it. Stamping the plan's date on it is what made the check-in credits
+ * look like they expire with the plan.
  * @param account - one usage read.
  * @returns the hub-facing usage.
  */
 export function qoderProviderUsage(account: QoderAccountInfo): ProviderUsage {
   const usage = account.usage
   if (usage === undefined) return { supported: false }
-  const resetsAt = usage.expiresAt === undefined ? undefined : Date.parse(usage.expiresAt)
-  const resetAt = resetsAt !== undefined && Number.isFinite(resetsAt) ? resetsAt : undefined
+  const planResetAt = instantOf(account.plan?.endDate, usage.expiresAt)
 
   const windows: UsageWindow[] = []
   for (const [scope, quota] of [
@@ -337,7 +360,7 @@ export function qoderProviderUsage(account: QoderAccountInfo): ProviderUsage {
     ['org', usage.orgResourcePackage],
     ['add-on', usage.addOnQuota],
   ] as const) {
-    const window = quotaWindow(scope, quota, resetAt)
+    const window = quotaWindow(scope, quota, scope === 'plan' ? planResetAt : undefined)
     if (window !== undefined) windows.push(window)
   }
   if (windows.length === 0) return { supported: false }
