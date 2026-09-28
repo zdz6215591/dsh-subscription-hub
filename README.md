@@ -362,11 +362,33 @@ Only models with published level evidence get a picker:
 - **Claude family** — no level evidence exists, so it gets no picker and no thinking
   parameter is sent.
 
-### Why there is no usage figure
+### Models, context and quota
 
-The JoyCode API publishes no balance or quota on this route (the reference tracks
-spend locally instead), so this route shows **no composer pill and no balance**:
-nothing is displayed rather than a number upstream never disclosed.
+- **The roster is the LIVE `modelList`**: the models you see are exactly the ones the
+  account's catalog carries — no more, no fewer (`chatApiModel` is the wire name, `label`
+  the display name). The pinned table (16 published ids) only fills in fields the catalog
+  does not publish; an id it does not describe still appears, just without declared
+  capabilities.
+- **200k context, 64k output.** Both come from the reference's LIVE probe record
+  (`dashboard/handler.go`, `modelCapabilities`, probed 2026-09-10/11): `advertised_ctx` is the
+  upstream's own `maxTotalTokens` label (200 000) and `max_output_tokens` is 64 000 for every
+  model. The same probes recall ~0.9–1.0 MILLION tokens successfully and error at 1 000 000,
+  so the real window is larger than the label — this route declares the published label,
+  because understating makes the harness compact early while overstating breaks a request.
+- **Thinking levels only for the GPT family.** It is served by OpenAI's Responses API, whose
+  `reasoning.effort` vocabulary is published, and the reference's test pins all five values as
+  surviving translation. The chat families (GLM / Kimi / DeepSeek / MiniMax) reason (probed)
+  with no documented level axis, so they get no picker; Doubao and the whole Claude family are
+  probed as NON-reasoning.
+- **There is no quota/credit endpoint.** JD's balance lives in its client, and neither
+  reference reads it: JoyCode2api keeps local token accounting only, and switch-dev's README
+  states outright that it reuses the tool's own quota and that its cost figures are estimates
+  from a built-in rate table ("真实消耗看各工具后台"). So this route shows **no composer pill
+  and no balance** — nothing is displayed rather than a number upstream never disclosed.
+- **Spend is still visible.** JoyCode's models are priced (including `Doubao-Seed-2.0-pro` and
+  the two `-jcloud` variants; only `JoyAI-Code-1.5` has no trustworthy rate and stays unpriced),
+  so the savings banner values their tokens at published API rates. Provenance is recorded row
+  by row in `model-prices.ts`, including that table's version and notes.
 
 ## Referenced projects
 

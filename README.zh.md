@@ -269,10 +269,24 @@ JoyCode 是 IDE 优先的产品，它的私有接口没有公开文档。本仓�
 - **chat 系**（GLM / Kimi / DeepSeek / MiniMax / Doubao）：档位按 `reasoning_effort` 原样透传，`off` 发 `thinking: { type: "disabled" }`；Doubao 另需 `thinking: { type: "enabled" }` 开关（参考项目的行为）。
 - **Claude 系**：没有可靠档位证据，故不给选择器、也不发送思考参数。
 
-### 为什么没有用量/余额
+### 模型、上下文与额度
 
-JoyCode 的接口不公布余额或额度（参考项目只能本地记账），所以本路由**不出用量胶囊、不显示余额**：
-宁可什么都不显示，也不显示一个上游从未公布的数字。
+- **模型清单来自实时 `modelList`**：面板里出现的模型就是**你账号目录里实际有的那些**，不多不少
+  （`chatApiModel` 作线上模型名、`label` 作显示名）。本仓库另外钉住的是一张**能力表**（16 个已公布 id），
+  只用来补目录不提供的字段；表里没有的模型照样出现，只是不声明能力。
+- **上下文 200k、输出上限 64k**：这两个数字来自参考项目 2026-09-10/11 的**线上实测**记录
+  （`dashboard/handler.go` 的 `modelCapabilities`：`advertised_ctx` = 上游 `maxTotalTokens` 标签 200 000，
+  `max_output_tokens` 全部 64 000）。实测里 ~90–99 万 token 的召回成功、100 万起报错，说明真实窗口比标签更大；
+  本路由**声明上游公布的标签**——少算会让 DSH 提前压缩，多算会让请求直接失败。
+- **思考等级只给 GPT 系**：它走 OpenAI 的 Responses 接口，`reasoning.effort` 档位是公开词汇，
+  参考项目的测试也把五档固定为可原样翻译；chat 系（GLM / Kimi / DeepSeek / MiniMax）**实测会思考但没有档位证据**，
+  所以不给选择器；Doubao 与 Claude 系实测**不是**思考模型。
+- **没有额度/积分接口**：京东的「额度」在客户端里，但**两个参考项目都不读它**——JoyCode2api 只做本地记账，
+  switch-dev 的 README 更写明「复用的是你已登录工具自带的额度……费用统计是按内置费率表的**估算值**，
+  真实消耗看各工具后台」。所以本路由**不出用量胶囊、不显示余额**：宁可什么都不显示，也不显示上游从未公布的数字。
+- **但花费看得到**：JoyCode 的模型已进价格表（含 `Doubao-Seed-2.0-pro` 与两个 `-jcloud` 变体；
+  只有 `JoyAI-Code-1.5` 无人能给出可信价格，保持不标价），所以**省钱看板**会把这部分 Token 按公开 API 价折算。
+  价格来源在 `model-prices.ts` 里逐行标注（含参考项目表的版本号与每条 note）。
 
 ## Antigravity
 

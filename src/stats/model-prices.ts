@@ -101,6 +101,16 @@ interface PriceRow {
 /**
  * Every published row, ordered by the page's own slug. All figures are USD per
  * 1,000,000 tokens.
+ *
+ * PROVENANCE, SECOND BLOCK: the rows marked `doubao-seed-2.0-pro`,
+ * `glm-5.2-jcloud` and `kimi-k3-jcloud` are not on the page above. They come from
+ * the JoyCode reference's published rate table
+ * (`ref-joycode2api/pkg/pricing/pricing.go`, version `public-base-2026-09-14-v4`,
+ * collected 2026-09-14), which lists each rate with its own source URL, and each
+ * row here carries that row's note. They exist because the `joycode` route serves
+ * exactly these ids, and without them its spend would silently price as nothing.
+ * Its two «未取得可信匹配价格» entries (JoyAI-Code-1.5, JoyCode-Base-V3) are NOT
+ * added: an id nobody could price stays UNPRICED here too.
  */
 const PRICE_ROWS: readonly PriceRow[] = [
   { id: 'claude-fable-5', rates: [10, 50, 1, 12.5] },
@@ -117,6 +127,11 @@ const PRICE_ROWS: readonly PriceRow[] = [
   { id: 'deepseek-v4-flash-vision-exp', rates: [0.15, 0.6, 0.003], peak: [0.3, 1.2, 0.006] },
   { id: 'deepseek-v4-pro', rates: [0.66, 1.98, 0.022], peak: [1.32, 3.96, 0.044] },
   { id: 'deepseek-v4.1-flash', rates: [0.15, 0.6, 0.003], peak: [0.3, 1.2, 0.006] },
+  // Doubao-Seed-2.0-pro: the JoyCode reference's published table (see the block
+  // comment below) prices it from 火山方舟's list price, taking the
+  // input-length (32 128] band — its own note records that its logs carry no
+  // length bucket, so this is that band rather than a measured mix.
+  { id: 'doubao-seed-2.0-pro', rates: [6.6, 33.3, 0] },
   { id: 'fugu-ultra', rates: [5, 30, 0.5] },
   { id: 'gemini-3.1-flash-lite', rates: [0.25, 1.5, 0.03] },
   { id: 'gemini-3.5-flash', rates: [1.5, 9, 0.15] },
@@ -127,6 +142,11 @@ const PRICE_ROWS: readonly PriceRow[] = [
   { id: 'glm-5', rates: [1, 3.2, 0.2] },
   { id: 'glm-5.1', rates: [1.4, 4.4, 0.26] },
   { id: 'glm-5.2', rates: [1.4, 4.4, 0.26] },
+  // The `-jcloud` spellings are JD's internal deployment of the SAME open-weight
+  // model, and the reference prices them by inheriting that model's list price
+  // ("按同版本官网价参考；非 jcloud 实际账单"). Carried as its own row rather than
+  // an alias so the provenance stays visible.
+  { id: 'glm-5.2-jcloud', rates: [1.4, 4.4, 0.26] },
   { id: 'glm-5.2-fast', rates: [3, 10.25, 0.5] },
   { id: 'glm-5.3', rates: [1.4, 4.4, 0.26] },
   { id: 'glm-5.3-flash', rates: [0.15, 0.5, 0.03] },
@@ -147,6 +167,7 @@ const PRICE_ROWS: readonly PriceRow[] = [
   { id: 'kimi-k2.7-code', rates: [0.95, 4, 0.19] },
   { id: 'kimi-k2.7-code-highspeed', rates: [1.9, 8, 0.38] },
   { id: 'kimi-k3', rates: [3, 15, 0.3] },
+  { id: 'kimi-k3-jcloud', rates: [3, 15, 0.3] },
   { id: 'mimo-v2.5', rates: [0.14, 0.28, 0.0028] },
   { id: 'mimo-v2.5-pro', rates: [0.435, 0.87, 0.0036] },
   { id: 'minimax-m2.5', rates: [0.3, 1.2, 0.03] },
@@ -216,6 +237,11 @@ for (const price of MODEL_PRICES) {
  * does not carry (`-tiered` on the hub's Antigravity ids) is trimmed only AFTER
  * the exact spelling misses, so a row that legitimately ends in `-fast`, `-exp`
  * or `-vision-exp` is never shadowed by its shorter sibling.
+ *
+ * Whitespace is also tried as a hyphen: some catalogs publish display-style ids
+ * (`GPT-6 Astra`, `GPT-5.6 Sol` on the JoyCode route) where the page uses a slug.
+ * Without this the id simply fails to price, which reads as "this model costs
+ * nothing" — the one outcome a savings estimate must never produce by accident.
  * @param model - the catalog model id.
  * @returns candidate slugs in lookup order.
  */
@@ -223,13 +249,14 @@ export function priceSlugCandidates(model: string): string[] {
   const lower = model.toLowerCase()
   const bare = lower.includes('/') ? lower.slice(lower.indexOf('/') + 1) : lower
   const hyphenated = (slug: string): string => slug.replace(/^([a-z]+)(\d)/, '$1-$2')
+  const spaced = (slug: string): string => slug.replace(/\s+/g, '-')
   const trimmed = (slug: string): string[] => [
     slug.replace(/-(tiered|latest|preview)$/, ''),
     slug.replace(/-\d{8}$/, ''),
   ]
   const out: string[] = []
   for (const base of [lower, bare]) {
-    out.push(base, hyphenated(base), ...trimmed(base), ...trimmed(hyphenated(base)))
+    out.push(base, hyphenated(base), spaced(base), hyphenated(spaced(base)), ...trimmed(base), ...trimmed(hyphenated(base)))
   }
   return [...new Set(out.filter(slug => slug !== ''))]
 }

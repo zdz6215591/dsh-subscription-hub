@@ -301,7 +301,7 @@ const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [  { id
   { id: 'codebuddy', name: 'CodeBuddy' },
   { id: 'qoder', name: 'Qoder' },
   { id: 'trae', name: 'Trae' },
-  { id: 'joycode', name: 'JoyCode (京东)' },
+  { id: 'joycode', name: 'JoyCode' },
   { id: 'copilot', name: 'GitHub Copilot' },
   { id: 'zed', name: 'Zed Pro' },
 ]

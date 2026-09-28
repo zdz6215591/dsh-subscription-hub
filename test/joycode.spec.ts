@@ -57,6 +57,7 @@ import {
   validateJoyCodeCredential,
 } from '../src/providers/joycode-session.js'
 import { streamResponses } from '../src/translate/responses.js'
+import { resolveModelPrice } from '../src/stats/model-prices.js'
 
 const CREDENTIAL = {
   ptKey: 'pt-test',
@@ -143,21 +144,39 @@ test('joycode drops the completion-only model from the roster', () => {
   assert.equal(isJoyCodeChatModel('GLM-5.3'), true)
 })
 
-test('joycode advertises thinking levels only where the reference published them', () => {
+test('joycode advertises thinking levels only where a level axis is documented', () => {
+  // The GPT family is served by OpenAI's Responses API, whose `reasoning.effort`
+  // vocabulary is published — and the reference's own test pins all five values as
+  // surviving translation. It is the ONLY family with a picker.
   assert.deepEqual(joyCodeModel('GPT-6 Astra')?.efforts, JOYCODE_EFFORTS)
-  // Doubao is not in the reference's reasoning map, but its ChatThinking turns the
-  // switch ON whenever an effort arrives, so the picker is the only way to reach it.
-  assert.deepEqual(joyCodeModel('Doubao-Seed-2.0-pro')?.efforts, JOYCODE_EFFORTS)
-  assert.deepEqual(joyCodeModel('Kimi-K3')?.efforts, JOYCODE_EFFORTS)
-  // The Claude family carries no published level axis.
-  assert.equal(joyCodeModel('Claude-Opus-5')?.efforts, undefined)
-  // Neither does the platform's own default model.
-  assert.equal(joyCodeModel('JoyAI-Code-1.5')?.efforts, undefined)
-  // Every pinned row carries the published budgets.
-  for (const model of JOYCODE_MODELS) {
-    assert.ok(model.contextWindow >= 200_000, `${model.id} lost its context window`)
-    assert.ok(model.maxOutputTokens > 0, `${model.id} lost its output cap`)
+  assert.deepEqual(joyCodeModel('GPT-5.6 Sol')?.efforts, JOYCODE_EFFORTS)
+  // The chat families reason (probed) but have no documented level axis, so they
+  // advertise none: a picker whose levels change nothing is worse than no picker.
+  for (const id of ['GLM-5.3', 'GLM-5.2-jcloud', 'Kimi-K3', 'Kimi-K3-jcloud', 'DeepSeek-V4-Pro', 'MiniMax-M3']) {
+    assert.equal(joyCodeModel(id)?.reasoning, true, `${id} should be marked as reasoning`)
+    assert.equal(joyCodeModel(id)?.efforts, undefined, `${id} must not advertise levels`)
   }
+  // The Claude family is probed as non-reasoning, and so is the platform's default.
+  assert.equal(joyCodeModel('Claude-Opus-5')?.reasoning, false)
+  assert.equal(joyCodeModel('Claude-Opus-5')?.efforts, undefined)
+  assert.equal(joyCodeModel('JoyAI-Code-1.5')?.reasoning, false)
+  assert.equal(joyCodeModel('Doubao-Seed-2.0-pro')?.reasoning, false)
+})
+
+test('joycode declares the probed budgets, not the older capability map', () => {
+  // The 2026-09-10/11 probe recorded every model advertising a 64k OUTPUT cap
+  // (the older matrix in the reference said 16k/32k) and the upstream's own 200k
+  // `maxTotalTokens` label — which the recall probes showed understates the real
+  // ~1M window. The label is what this route declares.
+  for (const model of JOYCODE_MODELS) {
+    assert.equal(model.maxOutputTokens, 64_000, `${model.id} lost its probed output cap`)
+    assert.equal(model.contextWindow, 200_000, `${model.id} lost the advertised context label`)
+  }
+  // Vision comes from the probe's base64-PNG test: GLM/DeepSeek/MiniMax/Doubao
+  // are text-only there even though the live catalog advertises vision for some.
+  assert.equal(joyCodeModel('Kimi-K3')?.vision, true)
+  assert.equal(joyCodeModel('MiniMax-M3')?.vision, false)
+  assert.equal(joyCodeModel('GLM-5.3')?.vision, false)
 })
 
 // ------------------------------------------------------------------- client
@@ -386,7 +405,8 @@ test('joycode parses a live model list, merging pinned capabilities and live fea
   assert.equal(roster[1]?.name, 'GLM-5.3')
   // Pinned capabilities resolve through either spelling.
   assert.equal(roster[1]?.pinned?.id, 'GLM-5.3')
-  assert.equal(roster[1]?.pinned?.efforts?.length, JOYCODE_EFFORTS.length)
+  assert.equal(roster[1]?.pinned?.reasoning, true)
+  assert.equal(roster[1]?.pinned?.maxOutputTokens, 64_000)
   // Live features decide vision when the endpoint states them.
   assert.equal(roster[0]?.vision, false)
   assert.equal(roster[2]?.vision, true)
@@ -585,6 +605,16 @@ test('joycode accepts a bare ptKey and takes the user id from userInfo', async (
   )
 })
 
+test('joycode models are priced, so their spend is not silently zero', () => {
+  // The savings banner prices by model id. Every JoyCode id with a published rate
+  // must resolve, or the route's spend quietly counts as nothing.
+  for (const id of ['GPT-6 Astra', 'GPT-5.6 Sol', 'Claude-Opus-5', 'GLM-5.3', 'GLM-5.2-jcloud', 'Kimi-K3', 'Kimi-K3-jcloud', 'DeepSeek-V4-Pro', 'MiniMax-M3', 'Doubao-Seed-2.0-pro']) {
+    assert.equal(resolveModelPrice(id).source, 'catalog', `${id} has no published rate`)
+  }
+  // The one model nobody could price stays UNPRICED rather than guessed at.
+  assert.equal(resolveModelPrice('JoyAI-Code-1.5').source, 'unpriced')
+})
+
 // ------------------------------------------------------------------ adapter
 
 test('joycode capabilities come from the pinned table, never from a guess', async () => {
@@ -728,8 +758,8 @@ test('joycode streams Claude models through the native Anthropic path', async ()
   assert.equal(call.body.tenant, 'JD')
   // The bare label answers 6002 upstream, so the `-hq` id goes on the wire.
   assert.equal(call.body.model, 'Claude-Opus-5-hq')
-  // The path's own ceiling, whatever the caller asked for.
-  assert.equal(call.body.max_tokens, 32_768)
+  // The probed output cap, whatever the caller asked for.
+  assert.equal(call.body.max_tokens, 64_000)
   assert.equal(call.body.stream, true)
   assert.ok(chunks.some(chunk => chunk.type === 'block-end'))
   assert.ok(chunks.some(chunk => chunk.type === 'finish'))

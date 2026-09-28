@@ -64,9 +64,6 @@ export const JOYCODE_ANTHROPIC_LOGIN_TYPE = 'PIN_JD_CLOUD'
 export const JOYCODE_TENANT = 'JOYCODE'
 export const JOYCODE_ANTHROPIC_TENANT = 'JD'
 
-/** The Claude path's `max_tokens` ceiling; the reference clamps here. */
-export const JOYCODE_ANTHROPIC_MAX_TOKENS = 32_768
-
 /** What the credential must carry to reach the API. */
 export interface JoyCodeCredential {
   /** The `ptKey` request header — the whole credential. */

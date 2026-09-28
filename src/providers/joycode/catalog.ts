@@ -1,22 +1,37 @@
 /**
- * Pinned JoyCode (京东) model table — capabilities AND which wire path serves each model.
+ * Pinned JoyCode (JD) model table — capabilities AND which wire path serves each model.
  *
- * JoyCode's own `modelList` endpoint publishes ids and token budgets but no
- * capability flags, so the table below is the capability source, taken verbatim
- * from the reference implementation's own published matrix
- * (`ref-joycode2api/pkg/openai/types.go: ModelCapabilities` / `ReasoningModels`)
- * and its routing rules (`pkg/joycode/client.go`).
+ * ## Where these numbers come from
+ *
+ * The reference implementation probed every model against the LIVE upstream on
+ * 2026-09-10/11 with calibrated token fillers and recorded the result per field
+ * (`ref-joycode2api/pkg/dashboard/handler.go`, `modelCapabilities`): its `API`
+ * column is the endpoint each model answered on, `Vision` was tested with a
+ * base64 PNG, `Reasoning` records the model's own behaviour, `MaxOutput` is the
+ * upstream's advertised `respMaxTokens`, and `MeasuredCtx` is a successful
+ * input-token observation from a recall test.
+ *
+ * That table supersedes the older `pkg/openai/types.go` matrix this file first
+ * used: there every model advertises a 64k OUTPUT cap (not 16k/32k), and several
+ * vision flags differ.
+ *
+ * ## Two context numbers, on purpose
+ *
+ * `contextWindow` is the upstream's OWN label (`maxTotalTokens`, 200 000 for
+ * every model). The recall probes accepted ~0.9–1.0 MILLION input tokens and
+ * their notes record an upstream error at 1 000 000 ("与上游 1M 限制一致"), so the
+ * label understates reality. This route declares the published label, not the
+ * larger measurement: an understated window makes the harness compact early,
+ * while an overstated one breaks a request — and a probe observation is not a
+ * documented limit. The live model list's own `maxTotalTokens` wins when present.
  *
  * ## Three wire paths, not one
  *
- * The platform does not serve every model through one endpoint, and sending a
- * model to the wrong one is SILENT rather than fatal:
+ * Sending a model to the wrong endpoint is silent rather than fatal:
  *
- *   - `responses` — the GPT family. The chat path rejects these with upstream
- *     error 1032 ("the IDE routes them through `/api/saas/openai/v1/responses`").
- *   - `anthropic` — the Claude family. The OpenAI paths return EMPTY output for
- *     them, and the native path needs the `-hq` internal id (the bare label
- *     answers 6002).
+ *   - `responses` — the GPT family. The chat path rejects these with error 1032.
+ *   - `anthropic` — the Claude family. The OpenAI paths return EMPTY output, and
+ *     the native path needs the `-hq` internal id (the bare label answers 6002).
  *   - `chat` — everything else.
  *
  * @module dsh-subscription-hub/providers/joycode/catalog
@@ -33,23 +48,29 @@ export interface JoyCodeModel {
   path: JoyCodePath
   contextWindow: number
   maxOutputTokens: number
+  /** Whether the model accepts image input (probe: base64 PNG). */
   vision: boolean
+  /** Whether the model reasons at all (probe). NOT a level axis — see `efforts`. */
+  reasoning: boolean
   /**
    * The upstream name this model takes on the Anthropic-shaped path. Present for
-   * the Claude family only, where the label alone is refused (error 6002) and the
-   * `-hq` id is what the endpoint serves.
+   * the Claude family only, where the label alone is refused (error 6002).
    */
   anthropicId?: string
   /**
-   * Advertised thinking levels, when the model reasons.
+   * Advertised thinking levels, when a level axis is documented.
    *
-   * The GPT family's five levels are VERIFIED distinct by the reference's own
-   * test (`pkg/joycode/effort_test.go: TestEffortResponsesFiveDistinctLevels`
-   * asserts `low`/`medium`/`high`/`xhigh`/`max` survive as five distinct values).
-   * For the chat families the reference forwards the caller's level verbatim as
-   * `reasoning_effort` and states that upstream acceptance alone does not prove
-   * distinct levels — so this is the request vocabulary the wire takes, not a
-   * claim that five distinct behaviours exist behind it.
+   * Only the GPT family has one: it is served by OpenAI's Responses API, whose
+   * `reasoning.effort` vocabulary is published, and the reference's own test
+   * (`pkg/joycode/effort_test.go`) pins all five values as surviving translation
+   * to `low`/`medium`/`high`/`xhigh`/`max`. What each level DOES upstream is not
+   * separately verified — the level is forwarded as-is.
+   *
+   * The chat families reason without any documented level axis, so they advertise
+   * none: their rows say `reasoning: true` and stop there. The reference's own
+   * comment calls its reasoning map "legacy capability metadata, not a
+   * request-parameter allowlist" and warns that upstream acceptance alone does not
+   * prove distinct levels.
    */
   efforts?: readonly string[]
 }
@@ -57,44 +78,44 @@ export interface JoyCodeModel {
 /**
  * The reasoning vocabulary this route accepts.
  *
- * `off` is the hub's "no reasoning" and maps per path: `reasoning.effort: 'none'`
- * on the GPT family, `thinking: { type: 'disabled' }` on the chat families.
+ * `off` is the hub's "no reasoning"; the GPT family maps it to
+ * `reasoning.effort: 'none'`.
  */
 export const JOYCODE_EFFORTS: readonly string[] = ['off', 'low', 'medium', 'high', 'xhigh', 'max']
 
-/** Models the reference's `ReasoningModels` map marks as reasoning. */
-const CHAT_EFFORTS: readonly string[] = JOYCODE_EFFORTS
+/** The upstream's advertised output cap for every model in the probe table. */
+const MAX_OUTPUT = 64_000
 
-/** The published model table. `label (context / output)`. */
+/** The upstream's own `maxTotalTokens` label, which every probed model carries. */
+const ADVERTISED_CONTEXT = 200_000
+
+/** The published model table. */
 export const JOYCODE_MODELS: readonly JoyCodeModel[] = [
-  // GPT family — Responses path, five verified distinct levels.
-  { id: 'GPT-6 Astra', path: 'responses', contextWindow: 200_000, maxOutputTokens: 16_384, vision: true, efforts: JOYCODE_EFFORTS },
-  { id: 'GPT-5.6 Sol', path: 'responses', contextWindow: 200_000, maxOutputTokens: 16_384, vision: true, efforts: JOYCODE_EFFORTS },
+  // GPT family — Responses path; the only family with a documented level axis.
+  { id: 'GPT-6 Astra', path: 'responses', contextWindow: ADVERTISED_CONTEXT, maxOutputTokens: MAX_OUTPUT, vision: true, reasoning: true, efforts: JOYCODE_EFFORTS },
+  { id: 'GPT-5.6 Sol', path: 'responses', contextWindow: ADVERTISED_CONTEXT, maxOutputTokens: MAX_OUTPUT, vision: true, reasoning: true, efforts: JOYCODE_EFFORTS },
 
-  // Claude family — native Anthropic path, `-hq` ids. The reference's capability
-  // matrix marks them vision-only (no reasoning flag), so they advertise no level
-  // picker: a level nobody has measured is worse than no control at all.
-  { id: 'Claude-Opus-5', path: 'anthropic', contextWindow: 200_000, maxOutputTokens: 32_000, vision: true, anthropicId: 'Claude-Opus-5-hq' },
-  { id: 'Claude-Opus-4.8', path: 'anthropic', contextWindow: 200_000, maxOutputTokens: 32_000, vision: true, anthropicId: 'Claude-Opus-4.8-hq' },
-  { id: 'Claude-Opus-4.7', path: 'anthropic', contextWindow: 200_000, maxOutputTokens: 32_000, vision: true, anthropicId: 'Claude-Opus-4.7-hq' },
-  { id: 'Claude-Sonnet-4.6', path: 'anthropic', contextWindow: 200_000, maxOutputTokens: 32_000, vision: true, anthropicId: 'Claude-Sonnet-4.6-hq' },
-  { id: 'Claude-Opus-4.6', path: 'anthropic', contextWindow: 200_000, maxOutputTokens: 32_000, vision: true, anthropicId: 'Claude-Opus-4.6-hq' },
+  // Claude family — native Anthropic path with `-hq` ids. The probe records these
+  // as non-reasoning, so no level picker exists and no thinking parameter is sent.
+  { id: 'Claude-Opus-5', path: 'anthropic', contextWindow: ADVERTISED_CONTEXT, maxOutputTokens: MAX_OUTPUT, vision: true, reasoning: false, anthropicId: 'Claude-Opus-5-hq' },
+  { id: 'Claude-Opus-4.8', path: 'anthropic', contextWindow: ADVERTISED_CONTEXT, maxOutputTokens: MAX_OUTPUT, vision: true, reasoning: false, anthropicId: 'Claude-Opus-4.8-hq' },
+  // These three are NOT in the current catalog — the reference keeps them as
+  // historical configuration without promising availability. They stay here so a
+  // live row that reappears is served on the right path with the right id.
+  { id: 'Claude-Opus-4.7', path: 'anthropic', contextWindow: ADVERTISED_CONTEXT, maxOutputTokens: MAX_OUTPUT, vision: true, reasoning: false, anthropicId: 'Claude-Opus-4.7-hq' },
+  { id: 'Claude-Sonnet-4.6', path: 'anthropic', contextWindow: ADVERTISED_CONTEXT, maxOutputTokens: MAX_OUTPUT, vision: true, reasoning: false, anthropicId: 'Claude-Sonnet-4.6-hq' },
+  { id: 'Claude-Opus-4.6', path: 'anthropic', contextWindow: ADVERTISED_CONTEXT, maxOutputTokens: MAX_OUTPUT, vision: true, reasoning: false, anthropicId: 'Claude-Opus-4.6-hq' },
 
-  // Chat path — the reasoning families.
-  { id: 'JoyAI-Code-1.5', path: 'chat', contextWindow: 200_000, maxOutputTokens: 64_000, vision: false },
-  { id: 'GLM-5.3', path: 'chat', contextWindow: 200_000, maxOutputTokens: 16_384, vision: false, efforts: CHAT_EFFORTS },
-  { id: 'GLM-5.2-jcloud', path: 'chat', contextWindow: 200_000, maxOutputTokens: 16_384, vision: false, efforts: CHAT_EFFORTS },
-  { id: 'Kimi-K3', path: 'chat', contextWindow: 200_000, maxOutputTokens: 16_384, vision: true, efforts: CHAT_EFFORTS },
-  { id: 'Kimi-K3-jcloud', path: 'chat', contextWindow: 200_000, maxOutputTokens: 16_384, vision: true, efforts: CHAT_EFFORTS },
-  { id: 'Kimi-K2.6', path: 'chat', contextWindow: 200_000, maxOutputTokens: 16_384, vision: true, efforts: CHAT_EFFORTS },
-  { id: 'Kimi-K2.5', path: 'chat', contextWindow: 200_000, maxOutputTokens: 16_384, vision: true },
-  { id: 'DeepSeek-V4-Pro', path: 'chat', contextWindow: 200_000, maxOutputTokens: 16_384, vision: false, efforts: CHAT_EFFORTS },
-  { id: 'MiniMax-M3', path: 'chat', contextWindow: 200_000, maxOutputTokens: 16_384, vision: true, efforts: CHAT_EFFORTS },
-  { id: 'MiniMax-M2.7', path: 'chat', contextWindow: 200_000, maxOutputTokens: 16_384, vision: false, efforts: CHAT_EFFORTS },
-  // Doubao is not in the reference's reasoning map, but its `ChatThinking` turns the
-  // thinking switch ON whenever the caller sends an effort for it, so the picker is
-  // the only way to reach that documented behaviour.
-  { id: 'Doubao-Seed-2.0-pro', path: 'chat', contextWindow: 200_000, maxOutputTokens: 16_384, vision: false, efforts: CHAT_EFFORTS },
+  // Chat path. `reasoning: true` means the model reasons; it does NOT mean a
+  // level picker exists, which is why none of these rows carries `efforts`.
+  { id: 'GLM-5.3', path: 'chat', contextWindow: ADVERTISED_CONTEXT, maxOutputTokens: MAX_OUTPUT, vision: false, reasoning: true },
+  { id: 'GLM-5.2-jcloud', path: 'chat', contextWindow: ADVERTISED_CONTEXT, maxOutputTokens: MAX_OUTPUT, vision: false, reasoning: true },
+  { id: 'Kimi-K3', path: 'chat', contextWindow: ADVERTISED_CONTEXT, maxOutputTokens: MAX_OUTPUT, vision: true, reasoning: true },
+  { id: 'Kimi-K3-jcloud', path: 'chat', contextWindow: ADVERTISED_CONTEXT, maxOutputTokens: MAX_OUTPUT, vision: true, reasoning: true },
+  { id: 'DeepSeek-V4-Pro', path: 'chat', contextWindow: ADVERTISED_CONTEXT, maxOutputTokens: MAX_OUTPUT, vision: false, reasoning: true },
+  { id: 'MiniMax-M3', path: 'chat', contextWindow: ADVERTISED_CONTEXT, maxOutputTokens: MAX_OUTPUT, vision: false, reasoning: true },
+  { id: 'Doubao-Seed-2.0-pro', path: 'chat', contextWindow: ADVERTISED_CONTEXT, maxOutputTokens: MAX_OUTPUT, vision: false, reasoning: false },
+  { id: 'JoyAI-Code-1.5', path: 'chat', contextWindow: ADVERTISED_CONTEXT, maxOutputTokens: MAX_OUTPUT, vision: false, reasoning: false },
 ]
 
 /** Case-insensitive lookup, accepting the `-hq` Anthropic spelling as an alias. */
@@ -134,8 +155,8 @@ export function isJoyCodeChatModel(id: string): boolean {
  * The pinned table is authoritative for every id it describes. An unknown id
  * falls back to the family prefix rules the reference uses, because a model
  * shipped after this pin still has to reach the right endpoint: a GPT-family id
- * on the chat path is a 1032, and a Claude-family id on the OpenAI paths
- * answers empty.
+ * on the chat path is a 1032, and a Claude-family id on the OpenAI paths answers
+ * empty.
  * @param id - the model id.
  * @returns the endpoint family to call.
  */

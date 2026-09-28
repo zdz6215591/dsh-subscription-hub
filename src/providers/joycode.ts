@@ -55,7 +55,6 @@ import { toResponsesInput, toResponsesTools, streamResponses } from '../translat
 import { markMessageCache, streamAnthropic, toAnthropicMessages, toAnthropicSystem, toAnthropicTools } from '../translate/anthropic.js'
 import type { JoyCodeCredential, JoyCodeEndpoint } from './joycode/client.js'
 import {
-  JOYCODE_ANTHROPIC_MAX_TOKENS,
   joyCodeEnvelope,
   joyCodeHeaders,
   joyCodeHttpError,
@@ -73,6 +72,15 @@ export const JOYCODE_PROVIDER = 'joycode'
 
 /** What the Anthropic path's required `max_tokens` falls back to. */
 const ANTHROPIC_DEFAULT_MAX_TOKENS = 32_000
+
+/**
+ * The Anthropic path's `max_tokens` ceiling.
+ *
+ * The probe table records every model advertising a 64k output cap, so that is
+ * the ceiling; the reference clamps at 32 768 for its own aggregation path, which
+ * is a choice about ITS reader rather than an upstream limit.
+ */
+const JOYCODE_ANTHROPIC_CEILING = 64_000
 
 /** Adapter construction options. */
 export interface JoyCodeAdapterOptions {
@@ -342,7 +350,7 @@ export class JoyCodeAdapter extends LlmAdapter {
     if (path === 'anthropic') {
       const anthropicMessages = toAnthropicMessages(messages)
       markMessageCache(anthropicMessages)
-      const maxTokens = Math.min(options.maxTokens ?? ANTHROPIC_DEFAULT_MAX_TOKENS, JOYCODE_ANTHROPIC_MAX_TOKENS)
+      const maxTokens = Math.min(options.maxTokens ?? ANTHROPIC_DEFAULT_MAX_TOKENS, JOYCODE_ANTHROPIC_CEILING)
       return {
         endpoint: 'anthropic',
         body: {
@@ -386,9 +394,11 @@ export class JoyCodeAdapter extends LlmAdapter {
         ? { tools: toChatTools(options.tools) }
         : {},
       ...options.maxTokens === undefined ? {} : { max_tokens: options.maxTokens },
-      // The chat families take the level as `reasoning_effort` and additionally
-      // need the thinking SWITCH: the reference turns it on whenever an effort is
-      // present (Doubao) and off when the caller says so.
+      // The chat families take the level as `reasoning_effort`, and Doubao
+      // additionally needs the thinking SWITCH (the reference turns it on
+      // whenever an effort is present). No chat model advertises levels today —
+      // see catalog.ts — so this branch only fires if a level arrives from
+      // elsewhere, and the translation stays correct when one does.
       ...effort === undefined ? {} : effort === 'off'
         ? { thinking: { type: 'disabled' } }
         : { reasoning_effort: effort, ...thinkingSwitch(options.model) },
