@@ -143,16 +143,24 @@ export function joyCodeGatewaySign(functionId: string, now: number = Date.now())
 export function joyCodeUrl(credential: JoyCodeCredential, endpoint: JoyCodeEndpoint, now?: number): string {
   const { functionId, path } = JOYCODE_ENDPOINTS[endpoint]
   const gateway = credential.colorBaseUrl?.trim()
-  if (gateway !== undefined && gateway !== '') {
-    const parsed = safeUrl(gateway)
-    if (parsed !== undefined) {
-      const basePath = parsed.pathname.replace(/\/+$/, '')
-      const { query, sign } = joyCodeGatewaySign(functionId, now)
-      return `${parsed.origin}${basePath}${GATEWAY_PATH}?${query}&sign=${sign}`
-    }
+  // The gateway form is the DEFAULT, and that is a live finding rather than a
+  // preference: the current client generation calls `/api?functionId=…` on the
+  // gateway origin (the reference port tracks 3.8.x and uses nothing else), while
+  // the legacy direct v2 paths answer a refusal as `{"code":403,"msg":"请升级版本"}`
+  // — "upgrade the version", which reads like a client bug — where the gateway
+  // names the same refusal as a policy (`AI_GRAY_ACCESS_DENIED`). Both forms serve
+  // the model list, so the roster is unaffected.
+  const base = gateway !== undefined && gateway !== '' ? gateway : JOYCODE_COLOR_BASE
+  const parsed = safeUrl(base)
+  if (parsed !== undefined) {
+    const basePath = parsed.pathname.replace(/\/+$/, '')
+    const { query, sign } = joyCodeGatewaySign(functionId, now)
+    return `${parsed.origin}${basePath}${GATEWAY_PATH}?${query}&sign=${sign}`
   }
-  const base = credential.masterBaseUrl?.trim()
-  return `${(base === undefined || base === '' ? JOYCODE_API_BASE : base).replace(/\/+$/, '')}${path}`
+  // An unparseable gateway origin falls back to the direct v2 path on the
+  // credential's own master origin, or the public one.
+  const master = credential.masterBaseUrl?.trim()
+  return `${(master === undefined || master === '' ? JOYCODE_API_BASE : master).replace(/\/+$/, '')}${path}`
 }
 
 function safeUrl(value: string): URL | undefined {
@@ -229,16 +237,45 @@ export function joyCodeEnvelope(
 export interface JoyCodeEnvelope {
   code?: number
   msg?: string
+  /**
+   * A NON-numeric code: the gateway names policy refusals instead of numbering
+   * them (`AI_GRAY_ACCESS_DENIED`, `COLOR_FORWARD_EXCEPTION`), observed live.
+   */
+  policy?: string
   data?: unknown
 }
 
-/** Parse a JoyCode JSON body, keeping the business `code`/`msg` when present. */
+/**
+ * Parse a JoyCode JSON body, keeping the business `code`/`msg` when present.
+ *
+ * Two envelopes are in the wild and BOTH were observed live from this upstream:
+ * `{code, msg, data}` on the direct v2 endpoints, and the color gateway's
+ * `{error:{code, message}}`. The gateway also spells a code as a string
+ * (`{"code":"-1"}` on its virtual 406) and uses non-numeric ones as policy names
+ * (`AI_GRAY_ACCESS_DENIED`), which are surfaced through {@link JoyCodeEnvelope.policy}.
+ */
 export function parseJoyCodeEnvelope(payload: unknown): JoyCodeEnvelope | undefined {
   if (typeof payload !== 'object' || payload === null) return undefined
   const record = payload as Record<string, unknown>
-  const code = typeof record.code === 'number' ? record.code : undefined
-  const msg = typeof record.msg === 'string' ? record.msg : undefined
-  return { ...code === undefined ? {} : { code }, ...msg === undefined ? {} : { msg }, data: record.data }
+  const error = typeof record.error === 'object' && record.error !== null
+    ? record.error as Record<string, unknown>
+    : undefined
+  const rawCode = error?.code ?? record.code
+  const numeric = typeof rawCode === 'number'
+    ? rawCode
+    : typeof rawCode === 'string' && rawCode.trim() !== '' && Number.isFinite(Number(rawCode))
+      ? Number(rawCode)
+      : undefined
+  const policy = typeof rawCode === 'string' && numeric === undefined ? rawCode : undefined
+  const msg = typeof record.msg === 'string'
+    ? record.msg
+    : typeof error?.message === 'string' ? error.message : undefined
+  return {
+    ...numeric === undefined ? {} : { code: numeric },
+    ...msg === undefined ? {} : { msg },
+    ...policy === undefined ? {} : { policy },
+    data: record.data,
+  }
 }
 
 /** Upstream business codes this route can name, so a failure is diagnosable. */
@@ -333,9 +370,13 @@ function businessCodeIn(body: string): { code?: number, msg?: string } | undefin
  */
 export function joyCodeBusinessError(payload: unknown, label: string): LlmError | undefined {
   const envelope = parseJoyCodeEnvelope(payload)
-  if (envelope?.code === undefined || envelope.code === 0) return undefined
-  const detail = `${envelope.msg ?? ''} ${JSON.stringify(envelope.data ?? '')}`
+  if (envelope === undefined) return undefined
+  const detail = `${envelope.policy ?? ''} ${envelope.msg ?? ''} ${JSON.stringify(envelope.data ?? '')}`
+  // A policy refusal needs no code: the gateway delivers `AI_GRAY_ACCESS_DENIED`
+  // (and, on its Accept routing, `COLOR_FORWARD_EXCEPTION`) as a NAME, observed
+  // live on this route.
   if (isJoyCodeGrayRefusal(detail)) return grayRefusal(label, detail)
+  if (envelope.code === undefined || envelope.code === 0) return undefined
   const hint = BUSINESS_CODES[String(envelope.code)]
   const message = `${label} refused the call (code ${String(envelope.code)}${envelope.msg === undefined ? '' : `: ${envelope.msg}`})`
     + (hint === undefined ? '' : ` — ${hint}`)
@@ -344,4 +385,71 @@ export function joyCodeBusinessError(payload: unknown, label: string): LlmError 
   // on the body's wording rather than the status alone.
   const authWording = /(未登录|登录已过期|token|ptkey|认证|authorization)/i.test(envelope.msg ?? '')
   return new LlmError(message, authWording ? 'AUTH' : 'SERVER')
+}
+
+/**
+ * What a 200 response that is NOT a stream says, when it is a refusal.
+ *
+ * This upstream answers a refused chat call with HTTP 200 and a JSON body — one
+ * bare line, no SSE framing at all:
+ *
+ *     {"code":403,"msg":"请升级版本","data":null}                         (direct v2)
+ *     {"error":{"code":"AI_GRAY_ACCESS_DENIED","message":"访问受限…"}}      (color gateway)
+ *     event: COLOR_FORWARD_EXCEPTION / data: {"code":"-1","echo":"HttpStatus=406"}
+ *
+ * Feeding those bytes to a stream parser produced zero events and surfaced as
+ * "chat completions SSE stream ended before a finish chunk" — a message about the
+ * WRONG thing entirely, and the reason a policy refusal looked like a broken
+ * stream. This reads the refusal out of a body's opening bytes so the caller can
+ * throw the real reason; undefined means "this is not a refusal, parse it".
+ * @param head - the opening bytes of the body.
+ * @param label - diagnostic prefix.
+ * @returns the refusal to throw, or undefined for a body that is not one.
+ */
+export function sniffJoyCodeRefusal(head: string, label: string): LlmError | undefined {
+  const trimmed = head.trim()
+  if (trimmed === '') return undefined
+  // The Accept-routed refusal arrives as an SSE frame carrying the policy name.
+  if (isJoyCodeGrayRefusal(trimmed)) return grayRefusal(label, trimmed)
+  // A JSON refusal: the whole body is one object with a code/policy and no
+  // `choices` (a chat chunk) and no `type` (a Responses/Anthropic event).
+  const firstObject = firstJsonObject(trimmed)
+  if (firstObject !== undefined) {
+    const record = firstObject as Record<string, unknown>
+    if (record.choices === undefined && record.type === undefined) {
+      return joyCodeBusinessError(firstObject, label)
+    }
+  }
+  return undefined
+}
+
+/** The first complete JSON object in `text`, when one starts at its beginning. */
+function firstJsonObject(text: string): unknown {
+  const start = text.indexOf('{')
+  if (start === -1) return undefined
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index] as string
+    if (inString) {
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === '"') inString = false
+      continue
+    }
+    if (char === '"') inString = true
+    else if (char === '{') depth += 1
+    else if (char === '}') {
+      depth -= 1
+      if (depth === 0) {
+        try {
+          return JSON.parse(text.slice(start, index + 1))
+        } catch {
+          return undefined
+        }
+      }
+    }
+  }
+  return undefined
 }

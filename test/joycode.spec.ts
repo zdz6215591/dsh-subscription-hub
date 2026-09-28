@@ -38,6 +38,7 @@ import {
   joyCodeHttpError,
   joyCodeUrl,
   isJoyCodeGrayRefusal,
+  sniffJoyCodeRefusal,
 } from '../src/providers/joycode/client.js'
 import { joyCodeStateDbCandidates, parseJoyCodeStateValue, readJoyCodeStateDb } from '../src/providers/joycode/credentials.js'
 import { fetchJoyCodeModels } from '../src/providers/joycode/models.js'
@@ -193,17 +194,21 @@ test('joycode gateway signature matches the reference canonical string', () => {
   assert.equal(sign, 'e3cb11e84cd47a763ffc55f08168cb8c1fc5e32cc8e17378f74585ac9cf88ebb')
 })
 
-test('joycode uses the signed gateway when the credential names one, direct v2 otherwise', () => {
-  const direct = joyCodeUrl(CREDENTIAL, 'chat')
-  assert.equal(direct, `${JOYCODE_API_BASE}/api/saas/openai/v2/chat/completions`)
-
-  const gateway = joyCodeUrl({ ...CREDENTIAL, colorBaseUrl: 'https://api-ai.jd.com' }, 'responses', 1_700_000_000_000)
-  // Routing is by functionId: the v2 path does NOT appear in a gateway URL.
-  assert.match(gateway, /^https:\/\/api-ai\.jd\.com\/api\?appid=joycode_ide&functionId=responses_completions&t=1700000000000&sign=[0-9a-f]{64}$/)
-
-  // A credential that carries a master origin routes there instead.
-  const overridden = joyCodeUrl({ ...CREDENTIAL, masterBaseUrl: 'https://staging.example/' }, 'models')
-  assert.equal(overridden, 'https://staging.example/api/saas/models/v2/modelList')
+test('joycode addresses the signed gateway by default, and the direct v2 path as a fallback', () => {
+  // Live finding: the gateway form is what the current client generation calls
+  // (and it names policy refusals, where the legacy direct paths answer
+  // "`u8bf7`u5347`u7ea7`u7248`u672c`"), so it is the default even with no gateway on
+  // the credential. The direct path remains the fallback for an unparseable origin.
+  const signed = joyCodeUrl(CREDENTIAL, 'chat', 1_700_000_000_000)
+  assert.match(signed, /^https:\/\/api-ai\.jd\.com\/api\?appid=joycode_ide&functionId=chat_completions&t=1700000000000&sign=[0-9a-f]{64}$/)
+  // A credential that carries its own gateway origin routes there instead.
+  const custom = joyCodeUrl({ ...CREDENTIAL, colorBaseUrl: 'https://gw.example/base/' }, 'responses', 1_700_000_000_000)
+  assert.match(custom, /^https:\/\/gw\.example\/base\/api\?appid=joycode_ide&functionId=responses_completions&/)
+  // An unparseable gateway origin falls back to the direct v2 path.
+  assert.equal(
+    joyCodeUrl({ ...CREDENTIAL, colorBaseUrl: 'not a url', masterBaseUrl: 'https://staging.example' }, 'models'),
+    'https://staging.example/api/saas/models/v2/modelList',
+  )
 })
 
 test('joycode headers follow the path: loginType, ptKey source, stream encoding', () => {
@@ -678,6 +683,64 @@ test('joycode streams a terminator-less chat answer end to end', async () => {
   assert.ok(chunks.some(chunk => chunk.type === 'finish'))
 })
 
+test('joycode reports a refusal that arrives as a 200 body, not as a broken stream', () => {
+  // The exact bytes three live endpoints answered with. Feeding them to a stream
+  // parser produced "chat completions SSE stream ended before a finish chunk" —
+  // this is the guard that replaced that misdiagnosis.
+  const direct = sniffJoyCodeRefusal('{"code":403,"msg":"请升级版本","data":null}', 'JoyCode chat')
+  assert.equal(direct?.code, 'SERVER')
+  assert.match(direct?.message ?? '', /请升级版本/)
+
+  const gateway = sniffJoyCodeRefusal(
+    '{"error":{"code":"AI_GRAY_ACCESS_DENIED","message":"访问受限，请联系管理员开通"}}',
+    'JoyCode chat',
+  )
+  assert.match(gateway?.message ?? '', /gray-release/)
+
+  // The Accept-routed refusal arrives as an SSE frame naming the policy.
+  const routed = sniffJoyCodeRefusal('event: COLOR_FORWARD_EXCEPTION\ndata: {"code":"-1","echo":"HttpStatus=406"}', 'JoyCode chat')
+  assert.match(routed?.message ?? '', /gray-release/)
+
+  // A real stream is NOT a refusal: a chat frame, a Responses event and an
+  // Anthropic event all pass the guard.
+  assert.equal(sniffJoyCodeRefusal('data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n', 'JoyCode chat'), undefined)
+  assert.equal(sniffJoyCodeRefusal('event: message_start\ndata: {"type":"message_start"}\n\n', 'JoyCode anthropic'), undefined)
+  assert.equal(sniffJoyCodeRefusal('data: data: {"type":"response.output_text.delta","delta":"Hi"}\n\n', 'JoyCode responses'), undefined)
+})
+
+test('joycode streams a live refusal as the refusal, never as STREAM_CLOSED', async () => {
+  // Reproduces the reported symptom end to end: a 200 whose body is the gateway's
+  // error instead of a stream. It must fail with the refusal's own words.
+  for (const [body, expect] of [
+    ['{"code":403,"msg":"请升级版本","data":null}', /请升级版本/],
+    ['{"error":{"code":"AI_GRAY_ACCESS_DENIED","message":"访问受限，请联系管理员开通"}}', /gray-release|访问受限/],
+  ] as const) {
+    const adapter = new JoyCodeAdapter({
+      models: [],
+      streamIdleTimeoutMs: 5_000,
+      tokens: tokensOf(new Map([['100001', sessionOf()]])),
+      discovery: true,
+      fetchFn: (async () => new Response(body, { status: 200 })) as typeof fetch,
+    })
+    await assert.rejects(async () => {
+      for await (const chunk of adapter.stream(request('GLM-5.3'))) void chunk
+    }, (error: unknown) => {
+      assert.ok(error instanceof LlmError, 'expected an LlmError')
+      assert.notEqual(error.code, 'STREAM_CLOSED')
+      assert.match(error.message, expect)
+      return true
+    })
+  }
+})
+
+test('joycode resolves the -agent deployment suffix to its base model', () => {
+  // The live catalog serves these ids; the suffix is a deployment variant.
+  assert.equal(joyCodeModel('GLM-5.3-agent')?.id, 'GLM-5.3')
+  assert.equal(joyCodeModel('Doubao-Seed-2.0-pro-agent')?.maxOutputTokens, 64_000)
+  // An id with no base row stays unclaimed rather than guessed at.
+  assert.equal(joyCodeModel('Kimi-K2.6-agent'), undefined)
+})
+
 // ------------------------------------------------------------------ adapter
 
 test('joycode capabilities come from the pinned table, never from a guess', async () => {
@@ -816,7 +879,7 @@ test('joycode streams Claude models through the native Anthropic path', async ()
   const chunks: StreamChunk[] = []
   for await (const chunk of adapter.stream(request('Claude-Opus-5', { maxTokens: 99_999 }))) chunks.push(chunk)
   const call = captured[0]!
-  assert.equal(call.url, `${JOYCODE_API_BASE}/api/saas/anthropic/v1/messages`)
+  assert.match(call.url, /functionId=anthropic_completions&t=\d+&sign=[0-9a-f]{64}$/)
   assert.equal(call.headers.logintype, 'PIN_JD_CLOUD')
   assert.equal(call.body.tenant, 'JD')
   // The bare label answers 6002 upstream, so the `-hq` id goes on the wire.

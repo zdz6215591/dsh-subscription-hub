@@ -127,11 +127,18 @@ for (const model of JOYCODE_MODELS) {
 
 /**
  * The pinned row for an id, when the table describes it.
+ *
+ * The live catalog serves several models under an `-agent` suffix
+ * (`GLM-5.3-agent`, `Doubao-Seed-2.0-pro-agent` — observed on the wire), which is
+ * a DEPLOYMENT variant of the same base model, so the base row's capabilities
+ * apply. The roster still prefers whatever the live row publishes for its budgets,
+ * so this only fills in what the catalog leaves unsaid.
  * @param id - the model id as the roster names it (or an `-hq` alias).
  * @returns the row, or undefined for an id this table does not describe.
  */
 export function joyCodeModel(id: string): JoyCodeModel | undefined {
-  return BY_ID.get(id.trim().toLowerCase())
+  const key = id.trim().toLowerCase()
+  return BY_ID.get(key) ?? BY_ID.get(key.replace(/-agent$/, ''))
 }
 
 /**

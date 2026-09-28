@@ -65,7 +65,7 @@ import { joyCodeAnthropicId, joyCodeModel, joyCodePathFor } from './joycode/cata
 import { joyCodeCredentialOf } from './joycode-session.js'
 import type { JoyCodeRosterEntry } from './joycode/models.js'
 import { fetchJoyCodeModels, joyCodeModelInfo } from './joycode/models.js'
-import { normalizeChatSse, unwrapDoubleWrappedSse } from './joycode/translate.js'
+import { guardJoyCodeStream, normalizeChatSse, unwrapDoubleWrappedSse } from './joycode/translate.js'
 
 /** Route identity. */
 export const JOYCODE_PROVIDER = 'joycode'
@@ -314,20 +314,24 @@ export class JoyCodeAdapter extends LlmAdapter {
       if (response.body === null) {
         throw new LlmError(`JoyCode ${path} answered no body`, 'MALFORMED_RESPONSE')
       }
+      // This upstream answers a REFUSED call with HTTP 200 and a JSON error body.
+      // Without this guard that body reaches a stream parser, produces no events,
+      // and surfaces as "stream ended before a finish chunk" — which is how a
+      // gateway policy refusal got reported as a broken stream.
+      const body = guardJoyCodeStream(response.body, `JoyCode ${path}`)
       switch (path) {
         case 'chat':
           // The chat path may answer with bare JSON lines, and may omit the
           // `[DONE]` terminator entirely — the normalizer fixes both before the
-          // translator sees them (a bare-JSON body otherwise reads as "no events"
-          // and surfaces as a bare STREAM_CLOSED).
-          yield* streamChatCompletions(normalizeChatSse(response.body, watchdog.pulse), watchdog.pulse)
+          // translator sees them.
+          yield* streamChatCompletions(normalizeChatSse(body, watchdog.pulse), watchdog.pulse)
           return
         case 'responses':
           // This path double-wraps every event in another `data:`/`event:` layer.
-          yield* streamResponses(unwrapDoubleWrappedSse(response.body, watchdog.pulse), watchdog.pulse)
+          yield* streamResponses(unwrapDoubleWrappedSse(body, watchdog.pulse), watchdog.pulse)
           return
         case 'anthropic':
-          yield* streamAnthropic(response.body, watchdog.pulse)
+          yield* streamAnthropic(body, watchdog.pulse)
           return
       }
     } catch (error) {

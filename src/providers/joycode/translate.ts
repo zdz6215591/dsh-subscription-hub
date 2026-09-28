@@ -28,6 +28,7 @@
  */
 
 import { LlmError } from '@deepseek-ai/dsh-llm'
+import { sniffJoyCodeRefusal } from './client.js'
 
 /** Payload prefix this unwrapper emits. */
 const PREFIX = 'data: '
@@ -196,6 +197,68 @@ export function normalizeChatSse(
       controller.enqueue(encoder.encode(`${PREFIX}${JSON.stringify({
         choices: [{ index: 0, delta: {}, finish_reason: toolCall ? 'tool_calls' : 'stop' }],
       })}\n\n${CHAT_FINISH_TAIL}`))
+    },
+  }))
+}
+
+/**
+ * Turn a 200 response that is really a REFUSAL into the error it is.
+ *
+ * This upstream answers a refused call with HTTP 200 and a JSON error body, and
+ * passing that to a stream parser produced "chat completions SSE stream ended
+ * before a finish chunk" — a diagnosis of the wrong thing, on all three paths
+ * (observed live: `{"code":403,"msg":"请升级版本"}` from the direct endpoints,
+ * `{"error":{"code":"AI_GRAY_ACCESS_DENIED",…}}` from the color gateway). The
+ * refusal is read out of the body's opening bytes; a body that looks like a real
+ * stream is passed through untouched, byte for byte.
+ * @param stream - the upstream body.
+ * @param label - diagnostic prefix naming the path.
+ * @returns the same bytes, or a stream that fails with the refusal.
+ */
+export function guardJoyCodeStream(
+  stream: ReadableStream<Uint8Array>,
+  label: string,
+): ReadableStream<Uint8Array> {
+  const decoder = new TextDecoder()
+  const encoder = new TextEncoder()
+  let decided = false
+  let buffer = ''
+  return stream.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      if (decided) {
+        controller.enqueue(chunk)
+        return
+      }
+      buffer += decoder.decode(chunk, { stream: true })
+      const refusal = sniffJoyCodeRefusal(buffer, label)
+      if (refusal !== undefined) {
+        decided = true
+        controller.error(refusal)
+        return
+      }
+      // Framing tokens prove this is the stream this route expects; a size cap
+      // keeps a body that is neither refusal nor recognizable from stalling.
+      const looksLikeStream = /(^|\n)\s*(data:|event:|:)/.test(buffer)
+        || buffer.includes('"choices"')
+        || buffer.includes('"type"')
+        || buffer.length > 4096
+      if (looksLikeStream) {
+        decided = true
+        buffer += decoder.decode()
+        controller.enqueue(encoder.encode(buffer))
+        buffer = ''
+      }
+    },
+    flush(controller) {
+      if (decided) return
+      // The body ended while still undecided: it is short and has no framing, so
+      // judge it as a whole rather than leaving the caller with nothing.
+      const refusal = sniffJoyCodeRefusal(buffer, label)
+      if (refusal !== undefined) {
+        controller.error(refusal)
+        return
+      }
+      if (buffer !== '') controller.enqueue(encoder.encode(buffer))
     },
   }))
 }
