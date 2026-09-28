@@ -283,7 +283,8 @@ export function freebuffQuotaWarnings(quota: FreebuffQuota): string[] {
     const where = quota.countryCode === undefined ? '' : ` (${quota.countryCode})`
     warnings.push(
       `Freebuff reports this account is blocked${where}: ${quota.countryBlockReason}. `
-      + 'Requests will be refused while that stands.',
+      + 'The reference only REPORTS this field — it never blocks on it, and a live run '
+      + 'streamed normally while it stood — so treat it as a heads-up, not a refusal.',
     )
   }
   return warnings
