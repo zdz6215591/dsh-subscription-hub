@@ -3001,7 +3001,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                       {id === 'joycode' && (
                         <>
                           <button type="button" style={styles.buttonSmall} onClick={() => { void login(id, 'oauth') }}>
-                            {t('joyCodeBrowserLogin')}
+                            {t('loginAccount')}
                           </button>
                           <button type="button" style={styles.buttonSmall} onClick={() => { void login(id, 'import') }}>
                             {t('importJoyCode')}
@@ -3044,7 +3044,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                           </button>
                         </>
                       )}
-                      {id !== 'claude' && id !== 'commandcode' && id !== 'zed' && id !== 'trae' && id !== 'cline' && id !== 'joycode' && (
+                      {id !== 'claude' && id !== 'commandcode' && id !== 'zed' && id !== 'trae' && id !== 'cline' && id !== 'joycode' && id !== 'freebuff' && (
                         <button type="button" style={styles.buttonSmall} onClick={() => { void login(id) }}>
                           {t('loginAccount')}
                         </button>

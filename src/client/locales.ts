@@ -163,7 +163,6 @@ export const en = {
   importCommandCode: 'Import from Command Code CLI',
   importTrae: 'Import from Trae',
   importJoyCode: 'Import from JoyCode IDE',
-  joyCodeBrowserLogin: 'Sign in with browser (QR)',
   joyCodePasteHint:
     'JoyCode signs in on its own page: the browser button opens it, you authorize (scan with the JD app), and the credential returns here by itself. '
     + 'The import button instead reads what a locally signed-in JoyCode IDE stored (state.vscdb). '
@@ -386,7 +385,6 @@ export const zh = {
   importCommandCode: '从 Command Code CLI 导入',
   importTrae: '从 Trae 导入',
   importJoyCode: '从 JoyCode IDE 导入',
-  joyCodeBrowserLogin: '浏览器登录（扫码）',
   joyCodePasteHint:
     'JoyCode 在它自己的登录页上授权：点「浏览器登录」打开该页，用京东 App 扫码授权后凭据会自动回到这里。'
     + '「导入」按钮则读取本机已登录的 JoyCode IDE 保存的凭据（state.vscdb）。'
