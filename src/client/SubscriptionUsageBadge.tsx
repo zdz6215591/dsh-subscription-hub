@@ -9,8 +9,8 @@
  * Click to expand a clean dialog floating above the pill showing all accounts'
  * 5-hour and weekly windows, credits, and reset countdowns without progress bars.
  */
-import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
-import type { CSSProperties } from 'react'
+import { Fragment, forwardRef, useCallback, useEffect, useRef, useState } from 'react'
+import type { CSSProperties, HTMLAttributes, ReactElement, Ref } from 'react'
 import { createPortal } from 'react-dom'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
@@ -32,6 +32,59 @@ const POLL_INTERVAL_MS = 15_000
 const PANEL_GAP = 8
 const PANEL_MARGIN = 12
 const MEASURE_STYLE: CSSProperties = { visibility: 'hidden', left: 0, top: 0 }
+
+/** DOM props the panel surface spreads onto its own element. */
+type PanelSurfaceProps = HTMLAttributes<HTMLDivElement>
+
+/**
+ * The surface component contract: div props plus the forwarded `ref` the
+ * anchored placement measures and the outside-pointer dismissal inspects.
+ */
+type PanelSurfaceComponent = (props: PanelSurfaceProps & { ref?: Ref<HTMLDivElement> }) => ReactElement | null
+
+/**
+ * The official popover material, borrowed from the shell instead of re-typed.
+ *
+ * `MenuSurface` (ui-primitives) paints the harness' own menu surface: the
+ * `--dsw-menu-surface-fill` tint (which `--dsw-specific-menu` aliases), the
+ * `backdrop-filter: var(--dsw-menu-backdrop-filter)` frost, the
+ * `--dsw-radius-lg` corner, and the opaque macOS backing that lets Chromium
+ * blur a transparent window. Re-declaring that recipe here — as this panel
+ * used to, minus the frost — is exactly what left it see-through: on the web
+ * the fill is only ~58% opaque, so with no blur behind it the composer rows
+ * showed straight through the dialog. Using the shell's own component also
+ * means a future retune of the material (tint, blur strength, corner, the
+ * desktop backing) reaches this panel with no change here.
+ */
+const MenuSurfacePrimitive = (primitives as Record<string, unknown>).MenuSurface as
+  | PanelSurfaceComponent
+  | undefined
+
+/**
+ * The material of chat's `stat-dialog.module.css` / the composer's
+ * `ContextMeter.module.css` panels, inlined for shells whose primitives
+ * predate `MenuSurface` (this package still typechecks against the 0.1.2
+ * line). Same three declarations those official panels carry.
+ */
+const PANEL_MATERIAL_FALLBACK: CSSProperties = {
+  background: 'var(--dsw-specific-menu)',
+  backdropFilter: 'var(--dsw-menu-backdrop-filter)',
+  borderRadius: 'var(--dsw-radius-lg)',
+}
+
+/** Plain-div stand-in for {@link MenuSurface} that carries the same material. */
+const PanelSurfaceFallback = forwardRef<HTMLDivElement, PanelSurfaceProps>(
+  function PanelSurfaceFallback({ style, children, ...rest }, ref) {
+    return (
+      <div {...rest} ref={ref} style={{ ...PANEL_MATERIAL_FALLBACK, ...style }}>
+        {children}
+      </div>
+    )
+  },
+)
+
+/** The popover surface: the shell's own when available, the stand-in otherwise. */
+const PanelSurface = (MenuSurfacePrimitive ?? PanelSurfaceFallback) as unknown as PanelSurfaceComponent
 
 /** Injected dependencies (slot `inject`, session-bound). */
 export interface SubscriptionUsageBadgeInjected {
@@ -349,7 +402,7 @@ export function SubscriptionUsageBadge(props: SubscriptionUsageBadgeProps) {
   )
 
   const dialog = open && createPortal(
-    <div
+    <PanelSurface
       ref={panelRef}
       role="dialog"
       aria-label={`${reading.name} 额度详情`}
@@ -358,78 +411,83 @@ export function SubscriptionUsageBadge(props: SubscriptionUsageBadgeProps) {
         ...(pos ?? MEASURE_STYLE),
       }}
     >
-      {/* Title row mirrors the official stat dialog: leading icon + label on
-          the left, value on the right, then a hairline rule. */}
-      <div style={styles.title}>
-        <span style={styles.titleLabel}>
-          <IconDataOutline size={14} />
-          {reading.name} 额度详情
-        </span>
-        <span style={styles.titleActions}>
-          <button
-            type="button"
-            style={styles.refreshBtn}
-            disabled={refreshing}
-            onClick={() => { void refresh(true) }}
-          >
-            {refreshing ? '刷新中…' : '刷新'}
-          </button>
-        </span>
-      </div>
-      <div style={styles.titleRule} aria-hidden="true" />
-
-      {/* One <dl> per account, exactly like the official `details` grid: label
-          column auto-sized, value column right-aligned tabular numerals. */}
-      {reading.accounts.map((acc, accIdx) => (
-        <div key={acc.key} style={accIdx > 0 ? styles.accountSection : undefined}>
-          {reading.accounts.length > 1 && (
-            <div style={styles.providerRow}>
-              <span style={styles.providerName}>
-                {acc.account}
-                {acc.isDefault && <span style={styles.currentTag}>默认</span>}
-              </span>
-              {acc.plan !== undefined && acc.plan !== '' && <span style={styles.providerMeta}>{acc.plan}</span>}
-            </div>
-          )}
-          <dl style={styles.details}>
-            {CREDIT_PROVIDERS.has(reading.provider) ? (
-              <>
-                <dt style={styles.dt}>剩余积分</dt>
-                <dd style={styles.dd}>{creditText(acc.remaining ?? 0)}</dd>
-                {acc.limit !== undefined && (
-                  <>
-                    <dt style={styles.dt}>总限额</dt>
-                    <dd style={styles.dd}>{creditText(acc.limit)}</dd>
-                  </>
-                )}
-              </>
-            ) : acc.windows.length === 0 ? (
-              acc.remaining !== undefined ? (
-                <>
-                  <dt style={styles.dt}>剩余额度</dt>
-                  <dd style={styles.dd}>{`${String(Math.round(acc.remaining))}%`}</dd>
-                </>
-              ) : (
-                <>
-                  <dt style={styles.dt}>额度状态</dt>
-                  <dd style={styles.dd}>正常</dd>
-                </>
-              )
-            ) : (
-              acc.windows.map((w, wIdx) => (
-                <Fragment key={wIdx}>
-                  <dt style={styles.dt}>{windowKindLabel(w)}</dt>
-                  <dd style={styles.dd}>
-                    {`剩余 ${String(Math.round(100 - Math.min(100, Math.max(0, w.usedPercent))))}%`}
-                    {resetLabel(w) !== '' && <span style={styles.reset}>{` · ${resetLabel(w)}`}</span>}
-                  </dd>
-                </Fragment>
-              ))
-            )}
-          </dl>
+      {/* The surface paints its material as a layer of its own, so the dialog
+          body scrolls inside a viewport instead of sliding out from under the
+          fill — the same split the shell's own menus use. */}
+      <div style={styles.viewport}>
+        {/* Title row mirrors the official stat dialog: leading icon + label on
+            the left, value on the right, then a hairline rule. */}
+        <div style={styles.title}>
+          <span style={styles.titleLabel}>
+            <IconDataOutline size={14} />
+            {reading.name} 额度详情
+          </span>
+          <span style={styles.titleActions}>
+            <button
+              type="button"
+              style={styles.refreshBtn}
+              disabled={refreshing}
+              onClick={() => { void refresh(true) }}
+            >
+              {refreshing ? '刷新中…' : '刷新'}
+            </button>
+          </span>
         </div>
-      ))}
-    </div>,
+        <div style={styles.titleRule} aria-hidden="true" />
+
+        {/* One <dl> per account, exactly like the official `details` grid:
+            label column auto-sized, value column right-aligned tabular numerals. */}
+        {reading.accounts.map((acc, accIdx) => (
+          <div key={acc.key} style={accIdx > 0 ? styles.accountSection : undefined}>
+            {reading.accounts.length > 1 && (
+              <div style={styles.providerRow}>
+                <span style={styles.providerName}>
+                  {acc.account}
+                  {acc.isDefault && <span style={styles.currentTag}>默认</span>}
+                </span>
+                {acc.plan !== undefined && acc.plan !== '' && <span style={styles.providerMeta}>{acc.plan}</span>}
+              </div>
+            )}
+            <dl style={styles.details}>
+              {CREDIT_PROVIDERS.has(reading.provider) ? (
+                <>
+                  <dt style={styles.dt}>剩余积分</dt>
+                  <dd style={styles.dd}>{creditText(acc.remaining ?? 0)}</dd>
+                  {acc.limit !== undefined && (
+                    <>
+                      <dt style={styles.dt}>总限额</dt>
+                      <dd style={styles.dd}>{creditText(acc.limit)}</dd>
+                    </>
+                  )}
+                </>
+              ) : acc.windows.length === 0 ? (
+                acc.remaining !== undefined ? (
+                  <>
+                    <dt style={styles.dt}>剩余额度</dt>
+                    <dd style={styles.dd}>{`${String(Math.round(acc.remaining))}%`}</dd>
+                  </>
+                ) : (
+                  <>
+                    <dt style={styles.dt}>额度状态</dt>
+                    <dd style={styles.dd}>正常</dd>
+                  </>
+                )
+              ) : (
+                acc.windows.map((w, wIdx) => (
+                  <Fragment key={wIdx}>
+                    <dt style={styles.dt}>{windowKindLabel(w)}</dt>
+                    <dd style={styles.dd}>
+                      {`剩余 ${String(Math.round(100 - Math.min(100, Math.max(0, w.usedPercent))))}%`}
+                      {resetLabel(w) !== '' && <span style={styles.reset}>{` · ${resetLabel(w)}`}</span>}
+                    </dd>
+                  </Fragment>
+                ))
+              )}
+            </dl>
+          </div>
+        ))}
+      </div>
+    </PanelSurface>,
     document.body,
   )
 
@@ -473,16 +531,16 @@ const styles: Record<string, CSSProperties> = {
     minWidth: 0,
     overflow: 'hidden',
   },
-  // Mirrors the harness stat-dialog panel EXACTLY (StatsPills StatDialog
-  // module): `border: 0` with the hairline coming from the elevation stroke
-  // token, 16px padding, 12px/18px type. A 1px CSS border reads visibly
-  // heavier than the official 0.5px box-shadow stroke, which is why this
-  // previously looked "thicker" than the built-in dialog.
+  // Dialog geometry only: the material — fill, frost, corner radius, the
+  // desktop backing — belongs to the shell's popover surface (see
+  // `PanelSurface`), and the hairline comes from the elevation stroke token
+  // rather than a 1px CSS border, which reads visibly heavier than the
+  // official 0.5px box-shadow stroke. Sizes and type mirror the official
+  // stat-dialog panel: 16px padding, 12px/18px type.
   panel: {
     position: 'fixed',
     zIndex: 1100,
     boxSizing: 'border-box',
-    background: 'var(--dsw-specific-menu)',
     // The stroke color the elevation token reads; the official panel sets it
     // on itself rather than inheriting the page's value.
     ['--dsw-elevation-stroke-color' as string]: 'var(--dsw-alias-border-l1)',
@@ -490,7 +548,6 @@ const styles: Record<string, CSSProperties> = {
     color: 'var(--dsw-alias-label-secondary)',
     cursor: 'default',
     border: 0,
-    borderRadius: 12,
     padding: 16,
     fontSize: 12,
     lineHeight: '18px',
@@ -498,6 +555,13 @@ const styles: Record<string, CSSProperties> = {
     minWidth: 'min(300px, 100vw - 24px)',
     maxWidth: 'min(440px, 100vw - 24px)',
     maxHeight: 'min(560px, 100dvh - 24px)',
+    display: 'flex',
+    flexDirection: 'column',
+  },
+  // The scrolling half of the panel: the material layer sits above it in the
+  // surface, so only the body scrolls.
+  viewport: {
+    minHeight: 0,
     overflowY: 'auto',
     overscrollBehavior: 'contain',
   },
