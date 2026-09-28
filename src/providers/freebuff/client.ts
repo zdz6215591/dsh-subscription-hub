@@ -56,6 +56,38 @@
  * tool-declaring turn is REFUSED on this wire rather than quietly downgraded to
  * a tool-less chat: {@link freebuffWebToolRefusal}.
  *
+ * ## Upstream-only tool calls are DROPPED, not relayed
+ *
+ * The web translator therefore does NOT surface an upstream `agent_tool` event as
+ * a harness tool call, even though that is exactly what the reference does with it
+ * (`src/web_protocol.rs:811-828` maps `toolCallId` to a stable `tool_calls` index,
+ * `:885-898` emits the delta, `arguments` hardcoded `{}` because upstream never
+ * streams them). Live 2026-09-28 on the real upstream, one turn carried FOUR of
+ * them — `tool-call` blocks named `web_search`, each `arguments:"{}"`, under
+ * `finish_reason: tool_calls`. Re-checks while making this change (same cookie
+ * credential, the zero-cost model) saw THIRTEEN in one turn — nine `web_search`
+ * plus four `read_url` — and TWENTY-SIX in the next, so four was nowhere near a
+ * ceiling: an upstream-only tool call on this wire is normal, not an edge case.
+ *
+ * Those calls are FREEBUFF's OWN server-side tools. The upstream already ran them;
+ * nothing in the exchange asks this client to run anything. The reference relays
+ * them because of WHO ITS CONSUMER IS: its own clients asked for an OpenAI
+ * `tool_calls` delta so their generic loops could see — and decide what to do
+ * about — the upstream's internal activity. DSH is a different consumer, and
+ * there the faithful mapping is the harm: DSH sees a tool call it has no handler
+ * for, tries to execute it, and the turn breaks. The mismatch is worse here than
+ * in general, because this route declares NO tools to anyone (the body has no
+ * `tools` field) and refuses a tool-declaring turn up front
+ * ({@link freebuffWebToolRefusal}) — an upstream-only tool call is therefore the
+ * ONLY way a tool call could ever reach DSH from this wire, and it is always one
+ * the harness cannot run.
+ *
+ * So the call is dropped ({@link freebuffWebToChatCompletions}), recorded ONCE
+ * per stream through the translator's `onWarn` so the user can see that upstream
+ * used its own tools. Answer text around it still streams, and an upstream
+ * `tool_calls` finish becomes a normal completion: the harness must never be left
+ * dangling, waiting for a tool result nobody is going to send.
+ *
  * ## Errors are TEXT first, status second
  *
  * codebuff answers refusals inside an HTTP 200 body — as a bare text code
@@ -468,10 +500,11 @@ export interface FreebuffWebBodyInput {
  *
  * There is deliberately no `tools` key here, and there must not be one: the wire
  * has no channel for caller-declared tools (see the module doc, and the live
- * check recorded there that upstream ignores one bolted on anyway). Tool usage
- * on this wire is upstream-side and only observable on the way down. A caller
- * that declares tools is refused before this body is built
- * ({@link freebuffWebToolRefusal}).
+ * check recorded there that upstream ignores one bolted on anyway). Tool usage on
+ * this wire is upstream-side — Freebuff runs its OWN tools and the calls it emits
+ * for them are dropped with a one-per-stream warning, never forwarded as harness
+ * tool calls (module doc). A caller that declares tools is refused before this
+ * body is built ({@link freebuffWebToolRefusal}).
  *
  * The effort rides as `reasoningEffort` because that is the web protocol's own
  * spelling of the field. The reference's bridge sends `null` there
@@ -1054,6 +1087,12 @@ export interface FreebuffWebTranslatorOptions {
   onActivity?: () => void
   /** Called when an event names the upstream thread, for a caller that reuses it. */
   onThread?: (threadId: string) => void
+  /**
+   * Called ONCE per stream when upstream fires a tool call of its OWN, which this
+   * translator drops (module doc). Never called per event: one turn can carry
+   * several such calls, and they are the same fact about the same turn.
+   */
+  onWarn?: (message: string) => void
 }
 
 /**
@@ -1061,7 +1100,8 @@ export interface FreebuffWebTranslatorOptions {
  *
  * This is the ONE parser this route owns. The reference does exactly this
  * conversion in `StreamEncoder::encode_block` (`src/web_protocol.rs:843-930`) and
- * its event→chunk mapping is ported here field for field:
+ * its event→chunk mapping is ported here field for field, with ONE deliberate
+ * exception:
  *
  *   - `delta.text` → `delta.content`;
  *   - `agent_delta.text` → `delta.content` TOO, not dropped: the reference's
@@ -1070,25 +1110,27 @@ export interface FreebuffWebTranslatorOptions {
  *     the model's answer;
  *   - `reasoning_delta.text` → `delta.reasoning_content`, emitted BEFORE the
  *     content chunks of the same event block (`src/web_protocol.rs:906-918`);
- *   - `agent_tool` → one `tool_calls` delta with a stable index per
- *     `toolCallId` (`call_<id>`, or `call_anon_<n>` when upstream sends none) —
- *     `src/web_protocol.rs:811-828`;
- *   - `done` → a terminal chunk whose `finish_reason` is `tool_calls` when any
- *     tool fired and `stop` otherwise, then the `[DONE]` sentinel
- *     (`src/web_protocol.rs:830-841`, `:925-928`);
+ *   - `agent_tool` → NOTHING on the wire. It is a call Freebuff ran on its own
+ *     side, and the harness cannot run it — the whole case is in the module doc,
+ *     and the warning it raises is the only trace it leaves;
+ *   - `done` → a terminal chunk whose `finish_reason` is ALWAYS `stop`, then the
+ *     `[DONE]` sentinel (`src/web_protocol.rs:830-841`, `:925-928`). The
+ *     reference finishes `tool_calls` when any tool fired; that reason is what
+ *     tells a client to go run something and come back, which is precisely the
+ *     dangling state this route must not create (module doc);
  *   - `meta`/`title` → the thread id, and nothing on the wire;
  *   - `suggestions`, `button`, `agent_start`, `agent_finish`, `agent_tool_done`
  *     and unknown types → ignored, like the reference's `_ => {}` arm.
  *
- * Two deliberate divergences, both because the hub's translator has no channel
- * they would fit in:
+ * Two further divergences, both because the hub's translator has no channel they
+ * would fit in:
  *   - an in-band `{"error": …}` envelope ERRORS the stream with the upstream's
  *     own words. The reference merely records it in a side slot
  *     (`src/web_protocol.rs:859-874`) because its own bridge forwards raw events;
  *   - an upstream EOF WITHOUT `done` still emits the terminal chunk, which the
  *     reference also does (`src/web_protocol.rs:454-461`) — that one is a port.
  * @param stream - the upstream body stream.
- * @param options - label, activity pulse, thread sink.
+ * @param options - label, activity pulse, thread sink, dropped-tool warning sink.
  * @returns a stream carrying OpenAI chat-completions SSE.
  */
 export function freebuffWebToChatCompletions(
@@ -1097,10 +1139,10 @@ export function freebuffWebToChatCompletions(
 ): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder()
   const encoder = new TextEncoder()
-  const toolIndexes = new Map<string, number>()
-  const state = { buffer: '', nextToolIndex: 0, hasToolCalls: false, finished: false }
-  const finishChunk = (): string =>
-    freebuffChunk({}, state.hasToolCalls ? 'tool_calls' : 'stop') + 'data: [DONE]\n\n'
+  const state: FreebuffWebState = { buffer: '', finished: false, droppedUpstreamTool: false }
+  // The finish is ALWAYS a normal completion, even when upstream said
+  // `tool_calls`: see the module doc for why that reason must not reach DSH here.
+  const finishChunk = (): string => freebuffChunk({}, 'stop') + 'data: [DONE]\n\n'
   return stream.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       options.onActivity?.()
@@ -1110,7 +1152,7 @@ export function freebuffWebToChatCompletions(
         if (boundary === -1) break
         const block = state.buffer.slice(0, boundary)
         state.buffer = state.buffer.slice(boundary)
-        const translated = freebuffTranslateEventBlock(block, state, toolIndexes, options)
+        const translated = freebuffTranslateEventBlock(block, state, options)
         if (translated.error !== undefined) {
           controller.error(translated.error)
           return
@@ -1128,6 +1170,16 @@ export function freebuffWebToChatCompletions(
   }))
 }
 
+/** Translator state for ONE upstream stream. */
+interface FreebuffWebState {
+  /** Bytes received but not yet a complete SSE event block. */
+  buffer: string
+  /** Whether the upstream's own `done` event was seen. */
+  finished: boolean
+  /** Whether the dropped-upstream-tool warning was already emitted. */
+  droppedUpstreamTool: boolean
+}
+
 /** The offset just past the first SSE event boundary, or -1. */
 function freebuffEventBoundary(buffer: string): number {
   const lf = buffer.indexOf('\n\n')
@@ -1140,13 +1192,11 @@ function freebuffEventBoundary(buffer: string): number {
 /** One event block → OpenAI chunk text (plus an error, when one is in band). */
 function freebuffTranslateEventBlock(
   block: string,
-  state: { nextToolIndex: number, hasToolCalls: boolean },
-  toolIndexes: Map<string, number>,
+  state: FreebuffWebState,
   options: FreebuffWebTranslatorOptions,
 ): { text: string, done: boolean, error?: LlmError } {
   const reasoning: string[] = []
   const content: string[] = []
-  const tools: Record<string, unknown>[] = []
   let done = false
   for (const line of block.split(/\r?\n/)) {
     const trimmed = line.trim()
@@ -1184,17 +1234,23 @@ function freebuffTranslateEventBlock(
         break
       }
       case 'agent_tool': {
+        // Freebuff's OWN server-side tool call: the upstream already ran it, and
+        // nothing here asks this client to run anything. Faithfully translated
+        // (the reference's `tool_slot`/`encode_block`, `src/web_protocol.rs:811-828`,
+        // `:885-898`), it becomes a harness `tool-call` block for a tool this
+        // route never declared and the harness has no handler for — which breaks
+        // the turn. Dropped instead, and reported ONCE per stream: the module doc
+        // carries the live evidence (four `web_search` calls in one turn,
+        // `arguments:"{}"`, `finish_reason: tool_calls`) and why the reference's
+        // mapping serves a different consumer.
         const name = freebuffFirstString(event.toolName)
         if (name === undefined) break
-        const rawId = freebuffFirstString(event.toolCallId) ?? `anon_${String(state.nextToolIndex)}`
-        let index = toolIndexes.get(rawId)
-        if (index === undefined) {
-          index = state.nextToolIndex
-          toolIndexes.set(rawId, index)
-          state.nextToolIndex += 1
+        if (!state.droppedUpstreamTool) {
+          state.droppedUpstreamTool = true
+          options.onWarn?.(
+            `freebuff: upstream ran its own tool "${name}"; this route does not forward upstream-only tool calls`,
+          )
         }
-        state.hasToolCalls = true
-        tools.push({ index, id: `call_${rawId}`, type: 'function', function: { name, arguments: '{}' } })
         break
       }
       case 'meta':
@@ -1215,7 +1271,8 @@ function freebuffTranslateEventBlock(
   let text = ''
   for (const value of reasoning) text += freebuffChunk({ reasoning_content: value }, null)
   for (const value of content) text += freebuffChunk({ content: value }, null)
-  for (const value of tools) text += freebuffChunk({ tool_calls: [value] }, null)
-  if (done) text += freebuffChunk({}, state.hasToolCalls ? 'tool_calls' : 'stop') + 'data: [DONE]\n\n'
+  // Never `tool_calls`, whatever upstream's own finish reason was: the harness
+  // must not be told to wait for a tool result on this wire (module doc).
+  if (done) text += freebuffChunk({}, 'stop') + 'data: [DONE]\n\n'
   return { text, done }
 }

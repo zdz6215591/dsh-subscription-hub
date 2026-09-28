@@ -605,15 +605,41 @@ test('freebuff web: the event vocabulary is the reference enum', () => {
   ])
 })
 
-test('freebuff web: the eleven events translate into OpenAI chat chunks', async () => {
+/** One chunk of a translated web stream, as the choices of a chat-completions chunk. */
+interface TranslatedChoice {
+  index: number
+  delta: Record<string, unknown>
+  finish_reason: string | null
+}
+
+/** The choices a translated web stream carried, in order. */
+function translatedChunks(text: string): TranslatedChoice[] {
+  return text.split('\n\n')
+    .filter(line => line.startsWith('data:') && line !== 'data: [DONE]')
+    .map(line => JSON.parse(line.slice('data:'.length).trim()) as { choices: TranslatedChoice[] })
+    .map(chunk => chunk.choices[0] as TranslatedChoice)
+}
+
+/** The upstream event field shape of one of Freebuff's own server-side tool calls. */
+function upstreamToolEvent(id: string, name: string): string {
+  return `data: ${JSON.stringify({ type: 'agent_tool', agentId: 'a1', toolCallId: id, toolName: name, label: 'searching' })}\n\n`
+}
+
+/** The once-per-stream warning a dropped upstream-only tool call produces. */
+const UPSTREAM_TOOL_WARNING =
+  'freebuff: upstream ran its own tool "web_search"; this route does not forward upstream-only tool calls'
+
+test('freebuff web: the upstream events translate into OpenAI chat chunks', async () => {
   const sse = [
     'data: {"type":"meta","threadId":"thread-1","model":"z-ai/glm-5.3-flash","accessTier":"free"}\n\n',
     'data: {"type":"reasoning_delta","text":"thinking"}\n\n',
     'data: {"type":"delta","text":"Hello"}\n\n',
-    'data: {"type":"agent_tool","toolCallId":"t1","toolName":"bash","label":"ls"}\n\n',
+    'data: {"type":"agent_start","agentId":"a1","agentType":"researcher","name":"researcher","prompt":"p"}\n\n',
     'data: {"type":"agent_delta","agentId":"a1","text":" world"}\n\n',
-    'data: {"type":"agent_tool","toolCallId":"t1","toolName":"bash","label":"ls"}\n\n',
-    'data: {"type":"suggestions","followups":[{"prompt":"p","label":"l"}]}\n\n',
+    'data: {"type":"agent_tool_done","toolCallId":"t1"}\n\n',
+    'data: {"type":"suggestions","toolCallId":"t1","followups":[{"prompt":"p","label":"l"}]}\n\n',
+    'data: {"type":"button"}\n\n',
+    'data: {"type":"agent_finish","agentId":"a1"}\n\n',
     'data: {"type":"done"}\n\n',
   ].join('')
   const threads: string[] = []
@@ -622,25 +648,76 @@ test('freebuff web: the eleven events translate into OpenAI chat chunks', async 
     onThread: id => threads.push(id),
   })
   const text = await new Response(translated).text()
-  const chunks = text.split('\n\n').filter(line => line.startsWith('data:') && line !== 'data: [DONE]')
-    .map(line => JSON.parse(line.slice('data:'.length).trim()) as { choices: { delta: Record<string, unknown>, finish_reason: string | null }[] })
+  const chunks = translatedChunks(text)
   assert.deepEqual(threads, ['thread-1'])
-  // Chunks come out in the reference's per-event order: reasoning, then content,
-  // then tool calls — and a tool-call delta appears where its own event sat.
-  const deltas = chunks.map(chunk => chunk.choices[0]?.delta).filter(delta => Object.keys(delta ?? {}).length > 0)
+  // Chunks come out in the reference's per-event order — reasoning, then content
+  // — and every event the reference ignores produces nothing at all.
+  const deltas = chunks.map(chunk => chunk.delta).filter(delta => Object.keys(delta).length > 0)
   assert.deepEqual(deltas, [
     { reasoning_content: 'thinking' },
     { content: 'Hello' },
-    { tool_calls: [{ index: 0, id: 'call_t1', type: 'function', function: { name: 'bash', arguments: '{}' } }] },
     // `agent_delta` carries tool-produced prose and must reach content, not be
     // dropped; its leading space is content, not padding.
     { content: ' world' },
-    // The same toolCallId reuses its index instead of consuming a new one.
-    { tool_calls: [{ index: 0, id: 'call_t1', type: 'function', function: { name: 'bash', arguments: '{}' } }] },
   ])
-  const finish = chunks.at(-1)?.choices[0]?.finish_reason
-  assert.equal(finish, 'tool_calls', 'a turn that fired tools finishes as tool_calls')
+  assert.equal(chunks.at(-1)?.finish_reason, 'stop')
   assert.equal(text.endsWith('data: [DONE]\n\n'), true)
+})
+
+test('freebuff web: an upstream-only tool call never becomes a harness tool call', async () => {
+  // The LIVE shape (2026-09-28): four of Freebuff's OWN server-side `web_search`
+  // calls inside one turn, `arguments:"{}"` because upstream never streams them,
+  // around the answer text — the turn upstream would have us finish `tool_calls`.
+  // Those blocks are what made DSH try to run a tool it has no handler for.
+  const warnings: string[] = []
+  const sse = [
+    'data: {"type":"meta","threadId":"t-live"}\n\n',
+    upstreamToolEvent('53r53sozGTI', 'web_search'),
+    'data: {"type":"delta","text":"The date is"}\n\n',
+    upstreamToolEvent('53sB45Py0FM', 'web_search'),
+    upstreamToolEvent('53sLKSLm0S4', 'web_search'),
+    'data: {"type":"delta","text":" today."}\n\n',
+    upstreamToolEvent('53sRinCshao', 'web_search'),
+    'data: {"type":"done"}\n\n',
+  ].join('')
+  const text = await new Response(freebuffWebToChatCompletions(
+    new Response(sse).body as ReadableStream<Uint8Array>,
+    { label: 'freebuff web', onWarn: message => warnings.push(message) },
+  )).text()
+  const chunks = translatedChunks(text)
+  assert.equal(text.includes('tool_calls'), false, 'no tool-call delta may reach the harness')
+  assert.equal(text.includes('call_53r53sozGTI'), false, 'not even the id')
+  // The answer still streams, in order and intact.
+  const deltas = chunks.map(chunk => chunk.delta).filter(delta => Object.keys(delta).length > 0)
+  assert.deepEqual(deltas, [{ content: 'The date is' }, { content: ' today.' }])
+  assert.equal(chunks.at(-1)?.finish_reason, 'stop', 'a normal completion, not a harness tool-call finish')
+  assert.equal(text.endsWith('data: [DONE]\n\n'), true)
+  assert.deepEqual(warnings, [UPSTREAM_TOOL_WARNING], 'exactly ONE warning for four upstream tool calls')
+})
+
+test('freebuff web: a turn of nothing but upstream tool events still finishes cleanly', async () => {
+  // The whole turn is Freebuff's own server-side work: no text delta at all. What
+  // must NOT happen is a `tool-call` block (dangling forever, waiting for a result
+  // nobody sends) or a `tool_calls` finish telling the harness to go run one.
+  const warnings: string[] = []
+  const sse = [
+    'data: {"type":"meta","threadId":"t-only"}\n\n',
+    upstreamToolEvent('53r53sozGTI', 'web_search'),
+    upstreamToolEvent('53sB45Py0FM', 'web_search'),
+    'data: {"type":"done"}\n\n',
+  ].join('')
+  const text = await new Response(freebuffWebToChatCompletions(
+    new Response(sse).body as ReadableStream<Uint8Array>,
+    { label: 'freebuff web', onWarn: message => warnings.push(message) },
+  )).text()
+  // Exactly one choice reaches the wire: the terminal chunk, then the sentinel.
+  // (One layer up, `streamChatCompletions` maps a completed answer with NO content
+  // at all to its own `EMPTY_RESPONSE` finish — harness-wide behaviour for an
+  // empty answer, not a dangling tool call. This route's part is the normal `stop`
+  // chunk asserted here, and the adapter-level test below covers the text case.)
+  assert.deepEqual(translatedChunks(text), [{ index: 0, delta: {}, finish_reason: 'stop' }])
+  assert.equal(text.endsWith('data: [DONE]\n\n'), true)
+  assert.deepEqual(warnings, [UPSTREAM_TOOL_WARNING])
 })
 
 test('freebuff web: an upstream EOF without done still terminates the stream', async () => {
@@ -958,6 +1035,44 @@ test('freebuff adapter: a cookie session streams through the web protocol', asyn
   const text = chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join('')
   assert.equal(text, 'from the web')
   assert.deepEqual(urls, [`${FREEBUFF_WEB_BASE}${FREEBUFF_WEB_CHAT_PATH}`])
+})
+
+test('freebuff adapter: upstream-only tool calls never reach the harness', async () => {
+  // The end-to-end shape of the reported breakage: the web wire tells the harness
+  // Freebuff ran `web_search`, the harness tries to run a tool it never declared
+  // (and has no handler for), and the turn breaks. Nothing may reach it.
+  const sessions = new Map<string, FreebuffSession>([['cookie-account', {
+    accessToken: 'sess-value-123456',
+    refreshToken: 'sess-value-123456',
+    expiresAt: Date.now() + 3_600_000,
+    cookie: `${FREEBUFF_SESSION_COOKIE}=sess-value-123456`,
+  }]])
+  const warnings: string[] = []
+  const adapter = new FreebuffAdapter({
+    models: [],
+    streamIdleTimeoutMs: 5_000,
+    tokens: tokensOf(sessions),
+    discovery: false,
+    onWarn: message => warnings.push(message),
+    fetchFn: async () => new Response([
+      'data: {"type":"meta","threadId":"t-live"}\n\n',
+      upstreamToolEvent('53r53sozGTI', 'web_search'),
+      'data: {"type":"delta","text":"The date is"}\n\n',
+      upstreamToolEvent('53sB45Py0FM', 'web_search'),
+      'data: {"type":"delta","text":" today."}\n\n',
+      'data: {"type":"done"}\n\n',
+    ].join(''), { status: 200 }),
+  })
+  const chunks = await collect(adapter.streamAccount(generateOptions('z-ai/glm-5.3-flash'), 'cookie-account'))
+  const text = chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join('')
+  assert.equal(text, 'The date is today.', 'the answer text is intact')
+  assert.equal(chunks.some(chunk => chunk.type === 'tool-call-delta'), false)
+  const blocks = chunks.filter(chunk => chunk.type === 'block-end').map(chunk => chunk.block)
+  assert.equal(blocks.some(block => block.type === 'tool-call'), false, 'no tool-call block, so nothing dangles')
+  // The turn ends with a finish of its own, and it is NOT the harness's
+  // `tool-calls` reason — that is what would leave DSH waiting for a result.
+  assert.deepEqual(chunks.filter(chunk => chunk.type === 'finish').map(chunk => chunk.reason), [{ kind: 'stop' }])
+  assert.deepEqual(warnings, [UPSTREAM_TOOL_WARNING])
 })
 
 test('freebuff adapter: the web protocol refuses an image rather than dropping it', async () => {

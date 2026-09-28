@@ -38,8 +38,11 @@
  * forwards it, `src/api.rs:2707-2708`), so the Bearer path is the tool-capable
  * one. The web body has no `tools` field at all and no tool-turn encoding — it is
  * one flat prompt string (`src/web_protocol.rs:380-388`,
- * `src/web_threads.rs:176-254`) whose only tool vocabulary runs DOWNSTREAM
- * (upstream `agent_tool` → OpenAI `tool_calls`, `src/web_protocol.rs:811-828`).
+ * `src/web_threads.rs:176-254`). Its only tool vocabulary is FREEBUFF'S OWN
+ * server-side activity: upstream `agent_tool` events are calls the upstream
+ * already ran on its side, and they are DROPPED (with one warning per stream)
+ * rather than relayed as harness tool calls, because DSH has no handler to run
+ * them with — evidence and reasoning in `freebuff/client.ts`'s module doc.
  * A tool-declaring turn on the web wire is therefore REFUSED
  * ({@link freebuffWebToolRefusal}) rather than downgraded to a tool-less chat,
  * which is the defect this route was reported for: the harness's local tools
@@ -295,7 +298,14 @@ export class FreebuffAdapter extends LlmAdapter {
       // empty stream surface as a truncated one.
       const guarded = freebuffGuardStream(response.body, { label, status: response.status, onActivity: watchdog.pulse })
       const stream = wire === 'web'
-        ? freebuffWebToChatCompletions(guarded, { label, onActivity: watchdog.pulse })
+        ? freebuffWebToChatCompletions(guarded, {
+          label,
+          onActivity: watchdog.pulse,
+          // Freebuff's own server-side tool calls are dropped by the translator
+          // instead of becoming harness tool calls the harness cannot run; this
+          // sink is the only trace they leave, and it fires once per stream.
+          ...this.options.onWarn === undefined ? {} : { onWarn: this.options.onWarn },
+        })
         : guarded
       yield* streamChatCompletions(stream, watchdog.pulse)
     } catch (error) {
