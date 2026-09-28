@@ -2998,6 +2998,9 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                       )}
                       {id === 'joycode' && (
                         <>
+                          <button type="button" style={styles.buttonSmall} onClick={() => { void login(id, 'oauth') }}>
+                            {t('joyCodeBrowserLogin')}
+                          </button>
                           <button type="button" style={styles.buttonSmall} onClick={() => { void login(id, 'import') }}>
                             {t('importJoyCode')}
                           </button>

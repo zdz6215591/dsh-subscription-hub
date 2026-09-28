@@ -190,11 +190,14 @@ import {
 } from './providers/trae/index.js'
 import type { TraeImportFailure } from './providers/trae/index.js'
 import { JoyCodeAdapter } from './providers/joycode.js'
+import type { JoyCodeBrowserLogin } from './providers/joycode/login.js'
+import { startJoyCodeBrowserLogin } from './providers/joycode/login.js'
 import {
   importJoyCodeIde,
   isJoyCodePermanentRefreshError,
   joyCodeImportFailureMessage,
   joyCodeNotSignedInError,
+  joyCodeSessionFromCallback,
   joyCodeSessionFromPaste,
   refreshJoyCodeSession,
 } from './providers/joycode-session.js'
@@ -487,6 +490,15 @@ export class SubscriptionsAuthController implements AuthController {
    */
   private claims = new Map<ProviderId, number>()
 
+  /**
+   * JoyCode's browser-login attempts, keyed by provider.
+   *
+   * The flow is a local callback listener rather than a code the user pastes, so
+   * the controller has to hold the attempt to close it: cancelling, logging out,
+   * or starting a second attempt must free the bound port first.
+   */
+  private readonly joyCodeLogins = new Map<ProviderId, JoyCodeBrowserLogin>()
+
   constructor(
     private readonly flows: OAuthFlowManager,
     /** Device-flow attempts (copilot); polled in the background like the loopback flows. */
@@ -647,19 +659,35 @@ export class SubscriptionsAuthController implements AuthController {
       return { authorizeUrl: '' }
     }
     if (provider === 'joycode') {
-      // JoyCode signs in inside its own IDE; the only thing this plugin can do
-      // unaided is read the credential that IDE already stored. A machine
-      // without the IDE uses the paste field, and the error names the paths this
-      // machine actually probed so "not signed in" is diagnosable.
-      const imported = await importJoyCodeIde({ fetchFn: proxiedFetch })
-      if (imported.session === undefined) {
-        this.lastError.set('joycode', joyCodeImportFailureMessage(imported.probed))
-        throw joyCodeNotSignedInError(imported.probed)
+      // Two ways in, and the method decides which. The default is the product's
+      // own browser/QR login: the JoyCode page (which shows the JD-app QR)
+      // authorizes and then calls back a local port with a ptKey, so one click
+      // and one scan is the whole flow. `import` reads the credential a local
+      // JoyCode IDE already stored, for a desktop that is signed in.
+      //
+      // The raw JD QR endpoint is deliberately NOT implemented: the reference's
+      // own postmortem records that JD stopped returning pt_key through
+      // Set-Cookie on that flow (14 cookies, no pt_key), which is why that
+      // project replaced it with exactly this page-driven login.
+      if (method === 'import') {
+        const imported = await importJoyCodeIde({ fetchFn: proxiedFetch })
+        if (imported.session === undefined) {
+          this.lastError.set('joycode', joyCodeImportFailureMessage(imported.probed))
+          throw joyCodeNotSignedInError(imported.probed)
+        }
+        await this.persist('joycode', imported.session)
+        this.lastError.delete('joycode')
+        this.onAuthChanged('joycode', accountKeyOf('joycode', imported.session))
+        return { authorizeUrl: '' }
       }
-      await this.persist('joycode', imported.session)
-      this.lastError.delete('joycode')
-      this.onAuthChanged('joycode', accountKeyOf('joycode', imported.session))
-      return { authorizeUrl: '' }
+      // One attempt per provider: a second click must not leave the first
+      // listener bound and waiting, and the older attempt's callback would
+      // otherwise be indistinguishable from the newer one's.
+      this.joyCodeLogins.get(provider)?.close()
+      const login = await startJoyCodeBrowserLogin()
+      this.joyCodeLogins.set(provider, login)
+      this.completions.set(provider, this.completeJoyCode(login, this.claim(provider)))
+      return { authorizeUrl: login.authorizeUrl }
     }
     if (provider === 'cline') {
       // Cline has no OAuth grant and no device flow: its only login is a pasted
@@ -737,6 +765,25 @@ export class SubscriptionsAuthController implements AuthController {
       }
     } finally {
       this.finalizing.delete(provider)
+    }
+  }
+
+  private async completeJoyCode(login: JoyCodeBrowserLogin, claim: number): Promise<void> {
+    try {
+      const session = await joyCodeSessionFromCallback(await login.callback, proxiedFetch)
+      if (this.claims.get('joycode') !== claim) return
+      await this.persist('joycode', session)
+      this.lastError.delete('joycode')
+      this.onAuthChanged('joycode', accountKeyOf('joycode', session))
+    } catch (error) {
+      // The claim check keeps an abandoned attempt from reporting an error over
+      // a login that has since succeeded — including the close() that a second
+      // click performs on this attempt.
+      if (this.claims.get('joycode') !== claim) return
+      this.lastError.set('joycode', errorChain(error))
+    } finally {
+      this.joyCodeLogins.delete('joycode')
+      login.close()
     }
   }
 
@@ -869,6 +916,7 @@ export class SubscriptionsAuthController implements AuthController {
     this.claim(provider)
     this.flows.pending(provider)?.cancel()
     this.deviceFlows.pending(provider)?.cancel()
+    this.joyCodeLogins.get(provider)?.close()
     return Promise.resolve()
   }
 
@@ -876,6 +924,7 @@ export class SubscriptionsAuthController implements AuthController {
     this.claim(provider)
     this.flows.pending(provider)?.cancel()
     this.deviceFlows.pending(provider)?.cancel()
+    this.joyCodeLogins.get(provider)?.close()
     await deleteAccountSession(provider, account)
     this.lastError.delete(provider)
     this.onAuthChanged(provider, account)

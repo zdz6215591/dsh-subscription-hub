@@ -216,16 +216,35 @@ Zed 没有第三方 OAuth 客户端。先在 Zed 应用里登录，然后：
 JoyCode 是 IDE 优先的产品，它的私有接口没有公开文档。本仓库按协议**直接**调用京东网关
 （不需要本机跑 JoyCode 进程，所以 Linux / 服务器也能用）。
 
-### 登录：两条路
+### 登录：三条路
 
+- **浏览器登录（扫码）**——点按钮打开 JoyCode 自己的登录页（页面上就是京东 App 扫码），
+  授权后该页会**自动回调本机端口**把凭据交回来：
+
+  ```
+  https://joycode.jd.com/login/?ideAppName=JoyCode&fromIde=ide&redirect=0&authPort=<本机端口>&authKey=<一次性 key>
+                    ↓ 用户在该页扫码授权
+  http://127.0.0.1:<本机端口>/api/oauth-callback?pt_key=…&login_type=…&tenant=…&authKey=…
+  ```
+
+  这就是 JoyCode IDE 自己用的登录机制。回调只在**本机**可达；如果浏览器在另一台机器上
+  （DSH 跑在远程服务器），把回调页地址栏里的 URL 复制粘贴到插件的粘贴框同样有效——
+  DSH 会把 `pt_key` 取出来并校验。`authKey` 一次一用：另一次登录的回调会被拒绝，不会串号。
 - **从 JoyCode IDE 导入**（桌面端）——读取该 IDE 已保存的凭据：
   `…/JoyCode/User/globalStorage/state.vscdb` 里 `ItemTable` 表的 `JoyCoder.IDE` 键。
   以**只读**方式打开，不影响正在运行的 IDE；macOS / Linux / Windows 路径、容器挂载点
   `/root/.joycode-ide/state.vscdb` 与 `JOYCODE_STATE_DB` 覆盖都会依次尝试，导入失败时会把
   「查过哪些路径」一并报出来。
-- **粘贴 ptKey**（没有装 IDE 的机器）——写成一行 `ptkey: … userid: …`，或直接粘贴上面那个键的 JSON 内容。
+- **粘贴 ptKey**（无头机器）——写 `ptkey: … userid: …`、只写 `ptKey`（数字 user id 由接口返回）、
+  或直接粘贴上面那个键的 JSON 内容。
 
-两条路都会先请求一次 `userInfo` 校验，**只有上游接受才落盘**；而该接口会在响应里
+> **为什么不做「插件内自己画二维码」那条裸 JD 扫码**：参考项目自己的复盘文档
+> （`docs/superpowers/plans/2026-05-03-qr-login-redirect-to-auto-login.md`）记录 JD 的
+> `qrCodeTicketValidation` **已不再通过 Set-Cookie 返回 `pt_key`**（cookie jar 有 14 个 cookie
+> 却没有 pt_key），并因此把裸扫码替换成上面这条「打开登录页授权」的路。所以这里实现的是
+> 那条**能真正拿到凭据**的扫码路径（扫码发生在 JoyCode 登录页上，体验一致）。
+
+三条路最终都会请求一次 `userInfo` 校验，**只有上游接受才落盘**；而该接口会在响应里
 **轮换新的 ptKey**，所以本路由按参考项目的小时级节奏定期重新校验——既保活，也把轮换后的新 key 存回。
 
 ### 三条线上路径，按模型自动分流

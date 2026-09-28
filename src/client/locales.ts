@@ -163,11 +163,12 @@ export const en = {
   importCommandCode: 'Import from Command Code CLI',
   importTrae: 'Import from Trae',
   importJoyCode: 'Import from JoyCode IDE',
+  joyCodeBrowserLogin: 'Sign in with browser (QR)',
   joyCodePasteHint:
-    'JoyCode signs in inside its own IDE, so one-click import reads the credential that IDE stored (state.vscdb). '
-    + 'On a machine without JoyCode, paste the ptKey AND the numeric user id — as "ptkey: … userid: …" on one line, '
-    + 'or as the JSON document the IDE keeps under the JoyCoder.IDE key.',
-  joyCodePastePlaceholder: 'ptkey: … userid: …',
+    'JoyCode signs in on its own page: the browser button opens it, you authorize (scan with the JD app), and the credential returns here by itself. '
+    + 'The import button instead reads what a locally signed-in JoyCode IDE stored (state.vscdb). '
+    + 'If the browser cannot reach this machine, copy the callback page\'s address and paste it here — or paste the ptKey; the numeric user id is optional, since the API reports it.',
+  joyCodePastePlaceholder: 'ptkey: … userid: … / callback URL',
   traeHint: 'Reads the sign-in already present in your local Trae installs (TRAE SOLO CN and the Trae CN IDE) — no token paste needed. Sign in inside the Trae app first; reading is read-only.',
   commandCodePasteHint: 'Paste a Command Code API key (user_…), or ~/.commandcode/auth.json.',
   visibilityTitle: 'Visible models',
@@ -383,11 +384,13 @@ export const zh = {
   importCommandCode: '从 Command Code CLI 导入',
   importTrae: '从 Trae 导入',
   importJoyCode: '从 JoyCode IDE 导入',
+  joyCodeBrowserLogin: '浏览器登录（扫码）',
   joyCodePasteHint:
-    'JoyCode 只能在它自己的 IDE 里登录，所以「一键导入」读取的是该 IDE 已保存的凭据（state.vscdb）。'
-    + '本机没装 JoyCode 时，请改为粘贴 ptKey 和数字 user id——写成一行「ptkey: … userid: …」，'
-    + '或直接粘贴 IDE 中 JoyCoder.IDE 键对应的 JSON 内容。',
-  joyCodePastePlaceholder: 'ptkey: … userid: …',
+    'JoyCode 在它自己的登录页上授权：点「浏览器登录」打开该页，用京东 App 扫码授权后凭据会自动回到这里。'
+    + '「导入」按钮则读取本机已登录的 JoyCode IDE 保存的凭据（state.vscdb）。'
+    + '若浏览器访问不到本机（例如 DSH 跑在远程服务器），把回调页地址栏里的 URL 复制粘贴到这里即可；'
+    + '也可以只粘贴 ptKey——数字 user id 可不填，接口会返回。',
+  joyCodePastePlaceholder: 'ptkey: … userid: … / 回调 URL',
   traeHint: '直接读取本机已登录的 Trae（TRAE SOLO CN / Trae CN IDE），无需粘贴 Token。请先在 Trae 客户端完成登录；读取为只读操作。',
   commandCodePasteHint: '粘贴 Command Code API key（user_…），或 ~/.commandcode/auth.json 内容。',
   visibilityTitle: '显示的模型',

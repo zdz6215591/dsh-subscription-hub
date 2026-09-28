@@ -295,18 +295,39 @@ JoyCode is an IDE-first product whose private API has no public documentation. T
 hub speaks it **directly** against JD's gateway — no local JoyCode process is
 involved, which is what makes the route usable on a server.
 
-### Two ways to sign in
+### Three ways to sign in
 
+- **Browser / QR sign-in** — the button opens JoyCode's own login page (which shows the
+  JD-app QR), and that page hands the credential back to a **local port** automatically:
+
+  ```
+  https://joycode.jd.com/login/?ideAppName=JoyCode&fromIde=ide&redirect=0&authPort=<local port>&authKey=<one-time key>
+                    ↓  user scans / authorizes on that page
+  http://127.0.0.1:<local port>/api/oauth-callback?pt_key=…&login_type=…&tenant=…&authKey=…
+  ```
+
+  This is the mechanism the JoyCode IDE itself uses. The callback only reaches the
+  **local** machine; when the browser is elsewhere (DSH on a server), pasting the
+  callback page's address-bar URL into the paste field works just as well — the plugin
+  extracts the `pt_key` and validates it. `authKey` is single-use: another attempt's
+  callback is refused instead of settling this one.
 - **Import from the JoyCode IDE** (desktop) — reads the credential that IDE stored:
   the `JoyCoder.IDE` key of the `ItemTable` table in
   `…/JoyCode/User/globalStorage/state.vscdb`. The database is opened **read-only**, so
   the running IDE is never blocked; the macOS / Linux / Windows locations, the
   container mount `/root/.joycode-ide/state.vscdb` and a `JOYCODE_STATE_DB` override
   are tried in order, and a failed import reports every path it probed.
-- **Paste a ptKey** (a machine without the IDE) — as `ptkey: … userid: …` on one
-  line, or as that key's JSON document.
+- **Paste a ptKey** (headless) — as `ptkey: … userid: …`, as the `ptKey` alone (the API
+  reports the user id), or as that key's JSON document.
 
-Both funnel through one `userInfo` call, so nothing is stored until the upstream
+> **Why the raw JD QR endpoint is not implemented:** the reference's own postmortem
+> (`docs/superpowers/plans/2026-05-03-qr-login-redirect-to-auto-login.md`) records that JD's
+> `qrCodeTicketValidation` "不再通过 HTTP Set-Cookie 返回 `pt_key`" — 14 cookies, no `pt_key` — and
+> that project replaced that flow with exactly the page-driven login above. What ships here is
+> therefore the QR path that actually yields a credential (the scan happens on the JoyCode
+> login page).
+
+All three end in one `userInfo` call, so nothing is stored until the upstream
 accepts it — and that call can return a **ROTATED ptKey**, which is why this route
 re-validates on the reference's hourly cadence: it keeps the key warm and persists
 whatever the upstream just handed over.

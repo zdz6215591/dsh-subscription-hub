@@ -20,6 +20,8 @@
  */
 
 import { LlmError } from '@deepseek-ai/dsh-llm'
+import type { JoyCodeCallback } from './joycode/login.js'
+import { parseJoyCodeCallback } from './joycode/login.js'
 import type { JoyCodeCredential, JoyCodeEndpoint } from './joycode/client.js'
 import { JOYCODE_ENDPOINTS, joyCodeEnvelope, joyCodeHeaders, joyCodeUrl, parseJoyCodeEnvelope } from './joycode/client.js'
 import type { JoyCodeStoredCredential } from './joycode/credentials.js'
@@ -110,6 +112,16 @@ export async function validateJoyCodeCredential(
   const rotated = typeof data.ptKey === 'string' && data.ptKey !== '' ? data.ptKey : credential.ptKey
   const account = firstString(data.realName, data.nickName, data.userName, data.name, data.email)
   const userId = firstString(data.userId, data.userID, data.uid) ?? credential.userId
+  if (userId === undefined) {
+    // Every request carries the id in its envelope, so a credential the upstream
+    // accepts but names no id for cannot be used — and saying so beats storing a
+    // session whose first request would be rejected.
+    throw new LlmError(
+      'JoyCode accepted the credential but its userInfo answer carried no user id, which every request envelope needs. '
+      + 'Paste the user id alongside the ptKey.',
+      'MALFORMED_RESPONSE',
+    )
+  }
   return { ptKey: rotated, userId, ...account === undefined ? {} : { account } }
 }
 
@@ -201,7 +213,7 @@ export function parseJoyCodePaste(input: string): JoyCodeCredential {
           : document)
     const ptKey = firstString(nested?.ptKey, nested?.pt_key, nested?.key)
     const userId = firstString(nested?.userId, nested?.user_id, nested?.uid)
-    if (ptKey !== undefined && userId !== undefined) {
+    if (ptKey !== undefined) {
       const colorBaseUrl = firstString(nested?.colorBaseUrl, nested?.color_base_url)
       const masterBaseUrl = firstString(nested?.masterBaseUrl, nested?.master_base_url)
       const tenant = firstString(nested?.tenant)
@@ -209,7 +221,7 @@ export function parseJoyCodePaste(input: string): JoyCodeCredential {
       const orgFullName = firstString(nested?.orgFullName, nested?.org_full_name)
       return {
         ptKey,
-        userId,
+        ...userId === undefined ? {} : { userId },
         ...colorBaseUrl === undefined ? {} : { colorBaseUrl },
         ...masterBaseUrl === undefined ? {} : { masterBaseUrl },
         ...tenant === undefined ? {} : { tenant },
@@ -218,10 +230,23 @@ export function parseJoyCodePaste(input: string): JoyCodeCredential {
       }
     }
   }
+  // A browser-login callback: the address bar the page was sent to, or just its
+  // `pt_key=…`. This carries no user id — `userInfo` supplies that.
+  const fromCallback = parseJoyCodeCallback(trimmed)
+  if (fromCallback !== undefined) {
+    return {
+      ptKey: fromCallback.ptKey,
+      ...fromCallback.loginType === undefined ? {} : { loginType: fromCallback.loginType },
+      ...fromCallback.tenant === undefined ? {} : { tenant: fromCallback.tenant },
+    }
+  }
   const labelled = /(?:pt[_-]?key)\s*[:=]\s*([^\s,;]+)/i.exec(trimmed)
   const labelledId = /(?:user[_-]?id|uid)\s*[:=]\s*([^\s,;]+)/i.exec(trimmed)
-  if (labelled?.[1] !== undefined && labelledId?.[1] !== undefined) {
-    return { ptKey: labelled[1], userId: labelledId[1] }
+  if (labelled?.[1] !== undefined) {
+    // The id is optional here: `userInfo` names it, so a bare key is usable.
+    return labelledId?.[1] === undefined
+      ? { ptKey: labelled[1] }
+      : { ptKey: labelled[1], userId: labelledId[1] }
   }
   const pair = /^(\S+)[\s:]+(\S+)$/.exec(trimmed)
   if (pair?.[1] !== undefined && pair[2] !== undefined) {
@@ -231,11 +256,37 @@ export function parseJoyCodePaste(input: string): JoyCodeCredential {
     // parse it here would hide the real answer.
     return { ptKey: pair[1], userId: pair[2] }
   }
+  if (/^\S+$/.test(trimmed)) {
+    // A bare key: what the login page hands over, and what a user reads out of
+    // the IDE. The user id comes from `userInfo`.
+    return { ptKey: trimmed }
+  }
   throw new LlmError(
-    'JoyCode: paste the ptKey TOGETHER with the numeric user id (e.g. "ptkey: <key> userid: <id>"), '
-    + 'or import the credential from a locally signed-in JoyCode IDE.',
+    'JoyCode: paste the ptKey (optionally with the numeric user id: "ptkey: <key> userid: <id>"), '
+    + 'paste the callback URL the login page opened, or import from a locally signed-in JoyCode IDE.',
     'MISSING_CREDENTIAL',
   )
+}
+
+/**
+ * Build a session from what the browser login page handed back.
+ * @param callback - the credential the callback carried.
+ * @param fetchFn - injectable fetcher for tests.
+ * @param signal - optional cancellation.
+ * @returns the session to persist.
+ */
+export async function joyCodeSessionFromCallback(
+  callback: JoyCodeCallback,
+  fetchFn?: typeof fetch,
+  signal?: AbortSignal,
+): Promise<JoyCodeSession> {
+  const credential: JoyCodeCredential = {
+    ptKey: callback.ptKey,
+    ...callback.loginType === undefined ? {} : { loginType: callback.loginType },
+    ...callback.tenant === undefined ? {} : { tenant: callback.tenant },
+  }
+  const identity = await validateJoyCodeCredential(credential, fetchFn ?? fetch, signal)
+  return joyCodeSessionOf(credential, identity)
 }
 
 /**

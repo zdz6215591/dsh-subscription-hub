@@ -71,8 +71,14 @@ export const JOYCODE_ANTHROPIC_MAX_TOKENS = 32_768
 export interface JoyCodeCredential {
   /** The `ptKey` request header — the whole credential. */
   ptKey: string
-  /** Numeric JoyCode user id, carried in the request envelope. */
-  userId: string
+  /**
+   * Numeric JoyCode user id, carried in the request envelope.
+   *
+   * Absent until `userInfo` has been read: the browser/QR login hands back only
+   * a `ptKey`, and the id comes from that call. A credential without one can
+   * still be validated — it just cannot send a request yet.
+   */
+  userId?: string
   /** Gateway origin from the credential; when present, requests are signed. */
   colorBaseUrl?: string
   /** Direct API origin override from the credential. */
@@ -215,7 +221,7 @@ export function joyCodeEnvelope(
   return {
     tenant,
     orgFullName: credential.orgFullName ?? '',
-    userId: credential.userId,
+    userId: credential.userId ?? '',
     client: 'JoyCode',
     clientVersion: credential.clientVersion ?? JOYCODE_CLIENT_VERSION,
     language: 'UNKNOWN',

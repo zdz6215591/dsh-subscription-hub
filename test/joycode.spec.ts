@@ -43,7 +43,14 @@ import { joyCodeStateDbCandidates, parseJoyCodeStateValue, readJoyCodeStateDb } 
 import { fetchJoyCodeModels } from '../src/providers/joycode/models.js'
 import { joyCodeSseLine, unwrapDoubleWrappedSse } from '../src/providers/joycode/translate.js'
 import {
+  JOYCODE_LOGIN_URL,
+  joyCodeLoginUrl,
+  parseJoyCodeCallback,
+  startJoyCodeBrowserLogin,
+} from '../src/providers/joycode/login.js'
+import {
   importJoyCodeIde,
+  joyCodeSessionFromCallback,
   joyCodeSessionFromPaste,
   parseJoyCodePaste,
   refreshJoyCodeSession,
@@ -393,8 +400,8 @@ test('joycode pastes a ptKey and user id in any of the shapes the IDE shows them
   assert.deepEqual(parseJoyCodePaste('pt-1:42'), { ptKey: 'pt-1', userId: '42' })
   const document = parseJoyCodePaste(JSON.stringify({ joyCoderUser: { ptKey: 'pt-9', userId: '9', colorBaseUrl: 'https://api-ai.jd.com' } }))
   assert.deepEqual(document, { ptKey: 'pt-9', userId: '9', colorBaseUrl: 'https://api-ai.jd.com' })
-  // A bare key cannot be used: every request carries the user id.
-  assert.throws(() => parseJoyCodePaste('pt-1'), (error: unknown) => error instanceof LlmError && error.code === 'MISSING_CREDENTIAL')
+  // A bare key is enough: `userInfo` names the user id.
+  assert.deepEqual(parseJoyCodePaste('pt-1'), { ptKey: 'pt-1' })
   assert.throws(() => parseJoyCodePaste('   '), (error: unknown) => error instanceof LlmError && error.code === 'MISSING_CREDENTIAL')
 })
 
@@ -488,6 +495,94 @@ test('joycode import reads the local IDE credential and reports every path it pr
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+// ------------------------------------------------------------ browser login
+
+test('joycode builds the product login URL the page calls back on', () => {
+  const url = new URL(joyCodeLoginUrl(34891, 'deadbeef'))
+  assert.equal(url.origin + url.pathname, 'https://joycode.jd.com/login/')
+  assert.deepEqual(Object.fromEntries(url.searchParams), {
+    ideAppName: 'JoyCode',
+    fromIde: 'ide',
+    redirect: '0',
+    authPort: '34891',
+    authKey: 'deadbeef',
+  })
+})
+
+test('joycode reads a callback from a URL, a query string, or bare text', () => {
+  const expected = { ptKey: 'pt-abc', loginType: 'PIN', tenant: 'JOYCODE' }
+  assert.deepEqual(
+    parseJoyCodeCallback('http://127.0.0.1:34891/api/oauth-callback?pt_key=pt-abc&login_type=PIN&tenant=JOYCODE&authKey=ff'),
+    expected,
+  )
+  // The browser could not reach this machine, so the user pasted the address bar.
+  assert.deepEqual(parseJoyCodeCallback('/api/oauth-callback?pt_key=pt-abc&login_type=PIN&tenant=JOYCODE'), expected)
+  assert.deepEqual(parseJoyCodeCallback('pt_key=pt-abc&login_type=PIN&tenant=JOYCODE'), expected)
+  assert.deepEqual(parseJoyCodeCallback('{"pt_key":"pt-abc","login_type":"PIN","tenant":"JOYCODE"}'), expected)
+  assert.equal(parseJoyCodeCallback('nothing useful here'), undefined)
+})
+
+test('joycode browser login hands the credential back to the local listener', async () => {
+  const login = await startJoyCodeBrowserLogin({ timeoutMs: 5_000 })
+  try {
+    assert.match(login.authorizeUrl, new RegExp(`authPort=${String(login.port)}`))
+    assert.equal(new URL(login.authorizeUrl).searchParams.get('authKey'), login.authKey)
+    assert.ok(login.port > 0)
+
+    const response = await fetch(`http://127.0.0.1:${String(login.port)}/api/oauth-callback?pt_key=pt-live&login_type=PIN&authKey=${login.authKey}`)
+    assert.equal(response.status, 200)
+    await response.text()
+    assert.deepEqual(await login.callback, { ptKey: 'pt-live', loginType: 'PIN' })
+  } finally {
+    login.close()
+  }
+})
+
+test('joycode browser login refuses another attempt\'s callback', async () => {
+  const login = await startJoyCodeBrowserLogin({ timeoutMs: 5_000 })
+  try {
+    const refused = await fetch(`http://127.0.0.1:${String(login.port)}/api/oauth-callback?pt_key=pt-other&authKey=not-mine`)
+    assert.equal(refused.status, 403)
+    // It is still waiting for its OWN answer: an unrelated callback must not
+    // settle the attempt.
+    const accepted = await fetch(`http://127.0.0.1:${String(login.port)}/api/oauth-callback?pt_key=pt-mine&authKey=${login.authKey}`)
+    assert.equal(accepted.status, 200)
+    assert.equal((await login.callback).ptKey, 'pt-mine')
+  } finally {
+    login.close()
+  }
+})
+
+test('joycode browser login rejects a pending callback when it is closed', async () => {
+  const login = await startJoyCodeBrowserLogin({ timeoutMs: 5_000 })
+  login.close()
+  await assert.rejects(login.callback, (error: unknown) => error instanceof Error && /cancelled/.test(error.message))
+})
+
+test('joycode turns a callback into a stored session', async () => {
+  const session = await joyCodeSessionFromCallback(
+    { ptKey: 'pt-live', loginType: 'PIN', tenant: 'JOYCODE' },
+    (async () => new Response(JSON.stringify({ code: 0, data: { userId: '100001', realName: 'scanner' } }))) as typeof fetch,
+  )
+  assert.equal(session.userId, '100001')
+  assert.equal(session.account, 'scanner')
+  assert.equal(session.loginType, 'PIN')
+  assert.equal(session.tenant, 'JOYCODE')
+})
+
+test('joycode accepts a bare ptKey and takes the user id from userInfo', async () => {
+  const session = await joyCodeSessionFromPaste('pt-only', (async () => new Response(JSON.stringify({
+    code: 0, data: { userId: '777', realName: 'named' },
+  }))) as typeof fetch)
+  assert.equal(session.userId, '777')
+  // Without a user id anywhere, the credential cannot be stored: every request
+  // envelope carries it, so a session without one could only fail later.
+  await assert.rejects(
+    joyCodeSessionFromPaste('pt-only', (async () => new Response(JSON.stringify({ code: 0, data: {} }))) as typeof fetch),
+    (error: unknown) => error instanceof LlmError && error.code === 'MALFORMED_RESPONSE',
+  )
 })
 
 // ------------------------------------------------------------------ adapter
