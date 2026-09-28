@@ -12,7 +12,7 @@
 import './keep-alive.js'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { LlmError, MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { LlmError, MessageId, ReasoningEffortId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
@@ -682,6 +682,20 @@ test('freebuff web: the prompt flattener follows the reference rendering', () =>
   assert.equal(freebuffWebPrompt([]), undefined)
 })
 
+test('freebuff web: a tool call and its result are labelled, not dropped', () => {
+  // `[工具结果]` is the reference's own label for a tool result on this wire
+  // (`src/web_threads.rs:242`); `[工具调用]` is this route's addition, so the
+  // assistant half of the exchange keeps the result's antecedent.
+  assert.equal(freebuffWebPrompt([
+    { role: 'user', text: 'read the readme' },
+    { role: 'assistant', text: 'On it.' },
+    { role: 'tool-call', text: 'read_file: {"path":"README.md"}' },
+    { role: 'tool', text: '# hello' },
+    { role: 'user', text: 'what is its first line?' },
+  ]), '[用户]\nread the readme\n\n[助手]\nOn it.\n\n[工具调用]\nread_file: {"path":"README.md"}'
+    + '\n\n[工具结果]\n# hello\n\n[用户]\nwhat is its first line?')
+})
+
 test('freebuff: a pasted Bearer token parses', () => {
   const parsed = parseFreebuffPaste('Bearer abcdefghijklmnopqrst')
   assert.deepEqual(parsed, { kind: 'bearer', token: 'abcdefghijklmnopqrst' })
@@ -987,6 +1001,229 @@ test('freebuff adapter: the web protocol refuses an image rather than dropping i
     (error: unknown) => error instanceof LlmError && /cannot carry images/.test(error.message),
   )
   assert.equal(called, false, 'the refusal happens before any upstream call')
+})
+
+test('freebuff adapter: a turn that declares tools is refused on the web wire', async () => {
+  // The live-reported defect: with a cookie credential the harness's tool schemas
+  // never reached upstream, the model answered as a plain chat assistant, and
+  // every local capability (file read/write, shell, glob/grep) silently vanished.
+  // The wire cannot carry them (see the client module doc), so the turn is refused
+  // instead of downgraded.
+  const sessions = new Map<string, FreebuffSession>([['cookie-account', {
+    accessToken: 'sess-value-123456',
+    refreshToken: 'sess-value-123456',
+    expiresAt: Date.now() + 3_600_000,
+    cookie: `${FREEBUFF_SESSION_COOKIE}=sess-value-123456`,
+  }]])
+  let called = false
+  const adapter = new FreebuffAdapter({
+    models: [],
+    streamIdleTimeoutMs: 5_000,
+    tokens: tokensOf(sessions),
+    discovery: false,
+    fetchFn: async () => {
+      called = true
+      return new Response('data: {"type":"delta","text":"plain answer"}\n\ndata: {"type":"done"}\n\n', { status: 200 })
+    },
+  })
+  const options: GenerateOptions = {
+    ...generateOptions('z-ai/glm-5.3-flash'),
+    tools: [{
+      name: 'read_file',
+      description: 'Read a file',
+      parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+    }],
+  }
+  await assert.rejects(
+    async () => await collect(adapter.streamAccount(options, 'cookie-account')),
+    (error: unknown) => error instanceof LlmError && error.code === 'UNSUPPORTED'
+      && /cannot carry tools/.test(error.message)
+      && /no `tools` field/.test(error.message)
+      && /1 tool schema/.test(error.message),
+  )
+  assert.equal(called, false, 'the refusal happens before any upstream call')
+  // A turn WITHOUT tools still streams: the refusal is scoped to tool-declaring
+  // turns, and plain chat on this wire is unaffected.
+  const web = await collect(adapter.streamAccount(generateOptions('z-ai/glm-5.3-flash'), 'cookie-account'))
+  assert.equal(called, true)
+  assert.equal(web.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''), 'plain answer')
+})
+
+test('freebuff adapter: a tool turn rides the web prompt as labelled text', async () => {
+  const sessions = new Map<string, FreebuffSession>([['cookie-account', {
+    accessToken: 'sess-value-123456',
+    refreshToken: 'sess-value-123456',
+    expiresAt: Date.now() + 3_600_000,
+    cookie: `${FREEBUFF_SESSION_COOKIE}=sess-value-123456`,
+  }]])
+  const bodies: Record<string, unknown>[] = []
+  const adapter = new FreebuffAdapter({
+    models: [],
+    streamIdleTimeoutMs: 5_000,
+    tokens: tokensOf(sessions),
+    discovery: false,
+    fetchFn: async (_input, init) => {
+      bodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
+      return new Response('data: {"type":"delta","text":"ok"}\n\ndata: {"type":"done"}\n\n', { status: 200 })
+    },
+  })
+  const options: GenerateOptions = {
+    ...generateOptions('z-ai/glm-5.3-flash'),
+    messages: [
+      {
+        id: MessageId('m-1'),
+        role: 'user',
+        content: [{ type: 'text', text: 'read the readme' }],
+        source: { kind: 'user' },
+      },
+      {
+        id: MessageId('m-2'),
+        role: 'assistant',
+        content: [{ type: 'tool-call', id: ToolCallId('call_1'), name: 'read_file', arguments: '{"path":"README.md"}' }],
+        source: { kind: 'model', provider: 'freebuff', model: 'z-ai/glm-5.3-flash' },
+      },
+      {
+        id: MessageId('m-3'),
+        role: 'user',
+        content: [{
+          type: 'tool-result',
+          toolCallId: ToolCallId('call_1'),
+          content: [{ type: 'text', text: '# hello' }],
+        }],
+        source: { kind: 'tool', callId: ToolCallId('call_1') },
+      },
+      {
+        id: MessageId('m-4'),
+        role: 'user',
+        content: [{ type: 'text', text: 'what is its first line?' }],
+        source: { kind: 'user' },
+      },
+    ],
+  }
+  const chunks = await collect(adapter.streamAccount(options, 'cookie-account'))
+  assert.equal(chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''), 'ok')
+  const body = bodies[0] ?? {}
+  assert.equal(
+    body.content,
+    '[用户]\nread the readme\n\n[工具调用]\nread_file: {"path":"README.md"}\n\n[工具结果]\n# hello'
+    + '\n\n[用户]\nwhat is its first line?',
+  )
+  assert.equal('tools' in body, false, 'the web body has no tools field to put schemas in')
+  assert.equal(body.threadId, null)
+})
+
+test('freebuff adapter: a legacy tool-result block inside a user message is kept', async () => {
+  const sessions = new Map<string, FreebuffSession>([['cookie-account', {
+    accessToken: 'sess-value-123456',
+    refreshToken: 'sess-value-123456',
+    expiresAt: Date.now() + 3_600_000,
+    cookie: `${FREEBUFF_SESSION_COOKIE}=sess-value-123456`,
+  }]])
+  const bodies: Record<string, unknown>[] = []
+  const adapter = new FreebuffAdapter({
+    models: [],
+    streamIdleTimeoutMs: 5_000,
+    tokens: tokensOf(sessions),
+    discovery: false,
+    fetchFn: async (_input, init) => {
+      bodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
+      return new Response('data: {"type":"delta","text":"ok"}\n\ndata: {"type":"done"}\n\n', { status: 200 })
+    },
+  })
+  const options: GenerateOptions = {
+    ...generateOptions('z-ai/glm-5.3-flash'),
+    messages: [
+      {
+        id: MessageId('m-1'),
+        role: 'user',
+        content: [{
+          type: 'tool-result',
+          toolCallId: ToolCallId('call_1'),
+          content: [{ type: 'text', text: '# hello' }],
+        }],
+        source: { kind: 'user' },
+      },
+      {
+        id: MessageId('m-2'),
+        role: 'user',
+        content: [{ type: 'text', text: 'what is its first line?' }],
+        source: { kind: 'user' },
+      },
+    ],
+  }
+  await collect(adapter.streamAccount(options, 'cookie-account'))
+  assert.equal(
+    bodies[0]?.content,
+    '[工具结果]\n# hello\n\n[用户]\nwhat is its first line?',
+    'the tool result inside the block reaches the prompt instead of vanishing',
+  )
+})
+
+test('freebuff adapter: the desktop wire carries tools and tool turns unchanged', async () => {
+  let body: Record<string, unknown> = {}
+  const { adapter, sessions } = adapterOf({
+    fetchFn: async (_input, init) => {
+      body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+      return new Response([
+        'data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}\n\n',
+        'data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+        'data: [DONE]\n\n',
+      ].join(''), { status: 200 })
+    },
+  })
+  const options: GenerateOptions = {
+    ...generateOptions('z-ai/glm-5.3-flash'),
+    tools: [{
+      name: 'read_file',
+      description: 'Read a file',
+      parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+    }],
+    messages: [
+      {
+        id: MessageId('m-1'),
+        role: 'user',
+        content: [{ type: 'text', text: 'read the readme' }],
+        source: { kind: 'user' },
+      },
+      {
+        id: MessageId('m-2'),
+        role: 'assistant',
+        content: [{ type: 'tool-call', id: ToolCallId('call_1'), name: 'read_file', arguments: '{"path":"README.md"}' }],
+        source: { kind: 'model', provider: 'freebuff', model: 'z-ai/glm-5.3-flash' },
+      },
+      {
+        id: MessageId('m-3'),
+        role: 'user',
+        content: [{
+          type: 'tool-result',
+          toolCallId: ToolCallId('call_1'),
+          content: [{ type: 'text', text: '# hello' }],
+        }],
+        source: { kind: 'tool', callId: ToolCallId('call_1') },
+      },
+    ],
+  }
+  await collect(adapter.streamAccount(options, [...sessions.keys()][0] as string))
+  // The desktop body forwards the caller's tools unchanged (the reference passes
+  // the inbound body through, `src/api.rs:2707-2708`), and the tool exchange is
+  // native here: `tool_calls` on the assistant turn, `role:"tool"` for the result.
+  assert.deepEqual(body.tools, [{
+    type: 'function',
+    function: {
+      name: 'read_file',
+      description: 'Read a file',
+      parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+    },
+  }])
+  assert.deepEqual(body.messages, [
+    { role: 'user', content: 'read the readme' },
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'read_file', arguments: '{"path":"README.md"}' } }],
+    },
+    { role: 'tool', tool_call_id: 'call_1', content: '# hello' },
+  ])
 })
 
 test('freebuff adapter: a 401 from upstream is an AUTH failure', async () => {

@@ -32,6 +32,22 @@
  *   - a failed top-up does not empty the roster: the pinned half is always
  *     served, and the failure is reported through `notFetchedReason`.
  *
+ * ## Tools exist on ONE wire, and the cookie credential cannot reach it
+ *
+ * A caller's `tools` array rides the desktop body unchanged (the reference
+ * forwards it, `src/api.rs:2707-2708`), so the Bearer path is the tool-capable
+ * one. The web body has no `tools` field at all and no tool-turn encoding — it is
+ * one flat prompt string (`src/web_protocol.rs:380-388`,
+ * `src/web_threads.rs:176-254`) whose only tool vocabulary runs DOWNSTREAM
+ * (upstream `agent_tool` → OpenAI `tool_calls`, `src/web_protocol.rs:811-828`).
+ * A tool-declaring turn on the web wire is therefore REFUSED
+ * ({@link freebuffWebToolRefusal}) rather than downgraded to a tool-less chat,
+ * which is the defect this route was reported for: the harness's local tools
+ * silently disappeared and the assistant reported Freebuff's own server-side
+ * agents as its entire tool set. A replayed tool turn (assistant `tool_calls` +
+ * a result) still renders into that prompt so the transcript stays coherent —
+ * see {@link webPromptMessages}.
+ *
  * @module dsh-subscription-hub/providers/freebuff
  */
 
@@ -52,8 +68,8 @@ import { idleWatchdog, mapFetchFailure, mergeReasoning } from './common.js'
 import type { PoolAdapter } from './pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, DEFAULT_RETRY, subscriptionRetryPolicy } from './rate-limit.js'
 import type { RateLimitWait } from './rate-limit.js'
-import { resolveImages } from '../translate/resolved.js'
-import type { TranslatableMessage } from '../translate/resolved.js'
+import { resolveImages, toolResultsOf } from '../translate/resolved.js'
+import type { TranslatableBlock, TranslatableMessage } from '../translate/resolved.js'
 import { streamChatCompletions, toChatMessages, toChatTools } from '../translate/chat-completions.js'
 import { freebuffModel, freebuffRoster } from './freebuff/catalog.js'
 import type { FreebuffModel } from './freebuff/catalog.js'
@@ -67,6 +83,7 @@ import {
   freebuffWebBody,
   freebuffWebPrompt,
   freebuffWebToChatCompletions,
+  freebuffWebToolRefusal,
   freebuffWireFor,
   FREEBUFF_UPSTREAM_MODELS_URL,
   parseFreebuffUpstreamModels,
@@ -320,6 +337,15 @@ export class FreebuffAdapter extends LlmAdapter {
     messages: readonly TranslatableMessage[],
     watchdog: { signal: AbortSignal },
   ): Promise<Response> {
+    // The web body has no `tools` field and no tool-turn encoding, so a turn that
+    // declares tools can only ever reach the model as a tool-LESS chat: the
+    // harness's local tools (file read/write, shell, glob/grep) simply do not
+    // exist for it, and the assistant reports Freebuff's own server-side agents
+    // as its whole tool set. That is a silent loss of every local capability, so
+    // it is refused outright instead — see the module doc in `freebuff/client.ts`
+    // for the wire citation and the live evidence.
+    const tools = options.tools?.length ?? 0
+    if (tools > 0) throw freebuffWebToolRefusal(tools)
     // The web protocol takes images through a SEPARATE upload endpoint
     // (`POST /api/chat/upload`, `src/web_protocol.rs:5`) which this route does not
     // implement. Sending `images: []` and letting the turn proceed would answer a
@@ -332,7 +358,10 @@ export class FreebuffAdapter extends LlmAdapter {
         'HTTP_400',
       )
     }
-    const prompt = freebuffWebPrompt([...translatableToPrompt(options.system), ...messages.map(toPromptMessage)])
+    const prompt = freebuffWebPrompt([
+      ...translatableToPrompt(options.system),
+      ...messages.flatMap(webPromptMessages),
+    ])
     if (prompt === undefined) {
       throw new LlmError(
         'Freebuff (web protocol) needs at least one non-empty user message: this wire takes a single prompt string, '
@@ -425,11 +454,67 @@ function translatableToPrompt(system?: string): FreebuffPromptMessage[] {
   return text === '' ? [] : [{ role: 'system', text }]
 }
 
-/** One hub message as the web prompt flattener wants it. */
-function toPromptMessage(message: TranslatableMessage): FreebuffPromptMessage {
-  const text = message.content
+/** The text of every text block in a content list, joined with newlines. */
+function textOf(blocks: readonly TranslatableBlock[]): string {
+  return blocks
     .map(block => (block.type === 'text' ? block.text : ''))
     .filter(part => part !== '')
     .join('\n')
-  return { role: message.role, text }
+}
+
+/**
+ * One hub message as the web prompt flattener wants it — TOOL TURNS included.
+ *
+ * The web wire takes a flat prompt, so every part of a tool exchange has to be
+ * rendered into it or it is lost:
+ *
+ *   - a tool result becomes one `[工具结果]` part — the reference's own label for
+ *     exactly this case (`src/web_threads.rs:242`) — whether it arrives as a
+ *     `role:"tool"` message or as a `tool-result` block inside a user-role message
+ *     (`toolResultsOf` is the hub's reader for both spellings). The tool-call id
+ *     has no home in that rendering — the reference drops it too, because the wire
+ *     has no field for it — so a transcript with parallel calls pairs by text,
+ *     like the reference's. Before this, the text INSIDE a `tool-result` block was
+ *     dropped outright on this wire (the message carrying it had no text blocks of
+ *     its own), losing the tool's entire output;
+ *   - an assistant `tool-call` block becomes its own `[工具调用]` part (see
+ *     `FREEBUFF_PROMPT_LABELS` in the client for why that one label is an
+ *     extension and where its body rendering comes from). Dropping it, as the
+ *     route used to, left the `[工具结果]` that follows with no antecedent and an
+ *     assistant turn that called several tools with no text at all.
+ *
+ * One message can therefore produce SEVERAL prompt parts, and the split is what
+ * keeps each of them labelled: `freebuffWebPrompt` sends a one-message
+ * conversation VERBATIM, so an unlabelled `[工具结果]` is the failure this
+ * avoids.
+ * @param message - one hub message.
+ * @returns the prompt parts it renders to, in reading order.
+ */
+function webPromptMessages(message: TranslatableMessage): FreebuffPromptMessage[] {
+  if (message.role === 'system') {
+    const text = textOf(message.content).trim()
+    return text === '' ? [] : [{ role: 'system', text }]
+  }
+  if (message.role === 'tool') {
+    const result = toolResultsOf(message)[0]
+    const text = result === undefined ? '' : textOf(result.content).trim()
+    return text === '' ? [] : [{ role: 'tool', text }]
+  }
+  const parts: FreebuffPromptMessage[] = []
+  const text = textOf(message.content).trim()
+  if (text !== '') parts.push({ role: message.role === 'assistant' ? 'assistant' : 'user', text })
+  if (message.role === 'assistant') {
+    for (const block of message.content) {
+      if (block.type !== 'tool-call') continue
+      // The reference's own rendering of a tool as text (`src/web_protocol.rs:991`,
+      // `format!("{name}: {label}")`), with the call's arguments as the label.
+      parts.push({ role: 'tool-call', text: `${block.name}: ${block.arguments}` })
+    }
+    return parts
+  }
+  for (const result of toolResultsOf(message)) {
+    const body = textOf(result.content).trim()
+    if (body !== '') parts.push({ role: 'tool', text: body })
+  }
+  return parts
 }

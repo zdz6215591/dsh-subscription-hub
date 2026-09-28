@@ -26,6 +26,36 @@
  * reference prefers the desktop path and reaches for the web bridge only when no
  * usable Bearer credential exists (`src/api.rs:2664-2685`).
  *
+ * ## Tools ride ONE of the two wires — and it is not the cookie one
+ *
+ * The DESKTOP body forwards the caller's `tools` array untouched and accepts
+ * assistant `tool_calls` plus `role:"tool"` results: the reference passes the
+ * whole inbound body through and rewrites only `model` and `codebuff_metadata`
+ * (`src/api.rs:2707-2708`), which is what {@link freebuffChatBody} reproduces.
+ *
+ * The WEB body has NO tools field and no tool-turn encoding at all. It is
+ * `{threadId, content, model, reasoningEffort, gravity, images, attachments}`
+ * (`src/web_protocol.rs:380-388`) — one flat prompt string, rendered by
+ * {@link freebuffWebPrompt} from `src/web_threads.rs:176-254`. The reference's
+ * README advertises 工具调用映射, but that mapping runs DOWNSTREAM ONLY: an
+ * upstream `agent_tool` event (Freebuff's OWN server-side agents) becomes an
+ * OpenAI `tool_calls` delta for the gateway's generic clients
+ * (`src/web_protocol.rs:811-828`, `:885-898`; arguments hardcoded `{}` because
+ * upstream never streams them). Nothing carries a CLIENT tool schema upstream:
+ * the reference's web bridge never forwards an inbound `tools` array and never
+ * reads one (`src/api.rs:1118` calls `chat_stream_raw(thread_id, content, None,
+ * Vec::new(), Vec::new())`).
+ *
+ * Live-verified 2026-09-28 against the real upstream with a cookie credential:
+ * a `tools` array bolted onto a web body is IGNORED. Asked to call a declared
+ * `read_file`, the model reasoned "I don't have a read_file tool. My available
+ * tools are: 1. spawn_agents 2. gravity_index 3. render_ui 4. suggest_followups
+ * 5. researcher_web 6. thinker_gemini 7. context_pruner" and answered in prose —
+ * the exact shape of this route's reported defect (the harness's local tools
+ * vanish and the assistant reports only Freebuff's own server-side tools). So a
+ * tool-declaring turn is REFUSED on this wire rather than quietly downgraded to
+ * a tool-less chat: {@link freebuffWebToolRefusal}.
+ *
  * ## Errors are TEXT first, status second
  *
  * codebuff answers refusals inside an HTTP 200 body — as a bare text code
@@ -436,6 +466,13 @@ export interface FreebuffWebBodyInput {
  * one (`src/web_protocol.rs:380-388`): a single `content` string rather than a
  * message array, `camelCase` keys, and a `gravity` fingerprint.
  *
+ * There is deliberately no `tools` key here, and there must not be one: the wire
+ * has no channel for caller-declared tools (see the module doc, and the live
+ * check recorded there that upstream ignores one bolted on anyway). Tool usage
+ * on this wire is upstream-side and only observable on the way down. A caller
+ * that declares tools is refused before this body is built
+ * ({@link freebuffWebToolRefusal}).
+ *
  * The effort rides as `reasoningEffort` because that is the web protocol's own
  * spelling of the field. The reference's bridge sends `null` there
  * (`src/api.rs:1118` passes `None`), so forwarding the clamped level is an
@@ -456,6 +493,35 @@ export function freebuffWebBody(input: FreebuffWebBodyInput): Record<string, unk
     images: [],
     attachments: [],
   }
+}
+
+/**
+ * The refusal a caller that declares tools receives on the web wire.
+ *
+ * Failing here is the whole point: the alternative is what this route used to do
+ * — send the flattened prompt WITHOUT the schemas, and let the model answer as a
+ * plain chat assistant whose "available tools" are Freebuff's own server-side
+ * agents. That silent downgrade is indistinguishable, from the session, from a
+ * model that simply chose not to call a tool, and it costs the user every local
+ * capability (file read/write, shell, glob/grep) without saying so.
+ *
+ * The message names the wire fact (no `tools` field), the observed upstream
+ * behaviour, and the only tool-carrying alternative, so the reader can act.
+ * @param toolCount - how many tool schemas the refused turn declared.
+ * @returns the error to throw, before any upstream call is made.
+ */
+export function freebuffWebToolRefusal(toolCount: number): LlmError {
+  return new LlmError(
+    `Freebuff (web protocol) cannot carry tools: ${String(toolCount)} tool schema(s) were declared, but this wire `
+    + 'takes one flat prompt string with no `tools` field (ref-freebuff2api/src/web_protocol.rs:380-388), so the '
+    + 'model would receive none of them and would answer as a plain chat assistant with no file, shell or search '
+    + 'tools — verified against the live upstream on 2026-09-28: a `tools` array added to the web body is ignored '
+    + 'and the model reports only its own server-side tools. Tool-carrying turns need the desktop/Bearer protocol '
+    + '(src/upstream.rs:281-315), which a freebuff.com cookie cannot ride (src/api.rs:1809-1813 keeps web cookies '
+    + 'out of the Bearer pool; live 2026-09-28 the desktop wire\'s free mode answers HTTP 403 '
+    + '`free_mode_cli_required` to direct API callers anyway). Use another route for tool-using turns.',
+    'UNSUPPORTED',
+  )
 }
 
 /** The upstream error envelope kinds this route reads. */
@@ -819,11 +885,33 @@ export function freebuffSessionUnauthenticated(payload: unknown): boolean {
   return (tier === undefined || tier === null) && record.freebucks === undefined
 }
 
-/** One message as the web prompt flattener needs it. */
+/**
+ * One message as the web prompt flattener needs it.
+ *
+ * `role` is a hub message role, plus ONE route-local addition: `tool-call`, the
+ * assistant's half of a tool exchange. The web wire has no `tool_calls` field, so
+ * an assistant turn that called a tool can only survive as a labelled text part —
+ * see {@link freebuffWebPrompt}.
+ */
 export interface FreebuffPromptMessage {
   role: string
   /** The message's own text, already extracted from its content blocks. */
   text: string
+}
+
+/** The role labels the flattener prefixes (`src/web_threads.rs:240-245`). */
+const FREEBUFF_PROMPT_LABELS: Record<string, string> = {
+  assistant: '[助手]',
+  tool: '[工具结果]',
+  // NOT in the reference: the reference's web bridge never has to render a
+  // client tool call, because its own clients cannot pass tools through this
+  // wire (module doc) and `flatten_messages` therefore only ever sees text
+  // (`src/web_threads.rs:181-200` drops every non-text content part, assistant
+  // `tool_calls` included). This route renders the call instead of dropping it,
+  // so the `[工具结果]` that follows keeps its antecedent — the body is the
+  // reference's own `{name}: {label}` rendering of a tool
+  // (`src/web_protocol.rs:991`), with the call's arguments in the label slot.
+  'tool-call': '[工具调用]',
 }
 
 /**
@@ -844,6 +932,13 @@ export interface FreebuffPromptMessage {
  *     (everything unrecognized counts as user), joined with a blank line;
  *   - an empty last user message yields `undefined`, which the caller must treat
  *     as a bad request rather than sending an empty prompt.
+ *
+ * One label is an extension beyond the reference and is marked where it is
+ * defined: a `tool-call` part, which keeps an assistant's tool call in the
+ * transcript instead of dropping it ({@link FREEBUFF_PROMPT_LABELS}). The
+ * `[工具结果]` side is a straight port — the reference labels tool results in
+ * exactly this text form (`src/web_threads.rs:242`) precisely because the wire
+ * has nowhere else to put them.
  * @param messages - the conversation, in order.
  * @returns the flattened prompt, or undefined when there is nothing to send.
  */
@@ -875,7 +970,7 @@ export function freebuffWebPrompt(messages: readonly FreebuffPromptMessage[]): s
     for (const message of rest) {
       const body = text(message)
       if (body === undefined) continue
-      const label = message.role === 'assistant' ? '[助手]' : message.role === 'tool' ? '[工具结果]' : '[用户]'
+      const label = FREEBUFF_PROMPT_LABELS[message.role] ?? '[用户]'
       parts.push(`${label}\n${body}`)
     }
   }
