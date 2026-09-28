@@ -383,7 +383,7 @@ export class JoyCodeAdapter extends LlmAdapter {
       model: options.model,
       messages: toChatMessages(messages, options.system),
       ...options.tools !== undefined && options.tools.length > 0
-        ? { tools: toChatTools(options.tools), tool_choice: 'auto' }
+        ? { tools: toChatTools(options.tools) }
         : {},
       ...options.maxTokens === undefined ? {} : { max_tokens: options.maxTokens },
       // The chat families take the level as `reasoning_effort` and additionally
