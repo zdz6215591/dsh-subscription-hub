@@ -69,6 +69,7 @@ import type {
   ProviderId,
   StoredSession,
   TraeSession,
+  JoyCodeSession,
   ZedSession,
 } from './auth/store.js'
 import { DISCOVERY_TIMEOUT_MS, validateModels, withTimeout } from './providers/common.js'
@@ -188,6 +189,15 @@ import {
   traeNotSignedInError,
 } from './providers/trae/index.js'
 import type { TraeImportFailure } from './providers/trae/index.js'
+import { JoyCodeAdapter } from './providers/joycode.js'
+import {
+  importJoyCodeIde,
+  isJoyCodePermanentRefreshError,
+  joyCodeImportFailureMessage,
+  joyCodeNotSignedInError,
+  joyCodeSessionFromPaste,
+  refreshJoyCodeSession,
+} from './providers/joycode-session.js'
 import {
   ZedAdapter,
   ZED_PREEMPT_MS,
@@ -232,6 +242,7 @@ export type {
   CopilotSession,
   GrokSession,
   ProviderId,
+  JoyCodeSession,
   ZedSession,
 } from './auth/store.js'
 
@@ -265,6 +276,7 @@ export interface Config {
     codebuddy?: ModelEntry[]
     qoder?: ModelEntry[]
     trae?: ModelEntry[]
+    joycode?: ModelEntry[]
     zed?: ModelEntry[]
   }
   /** Same-subscription account pools (and optional extra tier models). */
@@ -286,7 +298,7 @@ export interface Config {
   }
 }
 
-const providerIdSchema = z.union(['codex', 'claude', 'grok', 'copilot', 'agy', 'commandcode', 'cline', 'codebuddy', 'qoder', 'trae', 'zed'])
+const providerIdSchema = z.union(['codex', 'claude', 'grok', 'copilot', 'agy', 'commandcode', 'cline', 'codebuddy', 'qoder', 'trae', 'joycode', 'zed'])
 const modelEntrySchema: z<ModelEntry> = z.object({
   id: z.string().required(),
   name: z.string(),
@@ -381,6 +393,7 @@ function resolveCatalog(models: Config['models']): Record<ProviderId, ModelEntry
     codebuddy: resolve('codebuddy'),
     qoder: resolve('qoder'),
     trae: resolve('trae'),
+    joycode: resolve('joycode'),
     zed: resolve('zed'),
   }
 }
@@ -406,6 +419,7 @@ function accountOf(provider: ProviderId, session: StoredSession | undefined): st
     // recognizes; falling back to the id keeps an account row labeled anyway.
     case 'qoder': return (session as QoderSession).account ?? (session as QoderSession).userId
     case 'trae': return (session as TraeSession).account ?? (session as TraeSession).userId
+    case 'joycode': return (session as JoyCodeSession).account ?? (session as JoyCodeSession).userId
     case 'zed': return (session as ZedSession).account ?? (session as ZedSession).userId
   }
 }
@@ -427,6 +441,9 @@ function planOf(provider: ProviderId, session: StoredSession): string | undefine
     // The channel IS the plan distinction for Trae: the two CN surfaces are
     // separate products with their own rosters.
     case 'trae': return (session as TraeSession).channel === 'solo' ? 'TRAE SOLO CN' : 'Trae CN IDE'
+    // JoyCode's `userInfo` states no plan of its own, so the account row shows
+    // nothing rather than a tier this route cannot read.
+    case 'joycode': return undefined
     case 'zed': return undefined
   }
 }
@@ -629,6 +646,21 @@ export class SubscriptionsAuthController implements AuthController {
       this.lastError.delete('trae')
       return { authorizeUrl: '' }
     }
+    if (provider === 'joycode') {
+      // JoyCode signs in inside its own IDE; the only thing this plugin can do
+      // unaided is read the credential that IDE already stored. A machine
+      // without the IDE uses the paste field, and the error names the paths this
+      // machine actually probed so "not signed in" is diagnosable.
+      const imported = await importJoyCodeIde({ fetchFn: proxiedFetch })
+      if (imported.session === undefined) {
+        this.lastError.set('joycode', joyCodeImportFailureMessage(imported.probed))
+        throw joyCodeNotSignedInError(imported.probed)
+      }
+      await this.persist('joycode', imported.session)
+      this.lastError.delete('joycode')
+      this.onAuthChanged('joycode', accountKeyOf('joycode', imported.session))
+      return { authorizeUrl: '' }
+    }
     if (provider === 'cline') {
       // Cline has no OAuth grant and no device flow: its only login is a pasted
       // API key, which the panel collects through the manual-input field. This
@@ -760,6 +792,7 @@ export class SubscriptionsAuthController implements AuthController {
       case 'codebuddy':
       case 'qoder':
       case 'trae':
+      case 'joycode':
       case 'zed':
         return Promise.reject(new Error(`${provider} does not use the authorization-code exchange`))
     }
@@ -812,6 +845,15 @@ export class SubscriptionsAuthController implements AuthController {
       await this.persist('qoder', session)
       this.lastError.delete('qoder')
       this.onAuthChanged('qoder', accountKeyOf('qoder', session))
+      return
+    }
+    if (provider === 'joycode') {
+      // JoyCode also has an import path (login), and this is the other half:
+      // a ptKey + user id pasted from a machine whose JoyCode is signed in.
+      const session = await joyCodeSessionFromPaste(input, proxiedFetch)
+      await this.persist('joycode', session)
+      this.lastError.delete('joycode')
+      this.onAuthChanged('joycode', accountKeyOf('joycode', session))
       return
     }
     const attempt = this.flows.pending(provider)
@@ -1276,6 +1318,39 @@ export function apply(ctx: Context, config: Config): void {
           pool: () => poolAdapter,
         })
         registerTrackedAdapter('trae', adapter)
+        break
+      }
+      case 'joycode': {
+        // JoyCode is IDE-first: the credential is a ptKey read from (or pasted
+        // out of) the JoyCode IDE, and there is no OAuth grant to exchange. A
+        // "refresh" therefore re-validates the key against `userInfo` on the
+        // reference's hourly cadence, which also picks up a rotated key.
+        const tokens = new AccountTokenManager<JoyCodeSession>({
+          provider: 'joycode',
+          displayName: 'JoyCode',
+          makeOptions: () => ({
+            preemptMs: 0,
+            refresh: session => refreshJoyCodeSession(session, proxiedFetch),
+            isPermanent: isJoyCodePermanentRefreshError,
+          }),
+          onAccountRemoved: account => { authChanged('joycode', account) },
+        })
+        accountTokens.set('joycode', tokens as unknown as AccountTokenManager<StoredSession>)
+        // No usage fetcher: the JoyCode API publishes no balance or quota for
+        // this route (the reference tracks spend locally instead), and this
+        // plugin shows nothing rather than deriving a number nobody disclosed.
+        const adapter = new JoyCodeAdapter({
+          models: catalog.joycode,
+          streamIdleTimeoutMs,
+          rateLimit,
+          tokens,
+          discovery: !overridden.has('joycode'),
+          onWarn,
+          resolveAttachments,
+          defaultEffortOf: (model: string) => defaultEffortOf('joycode', model),
+          pool: () => poolAdapter,
+        })
+        registerTrackedAdapter('joycode', adapter)
         break
       }
       case 'zed': {

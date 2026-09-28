@@ -166,6 +166,10 @@ export const PROVIDER_PROBE_TARGETS: Readonly<Record<ProviderId, { url: string; 
   // one a PAT is most often minted against.
   qoder: { url: 'https://api3.qoder.sh', method: 'GET' },
   trae: { url: 'https://api.trae.cn', method: 'GET' },
+  // The direct API origin. A credential that carries a gateway origin is signed
+  // and routed by `functionId` there instead, but the default path — and the one
+  // a hand-entered ptKey takes — is this host.
+  joycode: { url: 'https://joycode-api.jd.com', method: 'GET' },
   zed: { url: 'https://cloud.zed.dev', method: 'GET' },
 })
 

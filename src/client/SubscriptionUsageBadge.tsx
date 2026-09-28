@@ -131,6 +131,7 @@ const PROVIDER_NAMES: Record<SubscriptionProvider, string> = {
   codebuddy: 'CodeBuddy',
   qoder: 'Qoder',
   trae: 'Trae',
+  joycode: 'JoyCode',
   zed: 'Zed',
 }
 

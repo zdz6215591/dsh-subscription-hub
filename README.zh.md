@@ -4,7 +4,7 @@
 
 [English](README.md) | 中文
 
-一个 **设置 → 订阅** 页面覆盖十个订阅路由：
+一个 **设置 → 订阅** 页面覆盖十一个订阅路由：
 
 | 路由 | 订阅 | 说明 |
 | --- | --- | --- |
@@ -16,6 +16,7 @@
 | `cline` | Cline（ClinePass） | 粘贴 `sk_…` Key；实时额度窗口，**分模型钉住上游渠道** |
 | `codebuddy` | 腾讯 CodeBuddy | 浏览器 OAuth，每日自动签到 |
 | `trae` | Trae（国内版） | 导入本机已登录的 **TRAE SOLO CN** 与 **Trae CN IDE**；实时目录、积分、每日自动签到 |
+| `joycode` | 京东 JoyCode | 读取本机 JoyCode IDE 凭据，或粘贴 ptKey + userId；实时目录，**按模型自动分流三条线上路径** |
 | `copilot` | GitHub Copilot | 设备码登录 |
 | `zed` | Zed Pro | Windows 从凭据管理器导入，或粘贴 userId + token |
 
@@ -210,6 +211,50 @@ Zed 没有第三方 OAuth 客户端。先在 Zed 应用里登录，然后：
 插件会从 `https://cloud.zed.dev/client/llm_tokens` 换取 LLM token，并从
 `GET /client/users/me` 读取剩余用量（与[账单页](https://dashboard.zed.dev)同源）。
 
+## JoyCode（京东）
+
+JoyCode 是 IDE 优先的产品，它的私有接口没有公开文档。本仓库按协议**直接**调用京东网关
+（不需要本机跑 JoyCode 进程，所以 Linux / 服务器也能用）。
+
+### 登录：两条路
+
+- **从 JoyCode IDE 导入**（桌面端）——读取该 IDE 已保存的凭据：
+  `…/JoyCode/User/globalStorage/state.vscdb` 里 `ItemTable` 表的 `JoyCoder.IDE` 键。
+  以**只读**方式打开，不影响正在运行的 IDE；macOS / Linux / Windows 路径、容器挂载点
+  `/root/.joycode-ide/state.vscdb` 与 `JOYCODE_STATE_DB` 覆盖都会依次尝试，导入失败时会把
+  「查过哪些路径」一并报出来。
+- **粘贴 ptKey**（没有装 IDE 的机器）——写成一行 `ptkey: … userid: …`，或直接粘贴上面那个键的 JSON 内容。
+
+两条路都会先请求一次 `userInfo` 校验，**只有上游接受才落盘**；而该接口会在响应里
+**轮换新的 ptKey**，所以本路由按参考项目的小时级节奏定期重新校验——既保活，也把轮换后的新 key 存回。
+
+### 三条线上路径，按模型自动分流
+
+发错路径不会报错，而是**静默返回空内容**或只回一个业务码：
+
+| 模型族 | 线上路径 | 原因 |
+| --- | --- | --- |
+| `GPT-*` | `/api/saas/openai/v1/responses` | chat 路径对这些模型返回业务码 **1032** |
+| `Claude-*` | `/api/saas/anthropic/v1/messages`，模型名带 **`-hq`** | OpenAI 两条路径对 Claude 系返回**空输出**；不带 `-hq` 会被拒（**6002**） |
+| 其余（GLM / Kimi / DeepSeek / MiniMax / Doubao / JoyAI） | `/api/saas/openai/v2/chat/completions` | — |
+
+模型目录来自实时 `modelList`（`chatApiModel` 作为线上模型名，`label` 作为显示名）；
+能力（上下文 200k、各模型输出上限、视觉）只声明参考项目公布过的范围，**表里没有的模型不猜**。
+凭据带网关地址时按 `functionId` 走 HMAC 签名网关，否则走直连 v2 端点。
+
+### 思考档位
+
+只给「有档位证据」的模型开放选择器：
+
+- **GPT 系**：`low / medium / high / xhigh / max`（参考项目的测试证明这五档互不相同）→ 映射成 `reasoning.effort`；`off` 发 `none`。
+- **chat 系**（GLM / Kimi / DeepSeek / MiniMax / Doubao）：档位按 `reasoning_effort` 原样透传，`off` 发 `thinking: { type: "disabled" }`；Doubao 另需 `thinking: { type: "enabled" }` 开关（参考项目的行为）。
+- **Claude 系**：没有可靠档位证据，故不给选择器、也不发送思考参数。
+
+### 为什么没有用量/余额
+
+JoyCode 的接口不公布余额或额度（参考项目只能本地记账），所以本路由**不出用量胶囊、不显示余额**：
+宁可什么都不显示，也不显示一个上游从未公布的数字。
+
 ## Antigravity
 
 使用 Google OAuth + `daily-cloudcode-pa.googleapis.com` HTTP 流式接口，
@@ -243,6 +288,8 @@ bundle，并在其上继续自研。以下项目均已致谢。
 | [yhshzh/dsh-cline-pass](https://github.com/yhshzh/dsh-cline-pass) | Cline 路由的主参考：OpenAI 兼容线协议、SSE → harness 翻译、工具调用与思考处理（`reasoning` / `reasoning_content` / `reasoning_details`），以及最重要的 **分模型上游渠道钉住**：`PinProfile` 结构、两套流水线的不同拼写、排除项转白名单规则、按流水线翻译的排序指标，和零消耗的「不可能渠道」探测法。 |
 | [munmunjaklin458-afk/cline-pass-switcher](https://github.com/munmunjaklin458-afk/cline-pass-switcher) | Cline Pass 路由控制器的开山之作：多候选顺序故障转移、单次尝试超时隔离、首块非 SSE / 裸 JSON 错误流探测、真实批量上游可用性校验（`validateUpstreams` 最小请求实测验证），以及错误触发的可用渠道自学习（`learnAvailableProviders`）。 |
 | [GooDAnDReaDY/dsh-clinebot](https://github.com/GooDAnDReaDY/dsh-clinebot) | Cline 次参考：`apiKeyEnv` 凭据引用模式、`disabledModels` 白名单思路、`/users/me/plan/usage-limits` 额度窗口（5 小时 / 每周 / 每月，80% 与 95% 阈值）—— 本仓库 Cline 用量条的来源，以及套餐标签解析。 |
+| [Variyaone/JoyCode2api-VABoost](https://github.com/Variyaone/JoyCode2api-VABoost) | JoyCode 路由的主参考：把京东 JoyCode 的私有协议反向工程成 OpenAI/Anthropic 兼容面。采纳其**三条线上路径**（`chat/completions`、`responses`、原生 `anthropic/messages`）、网关 HMAC 签名与 `functionId` 路由、请求信封与逐路径 `loginType`/`tenant` 默认值、Claude 系必须的 `-hq` 内部模型 id、`ChatToResponses` 的请求转换、**双层包裹的 SSE**（`data: data: {…}`）解析方式、逐族思考映射（GPT 用 `reasoning.effort`、chat 系用 `reasoning_effort` + `thinking` 开关、Claude 用 `output_config.effort`）、能力表与上下文/输出预算，以及 `userInfo` 会**轮换 ptKey** 的保活方式。 |
+| [rosanruan/switch-dev](https://github.com/rosanruan/switch-dev) | JoyCode 凭据层的次参考：`JoyCoder.IDE` 状态库（`state.vscdb`）的跨平台发现路径与只读打开方式、`userName`/`loginType` 默认值处理，以及**扩展版本**读取（网关灰度过期门看的是 joycoder-editor 扩展版本，而不是 App 外壳版本）与灰色拒绝（`AI_GRAY_ACCESS_DENIED` / `COLOR_FORWARD_EXCEPTION`）的识别。 |
 
 ### 与参考项目保持同步
 

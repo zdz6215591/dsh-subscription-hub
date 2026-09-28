@@ -30,6 +30,7 @@ export type ProviderId =
   | 'codebuddy'
   | 'qoder'
   | 'trae'
+  | 'joycode'
   | 'zed'
 
 /** Every provider route, in display order. */
@@ -43,6 +44,7 @@ export const PROVIDER_IDS: readonly ProviderId[] = [
   'codebuddy',
   'qoder',
   'trae',
+  'joycode',
   'copilot',
   'zed',
 ]
@@ -230,6 +232,48 @@ export interface QoderSession {
   region: 'global' | 'china'
 }
 
+/**
+ * JoyCode (京东) session.
+ *
+ * JoyCode signs in through its own IDE, so this route has no OAuth grant of its
+ * own: the credential is a `ptKey` (plus the numeric user id that rides the
+ * request envelope), either pasted by the user or imported from the IDE's state
+ * database.
+ *
+ * `accessToken` and `refreshToken` therefore hold the SAME ptKey — the shared
+ * token manager needs a durable secret to "refresh" with, and here refreshing
+ * means re-validating that key against `userInfo`, which may hand back a ROTATED
+ * one. `expiresAt` is not a token lifetime (a ptKey has none): it is the next
+ * moment this route re-validates, which is how the reference keeps credentials
+ * warm with an hourly pass.
+ */
+export interface JoyCodeSession {
+  /** The ptKey requests authenticate with. */
+  accessToken: string
+  /** The same ptKey: the durable secret a re-validation carries. */
+  refreshToken: string
+  /** Epoch ms of the next re-validation, not of a token expiry. */
+  expiresAt: number
+  /** Numeric JoyCode user id, carried in every request envelope. */
+  userId: string
+  /** Display name for the account row. */
+  account?: string
+  /** Gateway origin; when present requests are signed and routed by functionId. */
+  colorBaseUrl?: string
+  /** Direct API origin override. */
+  masterBaseUrl?: string
+  /** Tenant override (`JOYCODE` / `JD` by default, per path). */
+  tenant?: string
+  /** `loginType` override (`N_PIN_PC` / `PIN_JD_CLOUD` by default, per path). */
+  loginType?: string
+  /** Organization display name, when the account belongs to one. */
+  orgFullName?: string
+  /** The Claude-path ptKey, when the IDE stored a separate one. */
+  anthropicPtKey?: string
+  /** JoyCode client version to present (the installed extension's, when known). */
+  clientVersion?: string
+}
+
 /** One provider's accounts: account key → session, plus the default account. */
 export interface ProviderAccounts<S> {
   /** Key of the account direct (non-pool) routes serve; the first login wins. */
@@ -249,6 +293,7 @@ export interface SessionMap {
   codebuddy?: ProviderAccounts<CodeBuddySession>
   qoder?: ProviderAccounts<QoderSession>
   trae?: ProviderAccounts<TraeSession>
+  joycode?: ProviderAccounts<JoyCodeSession>
   zed?: ProviderAccounts<ZedSession>
 }
 
@@ -264,6 +309,7 @@ export type StoredSession =
   | CodeBuddySession
   | QoderSession
   | TraeSession
+  | JoyCodeSession
   | ZedSession
 
 /** The session type one provider stores. */
@@ -327,6 +373,11 @@ export function accountKeyOf(provider: ProviderId, session: StoredSession): stri
       const identity = trae.account ?? trae.userId ?? tokenHash(trae.refreshToken)
       return `${trae.channel ?? 'solo'}:${identity}`
     }
+    case 'joycode':
+      // The numeric user id is the credential's own identity (it rides every
+      // request envelope), so a re-import of the same IDE login lands on the
+      // same account even after the ptKey has been rotated.
+      return (session as JoyCodeSession).userId
     case 'zed':
       return (session as ZedSession).userId
   }

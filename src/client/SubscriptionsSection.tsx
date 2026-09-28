@@ -42,7 +42,7 @@ const MODEL_FILTER_THRESHOLD = 8
 const MODEL_LIST_MAX_HEIGHT = 260
 
 /** Subscription provider ids, fixed by the node half's OAuth adapters. */
-export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'agy' | 'commandcode' | 'cline' | 'codebuddy' | 'qoder' | 'trae' | 'zed'
+export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'agy' | 'commandcode' | 'cline' | 'codebuddy' | 'qoder' | 'trae' | 'joycode' | 'zed'
 
 /** One logged-in account as answered by the `status` endpoint. */
 export interface AccountStatus {
@@ -301,6 +301,7 @@ const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [  { id
   { id: 'codebuddy', name: 'CodeBuddy' },
   { id: 'qoder', name: 'Qoder' },
   { id: 'trae', name: 'Trae' },
+  { id: 'joycode', name: 'JoyCode (京东)' },
   { id: 'copilot', name: 'GitHub Copilot' },
   { id: 'zed', name: 'Zed Pro' },
 ]
@@ -1137,7 +1138,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [statuses, setStatuses] = useState<Partial<Record<SubscriptionProvider, ProviderStatus>>>({})
   const [errors, setErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
-    codex: '', claude: '', grok: '', copilot: '', agy: '', commandcode: '', cline: '', codebuddy: '', qoder: '', trae: '', zed: '',
+    codex: '', claude: '', grok: '', copilot: '', agy: '', commandcode: '', cline: '', codebuddy: '', qoder: '', trae: '', joycode: '', zed: '',
   })
   /** Pending device-flow codes (copilot), shown while the attempt polls. */
   const [deviceCodes, setDeviceCodes] = useState<Partial<Record<SubscriptionProvider, { userCode: string; verificationUrl: string }>>>({})
@@ -1167,7 +1168,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [proxyBypass, setProxyBypass] = useState('')
   const [proxyProviders, setProxyProviders] = useState<Record<SubscriptionProvider, boolean>>({
     codex: true, claude: true, grok: true, copilot: true,
-    agy: true, commandcode: true, cline: true, codebuddy: true, qoder: true, trae: true, zed: true,
+    agy: true, commandcode: true, cline: true, codebuddy: true, qoder: true, trae: true, joycode: true, zed: true,
   })
   const [proxySaving, setProxySaving] = useState(false)
   const [proxyTesting, setProxyTesting] = useState(false)
@@ -1922,6 +1923,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       codebuddy: proxy.providers.codebuddy !== false,
       qoder: proxy.providers.qoder !== false,
       trae: proxy.providers.trae !== false,
+      joycode: proxy.providers.joycode !== false,
       zed: proxy.providers.zed !== false,
     })
     setProxyMessage(undefined)
@@ -2994,6 +2996,20 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                           {t('importTrae')}
                         </button>
                       )}
+                      {id === 'joycode' && (
+                        <>
+                          <button type="button" style={styles.buttonSmall} onClick={() => { void login(id, 'import') }}>
+                            {t('importJoyCode')}
+                          </button>
+                          <button
+                            type="button"
+                            style={styles.buttonSmall}
+                            onClick={() => { setManualOpen(prev => ({ ...prev, [id]: !prev[id] })) }}
+                          >
+                            {manualOpen[id] ? t('cancel') : t('manualInput')}
+                          </button>
+                        </>
+                      )}
                       {id === 'cline' && (
                         <button
                           type="button"
@@ -3013,7 +3029,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                           </button>
                         </>
                       )}
-                      {id !== 'claude' && id !== 'commandcode' && id !== 'zed' && id !== 'trae' && id !== 'cline' && (
+                      {id !== 'claude' && id !== 'commandcode' && id !== 'zed' && id !== 'trae' && id !== 'cline' && id !== 'joycode' && (
                         <button type="button" style={styles.buttonSmall} onClick={() => { void login(id) }}>
                           {t('loginAccount')}
                         </button>
@@ -3145,6 +3161,27 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                       style={styles.manualInput}
                       value={manualDrafts[id]}
                       placeholder={t('qoderPatPlaceholder')}
+                      autoComplete="off"
+                      onChange={event => setManualDrafts(prev => ({ ...prev, [id]: event.target.value }))}
+                    />
+                    <button type="button" style={styles.buttonSmall} onClick={() => { void submitManual(id) }}>
+                      {t('submit')}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* JoyCode signs in inside its own IDE, so the import button above
+                  covers a desktop. This field is the other way in — a ptKey and
+                  user id read off another machine's JoyCode. */}
+              {!busy && id === 'joycode' && manualOpen[id] && (
+                <div style={styles.manualBox}>
+                  <p style={styles.statusLine}>{t('joyCodePasteHint')}</p>
+                  <div style={styles.manualRow}>
+                    <input
+                      style={styles.manualInput}
+                      value={manualDrafts[id]}
+                      placeholder={t('joyCodePastePlaceholder')}
                       autoComplete="off"
                       onChange={event => setManualDrafts(prev => ({ ...prev, [id]: event.target.value }))}
                     />

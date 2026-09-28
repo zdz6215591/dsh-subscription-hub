@@ -43,6 +43,9 @@ import './tool-registration.spec.js'
 import './token-savings.spec.js'
 import './trae.spec.js'
 import './cline.spec.js'
+// JoyCode: its own protocol module (three wire paths behind one route), so its
+// coverage lives in one file rather than folded into the shared specs.
+import './joycode.spec.js'
 // Registered late: this file existed but was never listed here, so its four
 // agy thoughtSignature tests silently never ran in the directory run.
 import './agy-signature.spec.js'

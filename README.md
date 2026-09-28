@@ -4,7 +4,7 @@ Unified subscription plugin for [DeepSeek Harness](https://github.com/deepseek-a
 
 English | [中文](README.zh.md)
 
-One Settings → **Subscriptions** page for ten subscription routes:
+One Settings → **Subscriptions** page for eleven subscription routes:
 
 | Route | Subscription | Notes |
 | --- | --- | --- |
@@ -16,6 +16,7 @@ One Settings → **Subscriptions** page for ten subscription routes:
 | `cline` | Cline (ClinePass) | paste a `sk_…` key; live quota windows, **per-model upstream channel pinning** |
 | `codebuddy` | Tencent CodeBuddy | browser OAuth, daily auto check-in |
 | `trae` | Trae (CN) | imports the local sign-in from **TRAE SOLO CN** and the **Trae CN IDE**; live catalog, credits, daily auto check-in |
+| `joycode` | JD JoyCode | imports the local JoyCode IDE credential, or paste ptKey + userId; live catalog, **three wire paths chosen per model** |
 | `copilot` | GitHub Copilot | device-code login |
 | `zed` | Zed Pro | Windows import from Credential Manager, or paste userId + token; usage from `cloud.zed.dev/client/users/me` |
 
@@ -288,6 +289,64 @@ reads remaining usage from `GET /client/users/me` (the same cloud API the
 Uses Google OAuth + `daily-cloudcode-pa.googleapis.com` HTTP streaming. It does
 **not** spawn `agy` / `cmd.exe`. Keep Clash/TUN on if Google is blocked.
 
+## JoyCode (京东)
+
+JoyCode is an IDE-first product whose private API has no public documentation. This
+hub speaks it **directly** against JD's gateway — no local JoyCode process is
+involved, which is what makes the route usable on a server.
+
+### Two ways to sign in
+
+- **Import from the JoyCode IDE** (desktop) — reads the credential that IDE stored:
+  the `JoyCoder.IDE` key of the `ItemTable` table in
+  `…/JoyCode/User/globalStorage/state.vscdb`. The database is opened **read-only**, so
+  the running IDE is never blocked; the macOS / Linux / Windows locations, the
+  container mount `/root/.joycode-ide/state.vscdb` and a `JOYCODE_STATE_DB` override
+  are tried in order, and a failed import reports every path it probed.
+- **Paste a ptKey** (a machine without the IDE) — as `ptkey: … userid: …` on one
+  line, or as that key's JSON document.
+
+Both funnel through one `userInfo` call, so nothing is stored until the upstream
+accepts it — and that call can return a **ROTATED ptKey**, which is why this route
+re-validates on the reference's hourly cadence: it keeps the key warm and persists
+whatever the upstream just handed over.
+
+### Three wire paths, chosen per model
+
+Sending a model to the wrong one does not fail loudly — it returns **empty output**
+or a bare business code:
+
+| Family | Wire path | Why |
+| --- | --- | --- |
+| `GPT-*` | `/api/saas/openai/v1/responses` | the chat path answers business code **1032** for these |
+| `Claude-*` | `/api/saas/anthropic/v1/messages`, model name suffixed **`-hq`** | both OpenAI paths return **empty output** for the Claude family; the bare label is refused (**6002**) |
+| everything else (GLM / Kimi / DeepSeek / MiniMax / Doubao / JoyAI) | `/api/saas/openai/v2/chat/completions` | — |
+
+The catalog comes from the live `modelList` (`chatApiModel` is the wire name, `label`
+the display name). Capabilities — the 200k context, each model's output cap, vision —
+are declared only where the reference published them: **an id the table does not
+describe is not guessed at**. A credential that carries a gateway origin gets the
+HMAC-signed gateway with `functionId` routing; anything else uses the direct v2 path.
+
+### Thinking levels
+
+Only models with published level evidence get a picker:
+
+- **GPT family** — `low / medium / high / xhigh / max`, which the reference's own test
+  verifies as five distinct values, mapped onto `reasoning.effort`; `off` sends `none`.
+- **Chat families** (GLM / Kimi / DeepSeek / MiniMax / Doubao) — the level is forwarded
+  verbatim as `reasoning_effort`, and `off` sends `thinking: { type: "disabled" }`;
+  Doubao additionally needs `thinking: { type: "enabled" }` (the reference's own
+  behaviour).
+- **Claude family** — no level evidence exists, so it gets no picker and no thinking
+  parameter is sent.
+
+### Why there is no usage figure
+
+The JoyCode API publishes no balance or quota on this route (the reference tracks
+spend locally instead), so this route shows **no composer pill and no balance**:
+nothing is displayed rather than a number upstream never disclosed.
+
 ## Referenced projects
 
 This hub is a **derivative aggregation**: it merges the feature surface and bug
@@ -318,6 +377,8 @@ work on top. Credit and thanks to every project below.
 | [munmunjaklin458-afk/cline-pass-switcher](https://github.com/munmunjaklin458-afk/cline-pass-switcher) | The seminal Cline Pass routing controller: upstream multi-candidate sequential failover, per-attempt timeout isolation, bare-JSON error stream detection before the first chunk, real batch channel validation (`validateUpstreams` with min-request verification), and error-triggered available-provider learning (`learnAvailableProviders`). |
 | [GooDAnDReaDY/dsh-clinebot](https://github.com/GooDAnDReaDY/dsh-clinebot) | Secondary Cline reference: the `apiKeyEnv` credential-reference pattern, the `disabledModels` allow-list model, the `/users/me/plan/usage-limits` quota windows (5-hour / weekly / monthly with 80% and 95% thresholds) that back this hub's Cline usage bars, and the plan-label parsing. |
 | [masknull/dsh-qoder-connect](https://github.com/masknull/dsh-qoder-connect) | Primary reference for the Qoder route: the PAT → job-token exchange and its cache/single-flight, the two-region endpoint table (`api3.qoder.sh` / `gateway.qoder.com.cn`), the `Encode=1` WAF body codec (custom alphabet plus the three-chunk Base64 rotation), the COSY RSA+AES+MD5 signature header set, the `agent_chat_generation` request envelope and its encoded SSE, the `model/list` catalog with its per-model `context_config` (default vs largest window), and the `quota/usage` + `user/plan` + `user/status` credit views. |
+| [Variyaone/JoyCode2api-VABoost](https://github.com/Variyaone/JoyCode2api-VABoost) | Primary reference for the JoyCode route: a Go proxy that reverse-engineers JD's private JoyCode protocol into OpenAI/Anthropic shapes. Adopted its **three wire paths** (`chat/completions`, `responses`, native `anthropic/messages`), the gateway HMAC signature and `functionId` routing, the request envelope with its per-path `loginType`/`tenant` defaults, the `-hq` internal Claude model ids, the `ChatToResponses` request translation, the **double-wrapped SSE** (`data: data: {…}`) shape, the per-family thinking mapping (GPT `reasoning.effort`, chat `reasoning_effort` + the `thinking` switch, Claude `output_config.effort`), the capability table with its context/output budgets, and the `userInfo` keepalive that **rotates the ptKey**. |
+| [rosanruan/switch-dev](https://github.com/rosanruan/switch-dev) | Secondary reference for JoyCode's credential layer: the cross-platform discovery and read-only open of the `JoyCoder.IDE` state database (`state.vscdb`), its `userName`/`loginType` default handling, and the **extension-version** read — the gateway's gray-release gate trusts the joycoder-editor extension's version rather than the app shell's — plus recognition of the `AI_GRAY_ACCESS_DENIED` / `COLOR_FORWARD_EXCEPTION` gray refusals. |
 
 ### Keeping in sync with the reference projects
 

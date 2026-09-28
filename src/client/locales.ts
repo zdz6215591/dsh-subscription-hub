@@ -162,6 +162,12 @@ export const en = {
   importZed: 'Import from Zed desktop',
   importCommandCode: 'Import from Command Code CLI',
   importTrae: 'Import from Trae',
+  importJoyCode: 'Import from JoyCode IDE',
+  joyCodePasteHint:
+    'JoyCode signs in inside its own IDE, so one-click import reads the credential that IDE stored (state.vscdb). '
+    + 'On a machine without JoyCode, paste the ptKey AND the numeric user id — as "ptkey: … userid: …" on one line, '
+    + 'or as the JSON document the IDE keeps under the JoyCoder.IDE key.',
+  joyCodePastePlaceholder: 'ptkey: … userid: …',
   traeHint: 'Reads the sign-in already present in your local Trae installs (TRAE SOLO CN and the Trae CN IDE) — no token paste needed. Sign in inside the Trae app first; reading is read-only.',
   commandCodePasteHint: 'Paste a Command Code API key (user_…), or ~/.commandcode/auth.json.',
   visibilityTitle: 'Visible models',
@@ -376,6 +382,12 @@ export const zh = {
   importZed: '从 Zed 桌面导入',
   importCommandCode: '从 Command Code CLI 导入',
   importTrae: '从 Trae 导入',
+  importJoyCode: '从 JoyCode IDE 导入',
+  joyCodePasteHint:
+    'JoyCode 只能在它自己的 IDE 里登录，所以「一键导入」读取的是该 IDE 已保存的凭据（state.vscdb）。'
+    + '本机没装 JoyCode 时，请改为粘贴 ptKey 和数字 user id——写成一行「ptkey: … userid: …」，'
+    + '或直接粘贴 IDE 中 JoyCoder.IDE 键对应的 JSON 内容。',
+  joyCodePastePlaceholder: 'ptkey: … userid: …',
   traeHint: '直接读取本机已登录的 Trae（TRAE SOLO CN / Trae CN IDE），无需粘贴 Token。请先在 Trae 客户端完成登录；读取为只读操作。',
   commandCodePasteHint: '粘贴 Command Code API key（user_…），或 ~/.commandcode/auth.json 内容。',
   visibilityTitle: '显示的模型',
