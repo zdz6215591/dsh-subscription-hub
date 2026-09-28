@@ -741,6 +741,33 @@ test('joycode resolves the -agent deployment suffix to its base model', () => {
   assert.equal(joyCodeModel('Kimi-K2.6-agent'), undefined)
 })
 
+test('joycode reads the live chat framing it was verified against', async () => {
+  // Captured from the real upstream (2026-09-28): plain SSE frames whose deltas
+  // carry `reasoning_content`, a final chunk with `finish_reason` + `usage`, and a
+  // `[DONE]` terminator. This is the fixture the route was verified against.
+  const frames = [
+    'data: {"model_version":"1.0","created":1790583744,"model":"GLM-5.3","id":"live-1","choices":[{"delta":{"role":"assistant","reasoning_content":"The"},"index":0}],"object":"chat.completion.chunk"}',
+    'data: {"model_version":"1.0","created":1790583744,"model":"GLM-5.3","id":"live-1","choices":[{"delta":{"role":"assistant","content":"ok"},"index":0}],"object":"chat.completion.chunk"}',
+    'data: {"model_version":"1.0","created":1790583744,"usage":{"completion_tokens":64,"prompt_tokens":20,"total_tokens":84},"model":"GLM-5.3","id":"live-1","choices":[{"finish_reason":"length","delta":{"role":"assistant","content":""},"index":0}],"object":"chat.completion.chunk"}',
+    'data: [DONE]',
+    '',
+  ].join('\n\n')
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(frames))
+      controller.close()
+    },
+  })
+  const chunks: StreamChunk[] = []
+  for await (const chunk of streamChatCompletions(normalizeChatSse(body))) chunks.push(chunk)
+  // The normalizer must not touch a body that already is what the route expects.
+  assert.ok(chunks.some(chunk => chunk.type === 'reasoning-delta'))
+  assert.equal(chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''), 'ok')
+  const usage = chunks.find(chunk => chunk.type === 'usage') as { usage?: { inputTokens: number, outputTokens: number } } | undefined
+  assert.equal(usage?.usage?.inputTokens, 20)
+  assert.ok(chunks.some(chunk => chunk.type === 'finish'))
+})
+
 // ------------------------------------------------------------------ adapter
 
 test('joycode capabilities come from the pinned table, never from a guess', async () => {
