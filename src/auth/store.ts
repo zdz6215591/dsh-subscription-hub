@@ -27,6 +27,7 @@ export type ProviderId =
   | 'agy'
   | 'commandcode'
   | 'cline'
+  | 'freebuff'
   | 'codebuddy'
   | 'qoder'
   | 'trae'
@@ -41,6 +42,7 @@ export const PROVIDER_IDS: readonly ProviderId[] = [
   'agy',
   'commandcode',
   'cline',
+  'freebuff',
   'codebuddy',
   'qoder',
   'trae',
@@ -274,6 +276,30 @@ export interface JoyCodeSession {
   clientVersion?: string
 }
 
+/**
+ * Freebuff (freebuff.com) session.
+ *
+ * Freebuff publishes no OAuth client this plugin can drive: the credential is a
+ * BROWSER SESSION — a Bearer token or the site's cookie string — which the user
+ * pastes (the reference project also ships a browser extension that captures it).
+ * `accessToken` carries the token, `cookie` the cookie string when the paste was
+ * one; a request presents whichever of the two the API expects.
+ */
+export interface FreebuffSession {
+  /** The Bearer token a request authenticates with. */
+  accessToken: string
+  /** The durable secret a refresh re-reads (the same browser session). */
+  refreshToken: string
+  /** Epoch ms the credential is next re-checked (a browser session has no stated TTL). */
+  expiresAt: number
+  /** Display name for the account row. */
+  account?: string
+  /** The `cookie:` header, when the credential came from a browser session. */
+  cookie?: string
+  /** Plan label the balance endpoint reported, when it reported one. */
+  plan?: string
+}
+
 /** One provider's accounts: account key → session, plus the default account. */
 export interface ProviderAccounts<S> {
   /** Key of the account direct (non-pool) routes serve; the first login wins. */
@@ -290,6 +316,7 @@ export interface SessionMap {
   agy?: ProviderAccounts<AgySession>
   commandcode?: ProviderAccounts<CommandCodeSession>
   cline?: ProviderAccounts<ClineSession>
+  freebuff?: ProviderAccounts<FreebuffSession>
   codebuddy?: ProviderAccounts<CodeBuddySession>
   qoder?: ProviderAccounts<QoderSession>
   trae?: ProviderAccounts<TraeSession>
@@ -306,6 +333,7 @@ export type StoredSession =
   | AgySession
   | CommandCodeSession
   | ClineSession
+  | FreebuffSession
   | CodeBuddySession
   | QoderSession
   | TraeSession
@@ -354,6 +382,12 @@ export function accountKeyOf(provider: ProviderId, session: StoredSession): stri
       // A Cline key IS the identity: there is no account endpoint to name a
       // user, and re-pasting the same key must land on the same account.
       return (session as ClineSession).account ?? tokenHash(session.refreshToken)
+    case 'freebuff': {
+      // Freebuff has no account endpoint this route reads yet, so the key IS the
+      // identity hash: re-pasting the same browser session lands on the same row.
+      const freebuff = session as FreebuffSession
+      return freebuff.account ?? tokenHash(freebuff.refreshToken)
+    }
     case 'codebuddy':
       return (session as CodeBuddySession).uid
     case 'qoder': {

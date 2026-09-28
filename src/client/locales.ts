@@ -212,6 +212,8 @@ export const en = {
   clinePinReset: 'Back to auto',
   clinePasteHint: 'Paste a Cline Pass API key (sk_…) from app.cline.bot. Cline has no browser sign-in, so the key itself is the login.',
   clineKeyPlaceholder: 'sk_…',
+  freebuffPasteHint: 'Paste a Freebuff Bearer token, or the freebuff.com cookie string. Freebuff has no OAuth client: a browser session IS the credential.',
+  freebuffPastePlaceholder: 'Bearer token / cookie string',
   qoderPasteHint:
     'Qoder signs in with a Personal Access Token: mint one on your Qoder account page (qoder.com, or qoder.com.cn for the China deployment), then paste it here. '
     + 'The token is tried against both deployments and whichever accepts it is recorded, so the region does not need choosing — prefix it with "global:" or "china:" to pin one instead.',
@@ -435,6 +437,8 @@ export const zh = {
   clinePinReset: '恢复自动',
   clinePasteHint: '粘贴 app.cline.bot 控制台里的 Cline Pass API Key（sk_…）。Cline 没有浏览器登录，Key 本身就是登录凭据。',
   clineKeyPlaceholder: 'sk_…',
+  freebuffPasteHint: '粘贴 Freebuff 的 Bearer token，或 freebuff.com 的 Cookie 串。Freebuff 没有 OAuth 客户端：浏览器登录态本身就是凭据。',
+  freebuffPastePlaceholder: 'Bearer token / Cookie 串',
   qoderPasteHint:
     'Qoder 使用「个人访问令牌」(Personal Access Token) 登录：在 Qoder 账号页面（国内版 qoder.com.cn，国际版 qoder.com）生成后粘贴到这里。'
     + '令牌会依次在两个部署上验证，并记住接受它的那个，所以无需自己选区域——若确知区域，可用 "global:" 或 "china:" 前缀直接指定。',

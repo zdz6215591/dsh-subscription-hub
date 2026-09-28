@@ -42,7 +42,7 @@ const MODEL_FILTER_THRESHOLD = 8
 const MODEL_LIST_MAX_HEIGHT = 260
 
 /** Subscription provider ids, fixed by the node half's OAuth adapters. */
-export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'agy' | 'commandcode' | 'cline' | 'codebuddy' | 'qoder' | 'trae' | 'joycode' | 'zed'
+export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'agy' | 'commandcode' | 'cline' | 'freebuff' | 'codebuddy'  | 'qoder' | 'trae' | 'joycode' | 'zed'
 
 /** One logged-in account as answered by the `status` endpoint. */
 export interface AccountStatus {
@@ -298,6 +298,7 @@ const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [  { id
   { id: 'agy', name: 'Antigravity' },
   { id: 'commandcode', name: 'Command Code Go' },
   { id: 'cline', name: 'Cline' },
+  { id: 'freebuff', name: 'Freebuff' },
   { id: 'codebuddy', name: 'CodeBuddy' },
   { id: 'qoder', name: 'Qoder' },
   { id: 'trae', name: 'Trae' },
@@ -1138,7 +1139,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [statuses, setStatuses] = useState<Partial<Record<SubscriptionProvider, ProviderStatus>>>({})
   const [errors, setErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
-    codex: '', claude: '', grok: '', copilot: '', agy: '', commandcode: '', cline: '', codebuddy: '', qoder: '', trae: '', joycode: '', zed: '',
+    codex: '', claude: '', grok: '', copilot: '', agy: '', commandcode: '', cline: '', freebuff: '', codebuddy: '', qoder: '', trae: '', joycode: '', zed: '',
   })
   /** Pending device-flow codes (copilot), shown while the attempt polls. */
   const [deviceCodes, setDeviceCodes] = useState<Partial<Record<SubscriptionProvider, { userCode: string; verificationUrl: string }>>>({})
@@ -1168,7 +1169,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [proxyBypass, setProxyBypass] = useState('')
   const [proxyProviders, setProxyProviders] = useState<Record<SubscriptionProvider, boolean>>({
     codex: true, claude: true, grok: true, copilot: true,
-    agy: true, commandcode: true, cline: true, codebuddy: true, qoder: true, trae: true, joycode: true, zed: true,
+    agy: true, commandcode: true, cline: true, freebuff: true, codebuddy: true, qoder: true, trae: true, joycode: true, zed: true,
   })
   const [proxySaving, setProxySaving] = useState(false)
   const [proxyTesting, setProxyTesting] = useState(false)
@@ -1699,10 +1700,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const login = useCallback(async (provider: SubscriptionProvider, method?: 'oauth' | 'keychain' | 'import'): Promise<void> => {
     if (rpc === undefined) return
     setProviderError(provider, undefined)
-    // Cline and Qoder have no OAuth or device flow: the credential IS something
-    // the user pastes, so the paste field is the sign-in and there is nothing to
-    // call on the host yet.
-    if (provider === 'cline' || provider === 'qoder') {
+    // Cline, Qoder and Freebuff have no OAuth or device flow: the credential IS
+    // something the user pastes, so the paste field is the sign-in and there is
+    // nothing to call on the host yet.
+    if (provider === 'cline' || provider === 'qoder' || provider === 'freebuff') {
       setManualOpen(prev => ({ ...prev, [provider]: true }))
       return
     }
@@ -1920,6 +1921,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       agy: proxy.providers.agy !== false,
       commandcode: proxy.providers.commandcode !== false,
       cline: proxy.providers.cline !== false,
+      freebuff: proxy.providers.freebuff !== false,
       codebuddy: proxy.providers.codebuddy !== false,
       qoder: proxy.providers.qoder !== false,
       trae: proxy.providers.trae !== false,
@@ -3013,6 +3015,16 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                           </button>
                         </>
                       )}
+                      {id === 'freebuff' && (
+                        <button
+                          type="button"
+                          style={styles.buttonSmall}
+                          onClick={() => { setManualOpen(prev => ({ ...prev, [id]: !prev[id] })) }}
+                        >
+                          {manualOpen[id] ? t('cancel') : t('loginAccount')}
+                        </button>
+                      )}
+
                       {id === 'cline' && (
                         <button
                           type="button"
@@ -3128,6 +3140,27 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                       </button>
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* Cline's only login is a pasted API key              {/* Freebuff's only login is a pasted browser session (a Bearer token
+                  or the site's Cookie string): no OAuth client exists, so the
+                  paste field IS the sign-in, exactly as for Cline. */}
+              {!busy && id === 'freebuff' && manualOpen[id] && (
+                <div style={styles.manualBox}>
+                  <p style={styles.statusLine}>{t('freebuffPasteHint')}</p>
+                  <div style={styles.manualRow}>
+                    <input
+                      style={styles.manualInput}
+                      value={manualDrafts[id]}
+                      placeholder={t('freebuffPastePlaceholder')}
+                      autoComplete="off"
+                      onChange={event => setManualDrafts(prev => ({ ...prev, [id]: event.target.value }))}
+                    />
+                    <button type="button" style={styles.buttonSmall} onClick={() => { void submitManual(id) }}>
+                      {t('submit')}
+                    </button>
+                  </div>
                 </div>
               )}
 
