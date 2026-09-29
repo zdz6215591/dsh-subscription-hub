@@ -59,8 +59,8 @@ import type { FreebuffCliProbe } from './freebuff/client.js'
 import {
   freebuffCliCodeUrl,
   freebuffCliStatusUrl,
-  freebuffInstanceId,
 } from './freebuff/client.js'
+import { freebuffReadInstanceId } from './freebuff/claim.js'
 import { freebuffSessionFromBearer } from './freebuff-session.js'
 
 /**
@@ -472,9 +472,15 @@ async function freebuffCliLoginStatus(
   // reading it back would only create a second source of truth.
 }
 
-/** The instance id a credential will speak for (re-exported for diagnostics). */
+/**
+ * The instance this process currently speaks for, for diagnostics.
+ *
+ * The live claim's instance, or the one the NEXT turn will mint — never a value
+ * derived from the credential: an attempt id belongs to one session start
+ * (`./freebuff/claim.ts`).
+ */
 export function freebuffCliInstanceId(accessToken: string): string {
-  return freebuffInstanceId(accessToken)
+  return freebuffReadInstanceId(accessToken)
 }
 
 /** Combine a caller's cancellation with this module's own request bound. */

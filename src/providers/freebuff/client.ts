@@ -46,6 +46,13 @@
  *     `x-freebuff-heartbeat` + `x-freebuff-include-unused-rate-limits` (GET) and
  *     `x-freebuff-model` + `x-freebuff-wallet-spend-limit` (POST).
  *
+ *     That instance id is an ATTEMPT, not an account identity: it is one session
+ *     start, and the upstream retires it for good once the attempt is over — see
+ *     `./claim.js` for the live bytes and the CLI's own lifecycle. It must
+ *     therefore be minted per claim (never derived from the credential) and
+ *     rotated when the upstream says the claim is gone
+ *     ({@link freebuffAdmissionVerdict}).
+ *
  * Live 2026-09-28, a free account behind a REAL CLI credential still answers
  * `403 free_mode_cli_required` ("Calling the API directly is not supported and
  * may get your account banned") to this route's chat call, so free mode remains
@@ -278,6 +285,24 @@ export function freebuffSessionAdmissionUrl(): string {
   return `${FREEBUFF_API_BASE}${FREEBUFF_SESSION_ADMISSION_PATH}`
 }
 
+/**
+ * Where an attempt is RELEASED.
+ *
+ * The CLI builds this as `pJA(H) + "/attempt"` and only for a `cli:`-prefixed
+ * instance (`CV`: `E = H==="DELETE" && D ? `${pJA(H)}/attempt` : pJA(H)`), so a
+ * `DELETE` from here ends the ATTEMPT the caller names — not the account's other
+ * session. Live 2026-09-29 it answered
+ * `200 {"status":"ended","desktopAttemptId":"<uuid>","refundReceiptId":"…",
+ * "freebucksRefundPending":true}`, and the freed slot admitted a fresh attempt
+ * immediately after.
+ */
+export const FREEBUFF_SESSION_ATTEMPT_PATH = `${FREEBUFF_SESSION_PATH}/attempt`
+
+/** The attempt-release URL (`${pJA("DELETE")}/attempt`). */
+export function freebuffSessionAttemptUrl(): string {
+  return `${FREEBUFF_API_BASE}${FREEBUFF_SESSION_ATTEMPT_PATH}`
+}
+
 /** The agent-run bootstrap URL (`src/upstream.rs:229`; CLI `qDA`). */
 export function freebuffRunUrl(): string {
   return `${FREEBUFF_API_BASE}${FREEBUFF_AGENT_RUNS_PATH}`
@@ -315,41 +340,6 @@ export interface FreebuffCliProbe {
   fingerprintHash: string
   /** When the code expires, as the upstream stated it. */
   expiresAt?: string
-}
-
-/** FNV-1a 64, the reference's zero-dependency stable hash (`src/web_protocol.rs:23-33`). */
-function fnv1a64(value: string): bigint {
-  let hash = 0xcbf2_9ce4_8422_2325n
-  for (const byte of new TextEncoder().encode(value)) {
-    hash = ((hash ^ BigInt(byte)) * 0x0000_0100_0000_01b3n) & 0xffff_ffff_ffff_ffffn
-  }
-  return hash
-}
-
-/**
- * The `x-freebuff-instance-id` a credential presents.
- *
- * The CLI derives a fresh `cli:<uuid>` per process (`wr()`, and its `wr()` uses
- * `crypto.randomUUID()`) and reuses a stored one when it can resume; deriving it
- * deterministically from the credential gives the same stability with nothing to
- * persist — same account → same instance, different accounts → different ones.
- *
- * The shape is a REAL UUID v4, version nibble AND variant nibble, not merely
- * UUID-shaped: live 2026-09-28 the admission endpoint answered
- * `400 {"error":"invalid_attempt_id"}` to a value whose variant nibble was not
- * one of 8/9/a/b, so the server parses this as a uuid rather than taking it as an
- * opaque string.
- * @param credential - the Bearer token.
- * @returns a `cli:`-prefixed UUID-v4-shaped instance id.
- */
-export function freebuffInstanceId(credential: string): string {
-  const seed = credential.trim()
-  const a = fnv1a64(seed).toString(16).padStart(16, '0')
-  const b = fnv1a64(`${seed}#instance`).toString(16).padStart(16, '0')
-  const hex = `${a}${b}`
-  const variant = (Number.parseInt(hex.slice(16, 17), 16) & 0x3) | 0x8
-  return `${FREEBUFF_CLI_INSTANCE_PREFIX}${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-`
-    + `${variant.toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`
 }
 
 /**
@@ -558,8 +548,15 @@ export interface FreebuffChatBodyInput {
   maxTokens?: number
   /** The level the caller asked for, before the ladder rule is applied. */
   reasoningEffort?: string
-  /** The credential, so the body's instance id matches the account. */
-  credential: string
+  /**
+   * The instance the chat speaks for — the one the ADMISSION accepted.
+   *
+   * It is passed in rather than derived: the attempt id is per claim
+   * (`./claim.js`), and the chat body's `freebuff_instance_id` has to be the
+   * very attempt the run was started for, not a value recomputed from the
+   * credential.
+   */
+  instanceId: string
   /**
    * The run id `POST /api/v1/agent-runs` handed back.
    *
@@ -612,7 +609,7 @@ export function freebuffEffortBodyField(model: string, requested?: string): Reco
  * @returns the JSON body to send.
  */
 export function freebuffChatBody(input: FreebuffChatBodyInput): Record<string, unknown> {
-  const instance = freebuffInstanceId(input.credential)
+  const instance = input.instanceId
   const level = freebuffEffortFor(input.model, input.reasoningEffort)
   return {
     model: input.model,
@@ -765,25 +762,339 @@ export function freebuffTextError(status: number, body: string, label: string): 
 }
 
 /**
- * Classify a session/admission answer.
+ * What a session/admission answer means for the ATTEMPT it was sent for.
  *
- * The desktop session endpoint answers HTTP 200 with a `status` field rather
- * than an error code, and the CLI drives a whole state machine off it
- * (`CV` → `active`/`none`/`queued`/`disabled`/`ended`/`superseded`, plus the
- * takeover and model-lock statuses). Only `active` means the instance may chat:
+ * The upstream answers the same endpoint with a `status` word rather than an
+ * error code, and the CLI drives a state machine off exactly this vocabulary
+ * (`CV`'s 409 list: `model_locked`, `model_unavailable`, `premium_slot_taken`,
+ * `purchase_claim_released`, `purchase_in_use`, `purchase_capacity`,
+ * `first_tab_discount_changed`, `consent_required`; its 429 list:
+ * `rate_limited`, `spend_limited`, `ip_capped`; its `hc$` switch also names
+ * `active`, `ended`, `none`, `superseded`, `takeover_prompt`, `country_blocked`,
+ * `banned`). The classification below is that state machine, reduced to what a
+ * non-interactive route can act on:
  *
- *   - `queued` is the waiting room, and taking the queue's own retry hint is what
- *     the reference does (`src/errors.rs:158-162` treats a bare `queue` as a
- *     waiting room on a 429/503);
- *   - `purchase_capacity` / `premium_slot_taken` / `purchase_in_use` mean another
- *     desktop session holds this account's only free slot — live 2026-09-28 the
- *     admission POST answered `409 {"status":"purchase_capacity","concurrency":
- *     "slot-bound","slotLimit":1}` for exactly that reason. The CLI answers this
- *     with an interactive "take over?" prompt, which a plugin must not do
- *     unattended, so the upstream's words are reported instead;
- *   - anything else (including `banned`/`country_blocked`) goes through the same
- *     text rules as every other refusal, with the status word included so the
- *     reader sees what the upstream called it.
+ *   - `active` — the claim is live; the attempt may chat;
+ *   - `retired` — the attempt is DEAD FOR GOOD and must be replaced:
+ *     `purchase_claim_released` (the claim was released: live 2026-09-29 the
+ *     account's slot read `"premium":0` with `desktopPurchases:[]` while the
+ *     attempt kept being refused, so this is about the attempt, not about
+ *     capacity) and `admission_attempt_closed` (an attempt that a `DELETE
+ *     /attempt` cancelled: its own words are «This session start was cancelled
+ *     before it finished. Start again to open a new session.»). The CLI's answer
+ *     to `purchase_claim_released` is the same conclusion — it marks the
+ *     instance stale (`Q=!0`), tells the user «This session was released. Choose
+ *     a model to start a new session.» and mints `J=wr()` on the next start;
+ *   - `no-claim` — `none`/`ended`/`superseded`: no session exists for this
+ *     attempt at all, so it is worth replacing too (the CLI's own effect re-mints
+ *     whenever a session is not active, e.g. `x3A`/`C3A` for a stale legacy
+ *     instance);
+ *   - `slot-held` — `purchase_capacity`/`premium_slot_taken`/`purchase_in_use`:
+ *     ANOTHER session (the CLI's, or an earlier process's) holds the account's
+ *     single free slot. Minting a new attempt cannot help — live 2026-09-29 a
+ *     fresh attempt while another claim was live answered
+ *     `409 {"status":"purchase_capacity","currentInstanceId":"cli:<the holder>",
+ *     "concurrency":"slot-bound","slotLimit":1}`. The CLI resolves this with a
+ *     "take over?" prompt, which a plugin must not do unattended, so the holder
+ *     is NAMED and the remedy is spelled out instead;
+ *   - `wait` — the waiting room and the 429 family;
+ *   - `refused` — everything else, reported with the upstream's own words.
+ */
+export type FreebuffAdmissionVerdict = 'active' | 'retired' | 'no-claim' | 'slot-held' | 'wait' | 'refused'
+
+/** The `status` words the upstream uses for an attempt that is over. */
+const FREEBUFF_RETIRED_STATUSES = ['purchase_claim_released', 'admission_attempt_closed']
+/** The `status` words for "no session for this attempt". */
+const FREEBUFF_NO_CLAIM_STATUSES = ['none', 'ended', 'superseded']
+/** The `status` words for "somebody else holds the slot". */
+const FREEBUFF_SLOT_HELD_STATUSES = ['purchase_capacity', 'premium_slot_taken', 'purchase_in_use']
+
+/** How one session/admission answer reads. */
+export interface FreebuffSessionReading {
+  /** The upstream's own status word (its `error` field when there is no `status`). */
+  status: string
+  /** What it means for the attempt. */
+  verdict: FreebuffAdmissionVerdict
+  /** The error to throw, or undefined when the verdict is `active`. */
+  error?: LlmError
+}
+
+/** Options for {@link freebuffSessionStatus}. */
+export interface FreebuffSessionStatusOptions {
+  /** The raw body, so a non-JSON answer is still quoted in the message. */
+  body?: string
+  /** The attempt the answer was requested for (`cli:<uuid>`). */
+  attempt?: string
+  /** The FRESH attempt already tried after `attempt` was retired. */
+  freshAttemptTried?: string
+}
+
+/** A qualified holder, read out of the admission's `desktopPurchases` (`wJA`'s record shape). */
+function freebuffHeldPurchase(payload: unknown): { model?: string; instanceId?: string } | undefined {
+  if (typeof payload !== 'object' || payload === null) return undefined
+  const purchases = (payload as Record<string, unknown>).desktopPurchases
+  if (!Array.isArray(purchases) || purchases.length === 0) return undefined
+  const first = purchases[0]
+  if (typeof first !== 'object' || first === null) return undefined
+  const record = first as Record<string, unknown>
+  const model = freebuffFirstString(record.model)
+  const instanceId = freebuffFirstString(record.holderInstanceId, record.instanceId, (payload as Record<string, unknown>).currentInstanceId)
+  return model === undefined && instanceId === undefined ? undefined : { ...model === undefined ? {} : { model }, ...instanceId === undefined ? {} : { instanceId } }
+}
+
+/**
+ * Read a session/admission answer: its verdict, and the error to throw.
+ *
+ * The vocabulary is {@link FreebuffAdmissionVerdict}'s; each status carries the
+ * remedy in the user's own terms — what to do in the CLI — because a bare
+ * `HTTP 409` told the reader nothing about a state the upstream distinguishes by
+ * name (that is exactly how the release defect was reported).
+ * @param payload - the parsed answer body (undefined when it was not JSON).
+ * @param httpStatus - the HTTP status it arrived with.
+ * @param label - diagnostic prefix.
+ * @param options - the raw body and the attempts involved.
+ * @returns the verdict and error.
+ */
+export function freebuffSessionStatus(
+  payload: unknown,
+  httpStatus: number,
+  label: string,
+  options: FreebuffSessionStatusOptions = {},
+): FreebuffSessionReading {
+  const record = typeof payload === 'object' && payload !== null ? payload as Record<string, unknown> : {}
+  const status = freebuffFirstString(record.status, record.error) ?? ''
+  const text = options.body ?? JSON.stringify(payload) ?? ''
+  const shown = text.trim() === '' ? '' : `: ${text.slice(0, 300)}`
+  const attemptClause = options.attempt === undefined ? '' : ` for attempt ${options.attempt}`
+  /** The sentence that explains a status the route did NOT mint fresh for. */
+  const retried = options.freshAttemptTried !== undefined
+
+  if (status === 'active') return { status, verdict: 'active' }
+
+  if (status.startsWith('queued') || status.includes('waiting_room')) {
+    return {
+      status,
+      verdict: 'wait',
+      error: new LlmError(
+        `${label} is in the waiting room (${status})${record.position === undefined ? '' : ` at position ${String(record.position)}`}`,
+        'RATE_LIMIT',
+        { status: httpStatus, providerRetryAfterMs: FREEBUFF_QUEUE_RETRY_MS },
+      ),
+    }
+  }
+
+  if (FREEBUFF_RETIRED_STATUSES.includes(status)) {
+    const closed = status === 'admission_attempt_closed'
+    const upstream = freebuffFirstString(record.message)
+    const release = closed
+      ? `the upstream CANCELLED that session start (admission_attempt_closed`
+        + `${upstream === undefined ? '' : `: "${upstream}"`}), and a cancelled attempt id is refused for good`
+      : 'the upstream RELEASED that session start (purchase_claim_released), and a released attempt id is refused for good'
+    return {
+      status,
+      verdict: 'retired',
+      error: new LlmError(
+        `${label} refused attempt ${options.attempt ?? '(this attempt)'}${shown} — ${release}. `
+        + (retried
+          ? `This route already opened a NEW attempt (${String(options.freshAttemptTried)}) and the upstream refused that one too, `
+            + 'so nothing local is stale: the account itself has no open session to claim right now. '
+          : '')
+        + 'The Freebuff CLI answers this state by starting a NEW session: run `freebuff`, then pick a model in the picker '
+        + '(its own words: "This session was released. Choose a model to start a new session."), and if the CLI refuses '
+        + 'too, run `/end-session` there first so the account is left with no open session.',
+        'HTTP_409',
+        { status: httpStatus },
+      ),
+    }
+  }
+
+  if (FREEBUFF_SLOT_HELD_STATUSES.includes(status)) {
+    const held = freebuffHeldPurchase(payload)
+    const holder = held?.instanceId ?? freebuffFirstString(record.currentInstanceId)
+    const holderModel = held?.model
+    const slotLimit = record.slotLimit
+    const holderClause = holder === undefined
+      ? ''
+      : ` (holder instance ${holder}${holderModel === undefined ? '' : `, model ${holderModel}`}`
+        + `${slotLimit === undefined ? '' : `, slotLimit ${String(slotLimit)}`})`
+    return {
+      status,
+      verdict: 'slot-held',
+      error: new LlmError(
+        `${label} refused${attemptClause}${shown} — another desktop session holds this account's only free slot`
+        + `${holderClause}. `
+        + (holderModel === undefined
+          ? 'End that session in the Freebuff CLI (`/end-session`) or wait for it to expire, then try again.'
+          : `If you meant to continue it, ask this route for ${holderModel}; otherwise end it in the Freebuff CLI `
+            + '(`/end-session`) or wait for it to expire, then try again.'),
+        'HTTP_409',
+        { status: httpStatus },
+      ),
+    }
+  }
+
+  if (status === 'model_locked') {
+    const requested = freebuffFirstString(record.requestedModel)
+    const current = freebuffFirstString(record.currentModel)
+    return {
+      status,
+      verdict: 'refused',
+      error: new LlmError(
+        `${label} refused${attemptClause}${shown} — this account is already in an active session`
+        + `${current === undefined ? '' : ` on ${current}`}, and the admission binds a session to one model. `
+        + (current === undefined || requested === undefined
+          ? 'End it in the Freebuff CLI (`/end-session`), then try again.'
+          : `Ended your previous session on ${current} and switched to ${requested} is what the CLI does; here, run `
+            + '`/end-session` in the CLI, then pick the model again. (Sessions end on their own after 1 hour.)'),
+        'HTTP_404',
+        { status: httpStatus },
+      ),
+    }
+  }
+
+  if (status === 'model_unavailable') {
+    const requested = freebuffFirstString(record.requestedModel, record.currentModel)
+    const available = freebuffFirstString(record.availableHours, record.message)
+    return {
+      status,
+      verdict: 'refused',
+      error: new LlmError(
+        `${label} refused${attemptClause}${shown} — ${requested === undefined ? 'this model' : requested} is not available to this account right now`
+        + `${available === undefined ? '' : `: ${available}`}`
+        + `${record.withdrawn === true ? ' (the upstream has WITHDRAWN it)' : ''}. Pick another free model on this route.`,
+        'HTTP_404',
+        { status: httpStatus },
+      ),
+    }
+  }
+
+  if (status === 'first_tab_discount_changed' || status === 'consent_required') {
+    const walletSpend = (() => {
+      const consent = record.walletConsent
+      if (typeof consent !== 'object' || consent === null) return undefined
+      const value = (consent as Record<string, unknown>).walletSpend
+      // The CLI interpolates this field, so it is a number as often as a string
+      // (`FH.walletConsent.walletSpend`).
+      if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+      return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
+    })()
+    return {
+      status,
+      verdict: 'refused',
+      error: new LlmError(
+        `${label} refused${attemptClause}${shown} — `
+        + (status === 'first_tab_discount_changed'
+          ? 'the first-tab discount changed, so the upstream wants the model chosen again (its words: "Your first-tab '
+            + 'discount changed. Review the model menu and choose again. No Freebucks were charged."). This route sends '
+            + 'the discount flag as 0, so re-pick the model here, or choose it in the CLI.'
+          : 'the upstream wants the wallet spend confirmed'
+            + `${walletSpend === undefined ? '' : ` (${walletSpend} Freebucks)`}`
+            + '. This route spends nothing (x-freebuff-wallet-spend-limit: 0), so confirm it in the Freebuff CLI instead.'),
+        'HTTP_409',
+        { status: httpStatus },
+      ),
+    }
+  }
+
+  if (status === 'rate_limited' || status === 'spend_limited' || status === 'ip_capped') {
+    const daily = (() => {
+      const freebucks = record.freebucks
+      if (typeof freebucks !== 'object' || freebucks === null) return undefined
+      const day = (freebucks as Record<string, unknown>).daily
+      if (typeof day !== 'object' || day === null) return undefined
+      return freebuffFirstString((day as Record<string, unknown>).resetAt)
+    })()
+    const state = status === 'spend_limited'
+      ? `the free tier's Freebucks are spent for today${daily === undefined ? '' : ` (they reset at ${daily})`}`
+      : status === 'ip_capped'
+        ? `this network address (VPN/proxy) is over its daily free allowance of Freebucks${daily === undefined ? '' : ` (they reset at ${daily})`}`
+        : `the account is rate-limited${daily === undefined ? '' : ` (the credit window resets at ${daily})`}`
+    return {
+      status,
+      verdict: 'wait',
+      error: new LlmError(
+        `${label} refused${attemptClause}${shown} — ${state}. Wait for the window to reset, then try again.`,
+        'RATE_LIMIT',
+        { status: httpStatus, providerRetryAfterMs: FREEBUFF_RATE_LIMIT_RETRY_MS },
+      ),
+    }
+  }
+
+  if (status === 'banned' || status === 'country_blocked') {
+    const reason = freebuffFirstString(record.countryBlockReason, record.message, record.reason)
+    return {
+      status,
+      verdict: 'refused',
+      error: new LlmError(
+        `${label} refused${attemptClause}${shown} — the upstream reports this account as ${status}`
+        + `${reason === undefined ? '' : ` (${reason})`}. The CLI disables its session for this state; free mode is not `
+        + 'available from this network until the upstream lifts it. No retry here will change that.',
+        'UNSUPPORTED',
+        { status: httpStatus },
+      ),
+    }
+  }
+
+  if (FREEBUFF_NO_CLAIM_STATUSES.includes(status)) {
+    return {
+      status,
+      verdict: 'no-claim',
+      error: new LlmError(
+        `${label} answered status "${status}"${attemptClause}${shown} — there is no session for that attempt `
+        + (retried
+          ? `(a fresh attempt, ${String(options.freshAttemptTried)}, was refused the same way, so the account has no `
+            + 'session to open right now)'
+          : '')
+        + '. Start a session in the Freebuff CLI (`freebuff`, then pick a model), then try again.',
+        'HTTP_409',
+        { status: httpStatus },
+      ),
+    }
+  }
+
+  const textRule = freebuffTextError(httpStatus, text, label)
+  if (textRule !== undefined) return { status, verdict: 'refused', error: textRule }
+  const message = freebuffFirstString(record.message, record.error)
+  return {
+    status,
+    verdict: 'refused',
+    error: new LlmError(
+      `${label} did not answer an active session (HTTP ${String(httpStatus)}`
+      + `${status === '' ? '' : `, status="${status}"`})${attemptClause}`
+      + `${message === undefined ? shown : `: ${message}`}`,
+      freebuffStatusErrorCode(httpStatus, status !== ''),
+      { status: httpStatus },
+    ),
+  }
+}
+
+/**
+ * The error code for a status this table did not recognize.
+ *
+ * A session STATE that arrived with a 2xx is a conflict, not a transport
+ * failure — the upstream answers 200 with a `status` it wants the client to act
+ * on, and the CLI's `hc$` schedules no retry for any of those — so those land on
+ * `HTTP_409`. Everything else keeps the hub's own status→code mapping
+ * (`httpLlmError`, `src/providers/common.ts:127-134`), so an unrecognized status
+ * does not turn a 502 into "wrong model" or a 401 into a conflict.
+ * @param httpStatus - the HTTP status the answer arrived with.
+ * @param stateShaped - whether the body carried a session status word.
+ * @returns the `LlmError` code.
+ */
+function freebuffStatusErrorCode(httpStatus: number, stateShaped: boolean): string {
+  if (httpStatus < 400) return stateShaped ? 'HTTP_409' : 'MALFORMED_RESPONSE'
+  if (httpStatus === 401 || httpStatus === 403) return 'AUTH'
+  if (httpStatus === 429) return 'RATE_LIMIT'
+  if (httpStatus === 408 || httpStatus === 504) return 'TIMEOUT'
+  if (httpStatus >= 500) return 'SERVER'
+  return `HTTP_${String(httpStatus)}`
+}
+
+/**
+ * Classify a session/admission answer, as the error to throw.
+ *
+ * The error half of {@link freebuffSessionStatus}, which is the single table for
+ * this vocabulary.
  * @param payload - the parsed answer body.
  * @param httpStatus - the HTTP status it arrived with.
  * @param label - diagnostic prefix.
@@ -794,26 +1105,7 @@ export function freebuffSessionStatusError(
   httpStatus: number,
   label: string,
 ): LlmError | undefined {
-  const record = typeof payload === 'object' && payload !== null ? payload as Record<string, unknown> : {}
-  const status = freebuffFirstString(record.status, record.error) ?? ''
-  const text = JSON.stringify(payload)
-  if (status === 'active') return undefined
-  if (status.startsWith('queued') || status.includes('waiting_room')) {
-    return new LlmError(
-      `${label} is in the waiting room (${status})${record.position === undefined ? '' : ` at position ${String(record.position)}`}`,
-      'RATE_LIMIT',
-      { status: httpStatus, providerRetryAfterMs: FREEBUFF_QUEUE_RETRY_MS },
-    )
-  }
-  const textRule = freebuffTextError(httpStatus, text, label)
-  if (textRule !== undefined) return textRule
-  const message = freebuffFirstString(record.message, record.error)
-  return new LlmError(
-    `${label} did not answer an active session (HTTP ${String(httpStatus)}, status="${status}")`
-    + `${message === undefined ? `: ${text.slice(0, 300)}` : `: ${message}`}`,
-    httpStatus === 409 ? 'HTTP_409' : 'HTTP_404',
-    { status: httpStatus },
-  )
+  return freebuffSessionStatus(payload, httpStatus, label).error
 }
 
 /** The retry hint this route's own text rules disclose, as an epoch instant. */

@@ -59,11 +59,11 @@ import type { FreebuffCredential } from './client.js'
 import {
   freebuffAssertDesktopCredential,
   freebuffCredentialKind,
-  freebuffInstanceId,
   freebuffSessionHeaders,
   freebuffSessionUrl,
   freebuffSessionUnauthenticated,
 } from './client.js'
+import { freebuffReadInstanceId } from './claim.js'
 
 /** Bound on one balance read: a hanging poll must not block the settings card. */
 const QUOTA_TIMEOUT_MS = 15_000
@@ -402,7 +402,10 @@ export async function fetchFreebuffUsage(
       headers: freebuffSessionHeaders({
         credential,
         method: 'GET',
-        instanceId: freebuffInstanceId(credential.accessToken),
+        // The claim's own instance while one is held, so this read also serves as
+        // that claim's heartbeat; a throwaway one otherwise (the endpoint answers
+        // both with the balance).
+        instanceId: freebuffReadInstanceId(credential.accessToken),
       }),
       signal: perSignal,
     })

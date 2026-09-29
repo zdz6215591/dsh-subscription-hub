@@ -55,6 +55,7 @@ import {
   FREEBUFF_LOGIN_BASE,
   FREEBUFF_QUEUE_RETRY_MS,
   FREEBUFF_SESSION_ADMISSION_PATH,
+  FREEBUFF_SESSION_ATTEMPT_PATH,
   FREEBUFF_SESSION_COOKIE,
   FREEBUFF_TIMEZONE_HEADER,
   freebuffAgentFor,
@@ -70,13 +71,14 @@ import {
   freebuffErrorEnvelope,
   freebuffEffortBodyField,
   freebuffGuardStream,
-  freebuffInstanceId,
   freebuffInstanceUuid,
   freebuffResponseError,
   freebuffRunBody,
   freebuffRunUrl,
   freebuffSessionAdmissionUrl,
+  freebuffSessionAttemptUrl,
   freebuffSessionHeaders,
+  freebuffSessionStatus,
   freebuffSessionStatusError,
   freebuffSessionUnauthenticated,
   freebuffSessionUrl,
@@ -84,6 +86,15 @@ import {
   parseFreebuffRunId,
   parseFreebuffUpstreamModels,
 } from '../src/providers/freebuff/client.js'
+import {
+  FREEBUFF_CLAIM_PREEMPT_MS,
+  freebuffClaimOf,
+  freebuffForgetClaim,
+  freebuffMintInstanceId,
+  freebuffReadInstanceId,
+  freebuffRecordClaim,
+  freebuffResetClaims,
+} from '../src/providers/freebuff/claim.js'
 import {
   freebuffDerivedModelBudget,
   freebuffModelAdmissions,
@@ -459,7 +470,7 @@ test('freebuff: the chat headers are the desktop protocol, with no cookie anywhe
 })
 
 test('freebuff: the session GET carries the CLI header set the balance read needs', () => {
-  const instanceId = freebuffInstanceId('tok')
+  const instanceId = freebuffMintInstanceId()
   const get = freebuffSessionHeaders({ credential: { accessToken: 'tok' }, method: 'GET', instanceId, timezone: 'Asia/Shanghai' })
   assert.equal(get[FREEBUFF_TIMEZONE_HEADER], 'Asia/Shanghai')
   assert.equal(get.authorization, 'Bearer tok')
@@ -475,7 +486,7 @@ test('freebuff: the session GET carries the CLI header set the balance read need
 })
 
 test('freebuff: the session POST carries the model, the attempt id and the wallet limit', () => {
-  const instanceId = freebuffInstanceId('tok')
+  const instanceId = freebuffMintInstanceId()
   const post = freebuffSessionHeaders({
     credential: { accessToken: 'tok' },
     method: 'POST',
@@ -500,12 +511,13 @@ test('freebuff: the session POST carries the model, the attempt id and the walle
   assert.equal(takeover['x-freebuff-takeover-instance-id'], 'uuid-elsewhere')
 })
 
-test('freebuff: the instance id is a stable cli:-prefixed UUID v4 per credential', () => {
-  const first = freebuffInstanceId('token-aaa')
-  const again = freebuffInstanceId('token-aaa')
-  const second = freebuffInstanceId('token-bbb')
-  assert.equal(first, again, 'same credential, same instance')
-  assert.notEqual(first, second, 'different accounts must not share an instance')
+test('freebuff: the instance id is a FRESH cli: UUID v4 per attempt, never derived from the credential', () => {
+  const first = freebuffMintInstanceId()
+  const again = freebuffMintInstanceId()
+  // One attempt id is one session START: the upstream retires it for good once
+  // the attempt is over (`purchase_claim_released` / `admission_attempt_closed`),
+  // so it must never be reused. That is the CLI's own `wr()`.
+  assert.notEqual(first, again, 'a minted instance id is new every time')
   // A REAL uuid v4 shape, VARIANT nibble included. Live 2026-09-28 the admission
   // endpoint answered `400 {"error":"invalid_attempt_id"}` to a value that had the
   // version nibble but no variant nibble, so this is not cosmetic.
@@ -513,6 +525,85 @@ test('freebuff: the instance id is a stable cli:-prefixed UUID v4 per credential
   assert.equal(freebuffInstanceUuid(first), first.slice(4))
   assert.equal(freebuffInstanceUuid('8fe895f8-43fc-4f4a-41e3-971277cdf538'), undefined,
     'a server-assigned id has no cli: prefix, which is what turns off surface/multi_session')
+})
+
+test('freebuff: the claim store hands the SAME instance back while it is live, and drops it after', () => {
+  freebuffResetClaims()
+  const token = 'claim-token-aaa'
+  assert.equal(freebuffClaimOf(token), undefined, 'a credential with no admission has no claim')
+  const minted = freebuffMintInstanceId()
+  assert.equal(freebuffRecordClaim(token, {
+    instanceId: minted,
+    model: 'stealth/space-bunny-alpha',
+    expiresAt: Date.now() + 3_600_000,
+  }), true)
+  // Same instance, same model, same end: the next turn re-admits THIS attempt
+  // instead of minting a second one (a second one is refused with
+  // `purchase_capacity` while this one is live — reproduced live).
+  const stored = freebuffClaimOf(token)
+  assert.equal(stored?.instanceId, minted)
+  assert.equal(stored?.model, 'stealth/space-bunny-alpha')
+  assert.ok((stored?.expiresAt ?? 0) > Date.now())
+  // The claim is per credential: another account never sees it.
+  assert.equal(freebuffClaimOf('claim-token-bbb'), undefined)
+  // A reply about a DIFFERENT attempt must not drop this claim...
+  freebuffForgetClaim(token, freebuffMintInstanceId())
+  assert.notEqual(freebuffClaimOf(token), undefined)
+  // ...but the claim's own instance, or a blanket call, does.
+  freebuffForgetClaim(token, minted)
+  assert.equal(freebuffClaimOf(token), undefined)
+  freebuffRecordClaim(token, { instanceId: minted, model: 'm' })
+  freebuffForgetClaim(token)
+  assert.equal(freebuffClaimOf(token), undefined)
+})
+
+test('freebuff: a claim inside the reference preempt window is over, not reusable', () => {
+  freebuffResetClaims()
+  const token = 'claim-token-preempt'
+  const now = 1_000_000
+  freebuffRecordClaim(token, {
+    instanceId: freebuffMintInstanceId(),
+    model: 'stealth/space-bunny-alpha',
+    expiresAt: now + FREEBUFF_CLAIM_PREEMPT_MS,
+  }, now)
+  // `ref-freebuff2api/src/session.rs:120-121` reuses a session only while
+  // `now + 5s < expires`; at the boundary the claim is over.
+  assert.equal(freebuffClaimOf(token, now), undefined)
+  assert.equal(freebuffClaimOf(token, now - 1), undefined, 'and it was forgotten, not merely filtered')
+  // One tick earlier it is still usable.
+  freebuffRecordClaim(token, {
+    instanceId: freebuffMintInstanceId(),
+    model: 'stealth/space-bunny-alpha',
+    expiresAt: now + FREEBUFF_CLAIM_PREEMPT_MS + 2,
+  }, now)
+  assert.notEqual(freebuffClaimOf(token, now), undefined)
+})
+
+test('freebuff: a read speaks for the live claim, or for a throwaway attempt', () => {
+  freebuffResetClaims()
+  const token = 'claim-token-read'
+  const held = freebuffMintInstanceId()
+  freebuffRecordClaim(token, { instanceId: held, model: 'stealth/space-bunny-alpha', expiresAt: Date.now() + 3_600_000 })
+  // The heartbeat/balance GET must name the instance the claim holds, which is
+  // what keeps that claim alive (the CLI heartbeats its own instance).
+  assert.equal(freebuffReadInstanceId(token), held)
+  freebuffForgetClaim(token)
+  const minted = freebuffReadInstanceId(token)
+  assert.match(minted, /^cli:[0-9a-f-]{36}$/)
+  assert.notEqual(minted, held)
+  assert.equal(freebuffClaimOf(token), undefined, 'a read never creates a claim')
+})
+
+test('freebuff: a server-assigned instance id is not recorded as a claim', () => {
+  freebuffResetClaims()
+  // The CLI draws the same line: `wJA` records only a `cli:`-prefixed instance
+  // (a legacy, server-assigned id is the single-session wire, whose attempt
+  // headers do not exist).
+  assert.equal(freebuffRecordClaim('claim-token-legacy', {
+    instanceId: '8fe895f8-43fc-4f4a-41e3-971277cdf538',
+    model: 'stealth/space-bunny-alpha',
+  }), false)
+  assert.equal(freebuffClaimOf('claim-token-legacy'), undefined)
 })
 
 test('freebuff: every free model maps to its own free agent', () => {
@@ -532,11 +623,12 @@ test('freebuff: every free model maps to its own free agent', () => {
 })
 
 test('freebuff: the desktop body carries the run id, the cli identity and the effort', () => {
+  const instanceId = freebuffMintInstanceId()
   const body = freebuffChatBody({
     model: 'z-ai/glm-5.3-flash',
     messages: [{ role: 'user', content: 'hi' }],
     reasoningEffort: 'xhigh',
-    credential: 'tok',
+    instanceId,
     runId: 'run-abc',
   })
   assert.equal(body.reasoning_effort, 'max', 'the clamp reaches the body')
@@ -545,7 +637,9 @@ test('freebuff: the desktop body carries the run id, the cli identity and the ef
   const metadata = body.codebuff_metadata as Record<string, unknown>
   assert.equal(metadata.cost_mode, 'free')
   assert.equal(typeof metadata.client_id, 'string')
-  assert.equal(metadata.freebuff_instance_id, freebuffInstanceId('tok'))
+  // The ADMITTED attempt, passed through verbatim — not recomputed here: the chat
+  // must name the same instance the run was started for.
+  assert.equal(metadata.freebuff_instance_id, instanceId)
   // The upstream refuses a body without one: `400 No runId found in request body`.
   assert.equal(metadata.run_id, 'run-abc')
   // The two fields the cli: prefix turns on (the CLI's `OJA`).
@@ -558,7 +652,7 @@ test('freebuff: the desktop body carries the run id, the cli identity and the ef
     model: 'upstage/solar-pro4',
     messages: [],
     reasoningEffort: 'high',
-    credential: 'tok',
+    instanceId,
     runId: 'run-abc',
   })
   assert.equal('reasoning_effort' in solar, false)
@@ -566,14 +660,211 @@ test('freebuff: the desktop body carries the run id, the cli identity and the ef
 })
 
 test('freebuff: a non-cli instance id would drop the surface fields, and ours never is one', () => {
-  // The metadata builder derives the instance itself, so this asserts the
-  // derivation and the gate agree: `cli:` present → surface declared.
-  const instance = freebuffInstanceId('tok')
+  // The metadata builder takes the instance it is given, so this asserts the
+  // instance and the gate agree: `cli:` present → surface declared.
+  const instance = freebuffMintInstanceId()
   assert.notEqual(freebuffInstanceUuid(instance), undefined)
-  const metadata = freebuffChatBody({ model: 'mimo/mimo-v2.5', messages: [], credential: 'tok', runId: 'r' })
+  const metadata = freebuffChatBody({ model: 'mimo/mimo-v2.5', messages: [], instanceId: instance, runId: 'r' })
     .codebuff_metadata as Record<string, unknown>
   assert.equal(metadata.surface, 'cli')
   assert.equal(metadata.freebuff_multi_session, '1')
+})
+
+/**
+ * The live bytes this route's session lifecycle is written against.
+ *
+ * Recorded 2026-09-29 against `https://www.codebuff.com` with the free
+ * credential from `~/.config/manicode/credentials.json` and the free model
+ * `stealth/space-bunny-alpha` (price 0). Every one of these was a real answer to
+ * a real request; the probe scripts are the ones this fix was verified with.
+ */
+const LIVE_ADMISSION_RELEASED = JSON.stringify({
+  status: 'purchase_claim_released',
+  accessTier: 'limited',
+  desktopSessionCounts: { premium: 0, unlimited: 0 },
+  desktopPurchases: [],
+  desktopRefunds: [],
+})
+const LIVE_ADMISSION_ACTIVE = JSON.stringify({
+  status: 'active',
+  accessTier: 'limited',
+  instanceId: 'cli:4de1aab8-9544-4519-991d-13f9abe05476',
+  model: 'stealth/space-bunny-alpha',
+  admittedAt: '2026-09-29T00:40:22.188Z',
+  expiresAt: '2026-09-29T01:40:22.188Z',
+  remainingMs: 3600000,
+  countryCode: 'US',
+  countryBlockReason: 'anonymous_network',
+  ipPrivacySignals: null,
+})
+const LIVE_ATTEMPT_CLOSED = JSON.stringify({
+  error: 'admission_attempt_closed',
+  message: 'This session start was cancelled before it finished. Start again to open a new session.',
+})
+const LIVE_ATTEMPT_ENDED = JSON.stringify({
+  status: 'ended',
+  desktopAttemptId: '4de1aab8-9544-4519-991d-13f9abe05476',
+  refundReceiptId: '78fc7242-ff36-491e-80c0-77c9ad647871',
+  freebucksRefundPending: true,
+})
+const LIVE_SLOT_HELD = JSON.stringify({
+  status: 'purchase_capacity',
+  accessTier: 'limited',
+  requestedModel: 'stealth/space-bunny-alpha',
+  currentInstanceId: 'cli:d3f6d4d6-7dcc-4399-87b9-ec75b42a8f37',
+  concurrency: 'slot-bound',
+  slotLimit: 1,
+  desktopSessionCounts: { premium: 1, unlimited: 0, nextExpiryAt: '2026-09-29T02:10:22.188Z' },
+  desktopPurchases: [{
+    model: 'stealth/space-bunny-alpha',
+    expiresAt: '2026-09-29T01:40:22.188Z',
+    holderInstanceId: 'cli:d3f6d4d6-7dcc-4399-87b9-ec75b42a8f37',
+  }],
+  desktopRefunds: [],
+})
+const LIVE_RELEASED_WITH_HOLDER = JSON.stringify({
+  status: 'purchase_claim_released',
+  accessTier: 'limited',
+  desktopSessionCounts: { premium: 1, unlimited: 0, nextExpiryAt: '2026-09-29T02:10:22.188Z' },
+  desktopPurchases: [{
+    model: 'stealth/space-bunny-alpha',
+    expiresAt: '2026-09-29T01:40:22.188Z',
+    holderInstanceId: 'cli:d3f6d4d6-7dcc-4399-87b9-ec75b42a8f37',
+  }],
+  desktopRefunds: [],
+})
+
+test('freebuff: a released attempt is RETIRED — a fresh attempt is the way out, never a retry of the same id', () => {
+  // The exact bytes of the reported failure: the account's slot is FREE
+  // (`premium: 0`, no purchases at all), so this is about the dead attempt, not
+  // capacity — which is why replacing the attempt is the right move and why
+  // re-POSTing it would repeat forever.
+  const reading = freebuffSessionStatus(JSON.parse(LIVE_ADMISSION_RELEASED) as unknown, 409, 'freebuff desktop session admission', {
+    body: LIVE_ADMISSION_RELEASED,
+    attempt: 'cli:be2239fd-b67f-4b2e-a882-1988e6b05484',
+  })
+  assert.equal(reading.verdict, 'retired')
+  assert.equal(reading.status, 'purchase_claim_released')
+  assert.equal(reading.error?.code, 'HTTP_409')
+  assert.match(reading.error?.message ?? '', /purchase_claim_released/)
+  assert.match(reading.error?.message ?? '', /RELEASED that session start/)
+  assert.match(reading.error?.message ?? '', /cli:be2239fd-b67f-4b2e-a882-1988e6b05484/)
+  // The remedy is the CLI's own, quoted: «This session was released. Choose a
+  // model to start a new session.»
+  assert.match(reading.error?.message ?? '', /Choose a model to start a new session/)
+  assert.match(reading.error?.message ?? '', /\/end-session/)
+  // A cancelled attempt is the same conclusion, with the server's own words.
+  const closed = freebuffSessionStatus(JSON.parse(LIVE_ATTEMPT_CLOSED) as unknown, 409, 'label', { body: LIVE_ATTEMPT_CLOSED })
+  assert.equal(closed.verdict, 'retired')
+  assert.equal(closed.status, 'admission_attempt_closed')
+  assert.match(closed.error?.message ?? '', /CANCELLED that session start/)
+  assert.match(closed.error?.message ?? '', /cancelled before it finished/)
+})
+
+test('freebuff: a retired attempt that a FRESH one also fails is reported as the account state it is', () => {
+  const reading = freebuffSessionStatus(JSON.parse(LIVE_ADMISSION_RELEASED) as unknown, 409, 'label', {
+    body: LIVE_ADMISSION_RELEASED,
+    attempt: 'cli:aaaaaaaa-1111-4222-8333-444444444444',
+    freshAttemptTried: 'cli:bbbbbbbb-1111-4222-8333-444444444444',
+  })
+  assert.match(reading.error?.message ?? '', /already opened a NEW attempt \(cli:bbbbbbbb-1111-4222-8333-444444444444\)/)
+  assert.match(reading.error?.message ?? '', /nothing local is stale/)
+})
+
+test('freebuff: a held slot names the holder and is NOT retried with a fresh attempt', () => {
+  // Live bytes: a fresh attempt while another claim was live. The holder is
+  // named, so the reader can see whose session it is and what to ask for.
+  const reading = freebuffSessionStatus(JSON.parse(LIVE_SLOT_HELD) as unknown, 409, 'freebuff desktop session admission', {
+    body: LIVE_SLOT_HELD,
+    attempt: 'cli:ac0fc8d7-462c-445e-869f-37317ab83676',
+  })
+  assert.equal(reading.verdict, 'slot-held')
+  assert.equal(reading.error?.code, 'HTTP_409')
+  assert.match(reading.error?.message ?? '', /only free slot/)
+  assert.match(reading.error?.message ?? '', /holder instance cli:d3f6d4d6-7dcc-4399-87b9-ec75b42a8f37/)
+  assert.match(reading.error?.message ?? '', /model stealth\/space-bunny-alpha/)
+  assert.match(reading.error?.message ?? '', /slotLimit 1/)
+  assert.match(reading.error?.message ?? '', /\/end-session/)
+  assert.match(reading.error?.message ?? '', /ask this route for stealth\/space-bunny-alpha/)
+})
+
+test('freebuff: every status the CLI distinguishes gets a verdict, and the state is named', () => {
+  const verdictOf = (payload: Record<string, unknown>, status = 409): string => {
+    const body = JSON.stringify(payload)
+    return freebuffSessionStatus(payload, status, 'label', { body }).verdict
+  }
+  assert.equal(verdictOf({ status: 'active' }, 200), 'active')
+  assert.equal(verdictOf({ status: 'purchase_claim_released' }), 'retired')
+  assert.equal(verdictOf({ error: 'admission_attempt_closed' }), 'retired')
+  assert.equal(verdictOf({ status: 'none' }, 200), 'no-claim')
+  assert.equal(verdictOf({ status: 'ended' }, 200), 'no-claim')
+  assert.equal(verdictOf({ status: 'superseded' }, 200), 'no-claim')
+  assert.equal(verdictOf({ status: 'purchase_capacity' }), 'slot-held')
+  assert.equal(verdictOf({ status: 'premium_slot_taken' }), 'slot-held')
+  assert.equal(verdictOf({ status: 'purchase_in_use' }), 'slot-held')
+  assert.equal(verdictOf({ status: 'queued', position: 4 }, 200), 'wait')
+  assert.equal(verdictOf({ status: 'waiting_room_queued' }, 200), 'wait')
+  assert.equal(verdictOf({ status: 'rate_limited' }, 429), 'wait')
+  assert.equal(verdictOf({ status: 'spend_limited' }, 429), 'wait')
+  assert.equal(verdictOf({ status: 'ip_capped' }, 429), 'wait')
+  assert.equal(verdictOf({ status: 'model_locked' }), 'refused')
+  assert.equal(verdictOf({ status: 'model_unavailable' }), 'refused')
+  assert.equal(verdictOf({ status: 'first_tab_discount_changed' }), 'refused')
+  assert.equal(verdictOf({ status: 'consent_required' }), 'refused')
+  assert.equal(verdictOf({ status: 'banned' }, 403), 'refused')
+  assert.equal(verdictOf({ status: 'country_blocked' }, 403), 'refused')
+  // Only `active` is a session.
+  assert.equal(freebuffSessionStatus({ status: 'active' }, 200, 'label').error, undefined)
+})
+
+test('freebuff: each refusal carries the remedy in the user own terms, not an HTTP status', () => {
+  const messageOf = (payload: Record<string, unknown>, status = 409): string => {
+    const body = JSON.stringify(payload)
+    return freebuffSessionStatus(payload, status, 'label', { body }).error?.message ?? ''
+  }
+  // The model binding: the CLI's own words, plus what to do here.
+  const locked = messageOf({ status: 'model_locked', requestedModel: 'z-ai/glm-5.3-flash', currentModel: 'mimo/mimo-v2.5' })
+  assert.match(locked, /already in an active session on mimo\/mimo-v2.5/)
+  assert.match(locked, /\/end-session/)
+  assert.match(locked, /Sessions end on their own after 1 hour/)
+  assert.equal(freebuffSessionStatus({ status: 'model_locked' }, 409, 'label').error?.code, 'HTTP_404')
+  // A withdrawn/unavailable model is a wrong-model condition, not a rate limit.
+  const unavailable = messageOf({ status: 'model_unavailable', requestedModel: 'stealth/ox-alpha', withdrawn: true })
+  assert.match(unavailable, /stealth\/ox-alpha is not available/)
+  assert.match(unavailable, /WITHDRAWN/)
+  assert.match(unavailable, /Pick another free model/)
+  // The discount/consent states need a human; the route spends nothing.
+  const discount = messageOf({ status: 'first_tab_discount_changed' })
+  assert.match(discount, /Review the model menu and choose again/)
+  assert.match(discount, /sends the discount flag as 0/)
+  const consent = messageOf({ status: 'consent_required', walletConsent: { walletSpend: 12 } })
+  assert.match(consent, /wallet spend confirmed \(12 Freebucks\)/)
+  assert.match(consent, /x-freebuff-wallet-spend-limit: 0/)
+  // Rate limits say what to wait for.
+  const spent = messageOf({ status: 'spend_limited', freebucks: { daily: { resetAt: '2026-09-29T16:00:00.000Z' } } }, 429)
+  assert.match(spent, /Freebucks are spent for today \(they reset at 2026-09-29T16:00:00.000Z\)/)
+  assert.equal(freebuffSessionStatus({ status: 'spend_limited' }, 429, 'label').error?.code, 'RATE_LIMIT')
+  const capped = messageOf({ status: 'ip_capped' }, 429)
+  assert.match(capped, /VPN\/proxy/)
+  assert.equal(freebuffSessionStatus({ status: 'ip_capped' }, 429, 'label').error?.code, 'RATE_LIMIT')
+  const limited = messageOf({ status: 'rate_limited' }, 429)
+  assert.match(limited, /rate-limited/)
+  // A banned/country-blocked account is terminal, and says so.
+  const banned = messageOf({ status: 'country_blocked', countryBlockReason: 'anonymous_network' }, 403)
+  assert.match(banned, /reports this account as country_blocked \(anonymous_network\)/)
+  assert.match(banned, /No retry here will change that/)
+  assert.equal(freebuffSessionStatus({ status: 'banned' }, 403, 'label').error?.code, 'UNSUPPORTED')
+  // A status with no session at all still names the state and the way out.
+  const none = messageOf({ status: 'none' }, 200)
+  assert.match(none, /answered status "none"/)
+  assert.match(none, /Start a session in the Freebuff CLI/)
+  // A non-JSON body must not become a TypeError, whatever the status — and an
+  // unrecognized failure keeps the hub's own classification (`SERVER` for a 5xx).
+  const garbage = freebuffSessionStatus(undefined, 502, 'label', { body: '<html>nope</html>' })
+  assert.equal(garbage.status, '')
+  assert.equal(garbage.error?.code, 'SERVER')
+  assert.match(garbage.error?.message ?? '', /did not answer an active session \(HTTP 502\): <html>nope<\/html>/)
+  assert.equal(freebuffSessionStatus(undefined, 200, 'label', { body: 'nope' }).error?.code, 'MALFORMED_RESPONSE')
 })
 
 test('freebuff: free_mode_cli_required is reported as UNSUPPORTED with the ban warning', () => {
@@ -820,6 +1111,9 @@ const SESSION: FreebuffSession = {
 }
 
 function adapterOf(options: Partial<ConstructorParameters<typeof FreebuffAdapter>[0]> = {}) {
+  // No claim may leak from one case into the next: it would make the admission
+  // instance id (and therefore what each test asserts) depend on test order.
+  freebuffResetClaims()
   const sessions = new Map<string, FreebuffSession>([['someone@example.com', SESSION]])
   return {
     sessions,
@@ -930,7 +1224,15 @@ async function collect(stream: AsyncIterable<StreamChunk>): Promise<StreamChunk[
 }
 
 /** The CLI's own free-agent/mode pairs, as the admission answer spells them. */
-const ADMISSION_ACTIVE = JSON.stringify({ status: 'active', accessTier: 'limited', instanceId: 'server-assigned' })
+/**
+ * The default admission answer: what the upstream really sends, which is the
+ * attempt it was handed echoed back (live 2026-09-29: `"instanceId":"cli:<the id
+ * we sent>"`). A `server-assigned` id is the legacy single-session wire and is
+ * covered on its own below.
+ */
+function admissionEcho(headers: Headers): Response {
+  return admissionActiveFor(headers.get('x-freebuff-instance-id') ?? 'server-assigned')
+}
 const RUN_ANSWER = JSON.stringify({ runId: 'run-1' })
 
 /** One OpenAI-shaped SSE answer, as the desktop wire sends it. */
@@ -948,30 +1250,54 @@ interface MadeRequest {
   headers: Headers
 }
 
+/** The admission answer for a given attempt, as the upstream echoes it back. */
+function admissionActiveFor(instanceId: string, model = 'stealth/space-bunny-alpha'): Response {
+  return new Response(JSON.stringify({
+    status: 'active',
+    accessTier: 'limited',
+    instanceId,
+    model,
+    admittedAt: '2026-09-29T00:40:22.188Z',
+    expiresAt: '2026-09-29T01:40:22.188Z',
+    remainingMs: 3_600_000,
+  }), { status: 200 })
+}
+
 /**
  * A fetcher that answers the CLI bootstrap and the chat, recording every request.
  *
  * The bootstrap is answered from the constants above unless the test overrides a
- * leg, which is how the refusal paths are driven without inventing a shape.
+ * leg, which is how the refusal paths are driven without inventing a shape. The
+ * admission override is called with the number of admission calls already made,
+ * so a test can answer the first attempt one way and the retry another.
  */
 function bootstrapFetch(
   requests: MadeRequest[],
   overrides: {
-    admission?: () => Response
+    admission?: (call: number, headers: Headers) => Response
+    attempt?: () => Response
     run?: () => Response
     chat?: () => Response
   } = {},
 ): (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> {
+  let admissionCalls = 0
   return (input, init) => {
     const url = String(input)
+    const headers = new Headers(init?.headers)
     requests.push({
       url,
       method: init?.method ?? 'GET',
       body: String(init?.body ?? ''),
-      headers: new Headers(init?.headers),
+      headers,
     })
+    if (url.endsWith('/api/v1/freebuff/session/attempt')) {
+      // The CLI's own release confirmation (`releaseSlot` requires `ended`).
+      return Promise.resolve(overrides.attempt?.() ?? new Response(LIVE_ATTEMPT_ENDED, { status: 200 }))
+    }
     if (url.endsWith('/api/v1/freebuff/session/admission')) {
-      return Promise.resolve(overrides.admission?.() ?? new Response(ADMISSION_ACTIVE, { status: 200 }))
+      const call = admissionCalls
+      admissionCalls += 1
+      return Promise.resolve(overrides.admission?.(call, headers) ?? admissionEcho(headers))
     }
     if (url.endsWith('/api/v1/agent-runs')) {
       return Promise.resolve(overrides.run?.() ?? new Response(RUN_ANSWER, { status: 200 }))
@@ -996,10 +1322,14 @@ test('freebuff adapter: a turn bootstraps the session and the run, then streams'
   for (const request of requests) {
     assert.equal(request.headers.get('authorization'), `Bearer ${SESSION.accessToken}`)
   }
-  // The admission is bound to the MODEL and to this credential's cli: instance.
+  // The admission is bound to the MODEL and to a FRESH cli: attempt — one session
+  // start, minted here, never derived from the credential.
   const admission = requests[0]
   assert.equal(admission?.headers.get('x-freebuff-model'), 'stealth/space-bunny-alpha')
-  assert.equal(admission?.headers.get('x-freebuff-instance-id'), freebuffInstanceId(SESSION.accessToken))
+  const attempt = admission?.headers.get('x-freebuff-instance-id') ?? ''
+  assert.match(attempt, /^cli:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+  assert.equal(admission?.headers.get('x-freebuff-desktop-attempt-id'), attempt.slice(4),
+    'the attempt id header is the instance uuid (`CV`: `L[QJA] = D`)')
   assert.equal(admission?.headers.get('x-freebuff-wallet-spend-limit'), '0')
   assert.equal(admission?.headers.get('x-freebuff-multi-session'), '1')
   // The run is started for the MODEL-SPECIFIC free agent, which is what free mode
@@ -1017,31 +1347,227 @@ test('freebuff adapter: a turn bootstraps the session and the run, then streams'
   assert.equal('reasoning_effort' in chat, false)
   const metadata = chat.codebuff_metadata as Record<string, unknown>
   assert.equal(metadata.run_id, 'run-1')
+  assert.equal(metadata.freebuff_instance_id, attempt, 'the chat speaks for the attempt that was admitted')
   assert.equal(metadata.surface, 'cli')
   assert.equal(metadata.freebuff_multi_session, '1')
   assert.equal(metadata.cost_mode, 'free')
 })
 
-test('freebuff adapter: a refused session admission is reported with the upstream status', async () => {
+test('freebuff adapter: a RELEASED attempt is replaced with a fresh one and the turn goes through', async () => {
   const requests: MadeRequest[] = []
   const { adapter, sessions } = adapterOf({
     fetchFn: bootstrapFetch(requests, {
-      admission: () => new Response(JSON.stringify({
-        status: 'purchase_capacity',
-        concurrency: 'slot-bound',
-        slotLimit: 1,
-        currentInstanceId: '8fe895f8-43fc-4f4a-41e3-971277cdf538',
-      }), { status: 409 }),
+      admission: call => call === 0
+        ? new Response(LIVE_ADMISSION_RELEASED, { status: 409 })
+        : new Response(JSON.stringify({
+            ...JSON.parse(LIVE_ADMISSION_ACTIVE) as Record<string, unknown>,
+            // A real answer echoes the attempt that was sent (live 2026-09-29).
+            instanceId: 'cli:11111111-2222-4333-8444-555555555555',
+          }), { status: 200 }),
+    }),
+  })
+  // The state the real failure was reported from: the attempt this account is
+  // pinned to has been released upstream, and every POST with it answers
+  // `409 purchase_claim_released` forever.
+  freebuffRecordClaim(SESSION.accessToken, {
+    instanceId: 'cli:be2239fd-b67f-4b2e-a882-1988e6b05484',
+    model: 'stealth/space-bunny-alpha',
+    expiresAt: Date.now() + 3_600_000,
+  })
+  const chunks = await collect(adapter.streamAccount(generateOptions('stealth/space-bunny-alpha'), [...sessions.keys()][0] as string))
+  assert.equal(chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''), 'hi')
+
+  const admissions = requests.filter(request => request.url.endsWith('/api/v1/freebuff/session/admission'))
+  assert.equal(admissions.length, 2, 'the retired attempt is retried ONCE, with a fresh attempt id')
+  const first = admissions[0]?.headers.get('x-freebuff-instance-id') ?? ''
+  const second = admissions[1]?.headers.get('x-freebuff-instance-id') ?? ''
+  assert.equal(first, 'cli:be2239fd-b67f-4b2e-a882-1988e6b05484', 'the released attempt is what the turn started from')
+  assert.notEqual(second, first, 'a fresh attempt id is the whole point: the released one is dead for good')
+  assert.match(second, /^cli:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+  // The chat speaks for the attempt the upstream ACCEPTED — the instance it
+  // echoed, which is the CLI's own rule (`g.instanceId` becomes the session's).
+  const chat = JSON.parse(requests.at(-1)?.body ?? '{}') as Record<string, unknown>
+  assert.equal((chat.codebuff_metadata as Record<string, unknown>).freebuff_instance_id, 'cli:11111111-2222-4333-8444-555555555555')
+})
+
+test('freebuff adapter: a server-assigned instance follows the upstream, and is not carried into the next turn', async () => {
+  const requests: MadeRequest[] = []
+  const { adapter, sessions } = adapterOf({
+    // The legacy single-session wire: the server assigns the instance instead of
+    // echoing a `cli:` one. The CLI follows it for the current session
+    // (`g.instanceId`) but does not record it as a resumable claim (`wJA`).
+    fetchFn: bootstrapFetch(requests, {
+      admission: () => new Response(
+        JSON.stringify({ status: 'active', accessTier: 'limited', instanceId: '8fe895f8-43fc-4f4a-41e3-971277cdf538' }),
+        { status: 200 },
+      ),
+    }),
+  })
+  const account = [...sessions.keys()][0] as string
+  await collect(adapter.streamAccount(generateOptions('stealth/space-bunny-alpha'), account))
+  const firstChat = JSON.parse(requests.find(request => request.url.endsWith('/api/v1/chat/completions'))?.body ?? '{}') as Record<string, unknown>
+  assert.equal(
+    (firstChat.codebuff_metadata as Record<string, unknown>).freebuff_instance_id,
+    '8fe895f8-43fc-4f4a-41e3-971277cdf538',
+    'the turn speaks for the instance the upstream assigned',
+  )
+  assert.equal((firstChat.codebuff_metadata as Record<string, unknown>).surface, undefined,
+    'no cli: prefix means no cli surface fields')
+  await collect(adapter.streamAccount(generateOptions('stealth/space-bunny-alpha'), account))
+  const admissions = requests.filter(request => request.url.endsWith('/api/v1/freebuff/session/admission'))
+  assert.equal(admissions.length, 2)
+  assert.match(admissions[1]?.headers.get('x-freebuff-instance-id') ?? '', /^cli:/,
+    'the next turn mints its own attempt again, because that id is not a claim')
+})
+
+test('freebuff adapter: a release that a fresh attempt cannot fix is reported as the state, with the remedy', async () => {
+  const requests: MadeRequest[] = []
+  const { adapter, sessions } = adapterOf({
+    fetchFn: bootstrapFetch(requests, {
+      admission: () => new Response(LIVE_ADMISSION_RELEASED, { status: 409 }),
+    }),
+  })
+  freebuffRecordClaim(SESSION.accessToken, {
+    instanceId: 'cli:be2239fd-b67f-4b2e-a882-1988e6b05484',
+    model: 'stealth/space-bunny-alpha',
+    expiresAt: Date.now() + 3_600_000,
+  })
+  await assert.rejects(
+    async () => await collect(adapter.streamAccount(generateOptions('stealth/space-bunny-alpha'), [...sessions.keys()][0] as string)),
+    (error: unknown) => error instanceof LlmError
+      && error.code === 'HTTP_409'
+      && /purchase_claim_released/.test(error.message)
+      && /already opened a NEW attempt/.test(error.message)
+      && /Choose a model to start a new session/.test(error.message),
+  )
+  assert.equal(requests.filter(request => request.url.endsWith('/api/v1/freebuff/session/admission')).length, 2,
+    'exactly one retry — never a loop against a refused state')
+  assert.equal(requests.some(request => request.url.endsWith('/api/v1/chat/completions')), false)
+})
+
+test('freebuff adapter: a cancelled attempt is replaced the same way', async () => {
+  const requests: MadeRequest[] = []
+  const { adapter, sessions } = adapterOf({
+    fetchFn: bootstrapFetch(requests, {
+      admission: call => call === 0
+        ? new Response(LIVE_ATTEMPT_CLOSED, { status: 409 })
+        : new Response('{"status":"active","accessTier":"limited"}', { status: 200 }),
+    }),
+  })
+  const chunks = await collect(adapter.streamAccount(generateOptions('stealth/space-bunny-alpha'), [...sessions.keys()][0] as string))
+  assert.equal(chunks.length > 0, true)
+  assert.equal(requests.filter(request => request.url.endsWith('/api/v1/freebuff/session/admission')).length, 2)
+})
+
+test('freebuff adapter: the second turn re-admits the SAME attempt — no permanent burn', async () => {
+  const requests: MadeRequest[] = []
+  const { adapter, sessions } = adapterOf({
+    fetchFn: bootstrapFetch(requests, {
+      // The upstream echoes the attempt it admitted, which is what a real answer
+      // does (live 2026-09-29: `"instanceId":"cli:<the one we sent>"`).
+      admission: (_call, headers) => admissionActiveFor(headers.get('x-freebuff-instance-id') ?? ''),
+    }),
+  })
+  const account = [...sessions.keys()][0] as string
+  await collect(adapter.streamAccount(generateOptions('stealth/space-bunny-alpha'), account))
+  await collect(adapter.streamAccount(generateOptions('stealth/space-bunny-alpha'), account))
+
+  const admissions = requests.filter(request => request.url.endsWith('/api/v1/freebuff/session/admission'))
+  assert.equal(admissions.length, 2, 'one admission per turn')
+  const first = admissions[0]?.headers.get('x-freebuff-instance-id')
+  const second = admissions[1]?.headers.get('x-freebuff-instance-id')
+  // The CLI keeps ONE instance for the session's life and heartbeats it; the
+  // re-admission of a live instance is idempotent upstream, so the second turn
+  // must not mint a third attempt (a second live attempt is refused with
+  // `purchase_capacity` — reproduced live).
+  assert.equal(second, first)
+  assert.equal(requests.filter(request => request.url.endsWith('/api/v1/freebuff/session/attempt')).length, 0,
+    'nothing is released while the claim is the same model')
+  assert.equal(requests.filter(request => request.url.endsWith('/api/v1/chat/completions')).length, 2)
+})
+
+test('freebuff adapter: a MODEL change ends the held claim first, then admits a fresh attempt', async () => {
+  const requests: MadeRequest[] = []
+  const { adapter, sessions } = adapterOf({
+    fetchFn: bootstrapFetch(requests, {
+      admission: (_call, headers) => admissionActiveFor(
+        headers.get('x-freebuff-instance-id') ?? '',
+        headers.get('x-freebuff-model') ?? '',
+      ),
+    }),
+  })
+  const account = [...sessions.keys()][0] as string
+  await collect(adapter.streamAccount(generateOptions('stealth/space-bunny-alpha'), account))
+  await collect(adapter.streamAccount(generateOptions('z-ai/glm-5.3-flash'), account))
+
+  const released = requests.find(request => request.url.endsWith('/api/v1/freebuff/session/attempt'))
+  assert.equal(released?.method, 'DELETE', 'the CLI’s own releaseSlot() is a DELETE to …/session/attempt')
+  const admissions = requests.filter(request => request.url.endsWith('/api/v1/freebuff/session/admission'))
+  const first = admissions[0]?.headers.get('x-freebuff-instance-id')
+  const second = admissions[1]?.headers.get('x-freebuff-instance-id')
+  assert.equal(released?.headers.get('x-freebuff-instance-id'), first, 'the DELETE names the claim being released')
+  assert.notEqual(second, first, 'a session binds one model, so the switch opens a new attempt (the CLI’s `J=wr()`)')
+  // And the release happens BEFORE the new attempt, because a new attempt minted
+  // while the old claim is live is refused with `purchase_capacity`.
+  assert.deepEqual(requests.map(request => request.url.replace(`${FREEBUFF_API_BASE}`, '')), [
+    `${FREEBUFF_SESSION_ADMISSION_PATH}`,
+    '/api/v1/agent-runs',
+    `${FREEBUFF_CHAT_PATH}`,
+    `${FREEBUFF_SESSION_ATTEMPT_PATH}`,
+    `${FREEBUFF_SESSION_ADMISSION_PATH}`,
+    '/api/v1/agent-runs',
+    `${FREEBUFF_CHAT_PATH}`,
+  ])
+})
+
+test('freebuff adapter: a release the upstream does not confirm refuses the model switch, in the CLI own words', async () => {
+  const requests: MadeRequest[] = []
+  const { adapter, sessions } = adapterOf({
+    fetchFn: bootstrapFetch(requests, {
+      admission: (_call, headers) => admissionActiveFor(
+        headers.get('x-freebuff-instance-id') ?? '',
+        headers.get('x-freebuff-model') ?? '',
+      ),
+      attempt: () => new Response('{"status":"purchase_capacity"}', { status: 409 }),
+    }),
+  })
+  const account = [...sessions.keys()][0] as string
+  await collect(adapter.streamAccount(generateOptions('stealth/space-bunny-alpha'), account))
+  await assert.rejects(
+    async () => await collect(adapter.streamAccount(generateOptions('z-ai/glm-5.3-flash'), account)),
+    (error: unknown) => error instanceof LlmError
+      && error.code === 'HTTP_409'
+      && /could not end the stealth\/space-bunny-alpha session/.test(error.message)
+      && /the switch to z-ai\/glm-5\.3-flash was not applied/.test(error.message)
+      && /\/end-session/.test(error.message),
+  )
+  // No second admission was attempted: without the release there is no room for it.
+  assert.equal(requests.filter(request => request.url.endsWith('/api/v1/freebuff/session/admission')).length, 1)
+})
+
+test('freebuff adapter: a held slot is NOT retried with a fresh attempt, and names the holder', async () => {
+  const requests: MadeRequest[] = []
+  const { adapter, sessions } = adapterOf({
+    fetchFn: bootstrapFetch(requests, {
+      admission: () => new Response(LIVE_SLOT_HELD, { status: 409 }),
     }),
   })
   await assert.rejects(
     async () => await collect(adapter.streamAccount(generateOptions('stealth/space-bunny-alpha'), [...sessions.keys()][0] as string)),
     (error: unknown) => error instanceof LlmError
       && error.code === 'HTTP_409'
-      && /only free slot/.test(error.message),
+      && /only free slot/.test(error.message)
+      && /holder instance cli:d3f6d4d6-7dcc-4399-87b9-ec75b42a8f37/.test(error.message),
   )
+  // ONE POST: a fresh attempt against a held slot is refused the same way (live
+  // 2026-09-29, `purchase_capacity` naming the holder), so retrying would only
+  // hammer the upstream.
+  assert.equal(requests.filter(request => request.url.endsWith('/api/v1/freebuff/session/admission')).length, 1)
   // Nothing downstream of the admission was attempted.
   assert.equal(requests.some(request => request.url.endsWith('/api/v1/chat/completions')), false)
+  // And a held slot is never "released": the route must not end a session it does
+  // not own (the CLI's remedy for this state is an interactive takeover).
+  assert.equal(requests.some(request => request.url.endsWith('/api/v1/freebuff/session/attempt')), false)
 })
 
 test('freebuff adapter: a run bootstrap without a runId is a malformed answer, not a chat', async () => {

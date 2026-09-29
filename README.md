@@ -188,6 +188,26 @@ plus the CLI's `x-freebuff-*` headers. The agent step matters: free mode validat
 the run's agent against the requested model, so a run started for the generic
 `base2-free` is refused for every model but one.
 
+**The admitted session is an ATTEMPT, and an attempt is one-shot.** The
+`x-freebuff-desktop-attempt-id` header is the uuid part of the `cli:<uuid>`
+instance, and the upstream retires it for good once that session start is over: a
+released attempt answers `409 {"status":"purchase_claim_released",…}` and a
+cancelled one (after `DELETE /api/v1/freebuff/session/attempt`) answers
+`409 {"error":"admission_attempt_closed",…}` to every later admission POST,
+permanently. The official CLI therefore mints a fresh `cli:<uuid>` per claim
+(`wr()` = `"cli:" + randomUUID()`) and answers a release by starting a new
+session; pinning one instance to a credential — what this route did until
+2026-09-29 — bricks the account's turns for good. The route now holds the live
+claim in memory, re-admits it while it is live (the upstream echoes the same
+`admittedAt`/`expiresAt`, so this is idempotent and costs no extra session),
+replaces it when the upstream retires it, and releases it
+(`DELETE …/session/attempt`) before a model switch — because a live claim holds
+the account's ONLY free slot (`slotLimit: 1`), so a second attempt minted while it
+is live is refused with `409 {"status":"purchase_capacity","currentInstanceId":
+"cli:<the holder>"}`. Every one of those statuses is handled by name, with the
+remedy in the reader's own terms (end the other session in the CLI, ask for the
+holder's model, or start a new session there) instead of a bare HTTP 409.
+
 The wire shape and the pinned roster come from the reference project
 [`lza6/Freebuff-2API`](https://github.com/lza6/Freebuff-2API); the login flow, the
 credential path and the quota endpoint's header set were read from the official

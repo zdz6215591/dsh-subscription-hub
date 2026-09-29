@@ -33,11 +33,15 @@
  * The reference schedules `x-freebuff-heartbeat: 1` every 45 s on a background
  * loop (`ref-freebuff2api/src/session.rs:7,21-22`, `:262-272`) because a desktop
  * session is dropped when it goes quiet — and the CLI sends the same flag on its
- * session GET (`CV`, the `H==="GET"` branch). A plugin must not own a background
- * timer, so the same effect is produced through the shared token manager: the
- * validation TTL IS the heartbeat interval, and the manager's preempt window
- * makes the next request re-validate — which is where the heartbeat flag rides
- * ({@link validateFreebuffCredential}). No timer, no polling when idle.
+ * session GET (`CV`, the `H==="GET"` branch), for the instance it currently
+ * holds. A plugin must not own a background timer, so the same effect is
+ * produced through the shared token manager: the validation TTL IS the heartbeat
+ * interval, and the manager's preempt window makes the next request re-validate —
+ * which is where the heartbeat flag rides ({@link validateFreebuffCredential}).
+ * The read speaks for the claim the adapter holds when there is one
+ * ({@link freebuffReadInstanceId}), which is what makes it a real heartbeat for
+ * that claim rather than a balance read under a made-up instance. No timer, no
+ * polling when idle.
  *
  * @module dsh-subscription-hub/providers/freebuff-session
  */
@@ -50,11 +54,11 @@ import {
   freebuffAssertDesktopCredential,
   freebuffCredentialKind,
   freebuffCookieRefusal,
-  freebuffInstanceId,
   freebuffSessionHeaders,
   freebuffSessionUrl,
   freebuffSessionUnauthenticated,
 } from './freebuff/client.js'
+import { freebuffReadInstanceId } from './freebuff/claim.js'
 
 /**
  * How long one successful validation is trusted.
@@ -212,7 +216,11 @@ export async function validateFreebuffCredential(
       headers: freebuffSessionHeaders({
         credential,
         method: 'GET',
-        instanceId: freebuffInstanceId(credential.accessToken),
+        // The live claim's instance when there is one, so this read IS the
+        // heartbeat that keeps that claim alive (the CLI heartbeats the instance
+        // it holds); otherwise a fresh, throwaway id, which the endpoint answers
+        // as an ordinary balance read (`status:"none"`).
+        instanceId: freebuffReadInstanceId(credential.accessToken),
       }),
       signal: perSignal,
     })

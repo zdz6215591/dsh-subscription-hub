@@ -122,18 +122,26 @@ import {
   freebuffChatHeaders,
   freebuffChatUrl,
   freebuffGuardStream,
-  freebuffInstanceId,
   freebuffResponseError,
   freebuffRunBody,
   freebuffRunHeaders,
   freebuffRunUrl,
   freebuffSessionAdmissionUrl,
+  freebuffSessionAttemptUrl,
   freebuffSessionHeaders,
-  freebuffSessionStatusError,
+  freebuffSessionStatus,
   parseFreebuffRunId,
   FREEBUFF_UPSTREAM_MODELS_URL,
   parseFreebuffUpstreamModels,
 } from './freebuff/client.js'
+import type { FreebuffAdmissionVerdict } from './freebuff/client.js'
+import {
+  freebuffClaimOf,
+  freebuffForgetClaim,
+  freebuffMintInstanceId,
+  freebuffRecordClaim,
+} from './freebuff/claim.js'
+import type { FreebuffClaim } from './freebuff/claim.js'
 import { freebuffCredentialOf } from './freebuff-session.js'
 
 /** Route identity. */
@@ -314,9 +322,10 @@ export class FreebuffAdapter extends LlmAdapter {
    *
    * The bootstrap is per turn on purpose, matching the reference (its
    * `ensure_root_run` starts a fresh root run for every attempt,
-   * `src/api.rs:3385-3394`) and the CLI (a run is one task). The instance id is
-   * derived from the credential, so it is stable across turns — which is what
-   * makes the session admission idempotent for one account.
+   * `src/api.rs:3385-3394`) and the CLI (a run is one task). The SESSION, on the
+   * other hand, is not re-created per turn: the attempt this process holds is
+   * re-admitted while it is live (which the upstream answers idempotently), and
+   * only replaced when it is over — see {@link FreebuffAdapter.admit}.
    * @param options - the caller's request.
    * @param account - the account to serve, or undefined for the default one.
    * @yields the translated stream chunks.
@@ -330,8 +339,8 @@ export class FreebuffAdapter extends LlmAdapter {
       freebuffAssertDesktopCredential(credential)
       const label = 'freebuff desktop'
       const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), watchdog.signal)
-      const runId = await this.bootstrap(credential, options.model, label, watchdog)
-      const response = await this.desktopRequest(credential, options, messages, runId, watchdog)
+      const { instanceId, runId } = await this.bootstrap(credential, options.model, label, watchdog)
+      const response = await this.desktopRequest(credential, options, messages, instanceId, runId, watchdog)
       if (!response.ok) {
         const body = await response.text().catch(() => '')
         const error = await freebuffResponseError(response.status, response.headers, body, label, this.options.onWarn)
@@ -366,11 +375,41 @@ export class FreebuffAdapter extends LlmAdapter {
    * the admission binds the instance to the model, and the run is what the chat
    * body's `run_id` refers to — without it the upstream answers
    * `400 No runId found in request body`.
+   *
+   * ## Why the attempt id is per CLAIM, not per credential
+   *
+   * The admission's `x-freebuff-desktop-attempt-id` is one session START, and the
+   * upstream retires it for good once that start is over — the CLI therefore
+   * mints a fresh `cli:<uuid>` per claim (`wr()`) instead of pinning one to the
+   * credential. Deriving it from the token (what this route did until
+   * 2026-09-29) means a released or cancelled attempt can never be claimed again:
+   * every later turn answers `409 {"status":"purchase_claim_released",…}`, which
+   * is the failure this flow exists to prevent. See `./freebuff/claim.js` for the
+   * live bytes and the CLI's own lifecycle.
+   *
+   * The flow, in the CLI's own order:
+   *
+   *  1. speak for the claim this process already holds, when the model matches —
+   *     a re-admission of a live instance is idempotent (live 2026-09-29:
+   *     `200 status:"active"` with the SAME `admittedAt`/`expiresAt`, so the hour
+   *     is not extended and no extra session is consumed);
+   *  2. on a MODEL change, end the held claim first (`DELETE …/session/attempt`)
+   *     and then mint fresh — exactly the CLI's `releaseSlot()` → `J=wr()`. A new
+   *     instance minted while the old claim is still live would be refused with
+   *     `purchase_capacity` naming the old one (`slotLimit: 1` on the free tier,
+   *     reproduced live);
+   *  3. on a retired attempt (`purchase_claim_released`,
+   *     `admission_attempt_closed`) or a status that says the attempt has no
+   *     session at all, mint a FRESH attempt and retry ONCE — the mechanical
+   *     equivalent of the CLI's "Choose a model to start a new session", which
+   *     also mints a fresh instance before re-POSTing;
+   *  4. anything else is reported as it is, with the remedy in the user's terms
+   *     ({@link freebuffSessionStatus}), never as a bare HTTP status.
    * @param credential - the Bearer credential.
    * @param model - the model this turn asks for.
    * @param label - diagnostic prefix.
    * @param watchdog - the turn's abort/idle watchdog.
-   * @returns the run id to put in the body.
+   * @returns the admitted instance and the run id to put in the body.
    * @throws {LlmError} the upstream's own refusal, classified.
    */
   private async bootstrap(
@@ -378,25 +417,8 @@ export class FreebuffAdapter extends LlmAdapter {
     model: string,
     label: string,
     watchdog: { signal: AbortSignal },
-  ): Promise<string> {
-    const instanceId = freebuffInstanceId(credential.accessToken)
-    const admissionLabel = `${label} session admission`
-    const admission = await this.fetchFn(freebuffSessionAdmissionUrl(), {
-      method: 'POST',
-      headers: freebuffSessionHeaders({ credential, method: 'POST', instanceId, model }),
-      // The CLI sends no body here (`CV` calls `fetch(E, {method, headers, signal})`);
-      // an empty JSON object is what the legacy session POST took and is ignored.
-      body: '{}',
-      signal: watchdog.signal,
-    })
-    const admissionBody = await admission.text().catch(() => '')
-    const admissionPayload = tryJson(admissionBody)
-    if (!admission.ok) {
-      throw await freebuffResponseError(admission.status, admission.headers, admissionBody, admissionLabel, this.options.onWarn)
-    }
-    const statusError = freebuffSessionStatusError(admissionPayload, admission.status, admissionLabel)
-    if (statusError !== undefined) throw statusError
-
+  ): Promise<{ instanceId: string; runId: string }> {
+    const instanceId = await this.admit(credential, model, label, watchdog)
     const runLabel = `${label} agent run`
     const runResponse = await this.fetchFn(freebuffRunUrl(), {
       method: 'POST',
@@ -415,7 +437,176 @@ export class FreebuffAdapter extends LlmAdapter {
         'MALFORMED_RESPONSE',
       )
     }
-    return runId
+    return { instanceId, runId }
+  }
+
+  /**
+   * Open — or re-open — the session this turn chats on.
+   *
+   * The claim lifecycle is `./freebuff/claim.js`'s; this is the wire half: one
+   * POST per turn, a retry ONCE with a fresh attempt when the upstream says the
+   * attempt is over, and a release-then-fresh attempt when the model changed.
+   * @param credential - the Bearer credential.
+   * @param model - the model this turn asks for.
+   * @param label - diagnostic prefix.
+   * @param watchdog - the turn's abort/idle watchdog.
+   * @returns the instance id the chat must speak for.
+   * @throws {LlmError} when no attempt can be admitted.
+   */
+  private async admit(
+    credential: FreebuffCredential,
+    model: string,
+    label: string,
+    watchdog: { signal: AbortSignal },
+  ): Promise<string> {
+    const admissionLabel = `${label} session admission`
+    const held = freebuffClaimOf(credential.accessToken)
+    if (held !== undefined && held.model !== model) {
+      await this.releaseClaim(credential, held, model, admissionLabel, watchdog)
+    }
+    const current = freebuffClaimOf(credential.accessToken)
+    let instanceId = current?.instanceId ?? freebuffMintInstanceId()
+    let freshAttemptTried: string | undefined
+    for (;;) {
+      const response = await this.fetchFn(freebuffSessionAdmissionUrl(), {
+        method: 'POST',
+        headers: freebuffSessionHeaders({ credential, method: 'POST', instanceId, model }),
+        // The CLI sends no body here (`CV` calls `fetch(E, {method, headers, signal})`);
+        // an empty JSON object is what the legacy session POST took and is ignored.
+        body: '{}',
+        signal: watchdog.signal,
+      })
+      const body = await response.text().catch(() => '')
+      const payload = tryJson(body)
+      // The state machine's own vocabulary, read before the generic classifier:
+      // that is how `purchase_claim_released` becomes a named state with a remedy
+      // instead of a bare HTTP 409.
+      const reading = freebuffSessionStatus(payload, response.status, admissionLabel, {
+        body,
+        attempt: instanceId,
+        ...freshAttemptTried === undefined ? {} : { freshAttemptTried },
+      })
+      if (reading.verdict === 'active') {
+        return this.recordClaim(credential.accessToken, instanceId, model, payload)
+      }
+      if (freshAttemptTried === undefined && this.retryWithFreshAttempt(reading.verdict)) {
+        // The CLI's own next move after a release is a NEW attempt (`J=wr()`),
+        // which is also what its "Choose a model to start a new session" prompt
+        // does — the released id itself is never re-admitted.
+        freebuffForgetClaim(credential.accessToken, instanceId)
+        freshAttemptTried = instanceId
+        instanceId = freebuffMintInstanceId()
+        continue
+      }
+      // Only a state this table could not name falls back to the hub's own
+      // classification, which is where a 5xx stays SERVER and a 429 RATE_LIMIT.
+      throw reading.error
+        ?? await freebuffResponseError(response.status, response.headers, body, admissionLabel, this.options.onWarn)
+    }
+  }
+
+  /**
+   * Whether a verdict is worth replacing the attempt for.
+   *
+   * `retired` and `no-claim` both mean the upstream holds nothing for this
+   * attempt, so a fresh attempt is the CLI's own next move and cannot collide
+   * with a slot (a slot that IS held is reported as `slot-held`, which must never
+   * be retried — a new attempt against a held slot is refused with
+   * `purchase_capacity` naming the holder, reproduced live).
+   * @param verdict - what the answer meant.
+   * @returns whether to mint a fresh attempt and retry once.
+   */
+  private retryWithFreshAttempt(verdict: FreebuffAdmissionVerdict): boolean {
+    return verdict === 'retired' || verdict === 'no-claim'
+  }
+
+  /**
+   * Record what an accepted admission binds: the instance, its model, its end.
+   *
+   * The fields are the CLI's own persistence shape (`wJA` writes `{instanceId,
+   * model, tokenKey, ownerPid, expiresAt}`), and `expiresAt` is the answer's own
+   * value — a claim with no disclosed expiry stays usable in-process, which is
+   * what the CLI does with an instance it did not record.
+   *
+   * The instance the TURN then speaks for is the one the upstream echoed back,
+   * not necessarily the one that was sent: the CLI follows the same rule (its
+   * session state takes `g.instanceId`, which is why a server-assigned id would
+   * quietly switch the route to the single-session wire — and why such an id is
+   * not recorded as a claim at all).
+   * @param token - the Bearer the claim belongs to.
+   * @param instanceId - the attempt that was sent.
+   * @param model - the model it was admitted for.
+   * @param payload - the admission's answer.
+   * @returns the instance id this turn must chat with.
+   */
+  private recordClaim(token: string, instanceId: string, model: string, payload: unknown): string {
+    const echoed = typeof payload === 'object' && payload !== null
+      ? (payload as Record<string, unknown>).instanceId
+      : undefined
+    const bound = typeof echoed === 'string' && echoed !== '' ? echoed : instanceId
+    const expiresAt = typeof payload === 'object' && payload !== null
+      ? (payload as Record<string, unknown>).expiresAt
+      : undefined
+    const expires = typeof expiresAt === 'string' ? Date.parse(expiresAt) : Number.NaN
+    freebuffRecordClaim(token, {
+      instanceId: bound,
+      model,
+      ...Number.isFinite(expires) ? { expiresAt: expires } : {},
+    })
+    return bound
+  }
+
+  /**
+   * End the claim this process holds, before a turn that cannot continue it.
+   *
+   * This is the CLI's `releaseSlot()`: the reason to end a live session here is a
+   * MODEL change, because the admission binds an instance to one model — asking
+   * the live instance for a different model releases its claim and the next
+   * attempt is refused with `purchase_capacity` for the holder that is still
+   * live (both reproduced live 2026-09-29). The CLI's own order is DELETE, then a
+   * fresh instance, then POST, so that is this route's order too.
+   * @param credential - the Bearer credential.
+   * @param claim - the live claim being replaced.
+   * @param model - the model the turn actually wants.
+   * @param label - diagnostic prefix.
+   * @param watchdog - the turn's abort/idle watchdog.
+   * @throws {LlmError} when the upstream does not confirm the session ended.
+   */
+  private async releaseClaim(
+    credential: FreebuffCredential,
+    claim: FreebuffClaim,
+    model: string,
+    label: string,
+    watchdog: { signal: AbortSignal },
+  ): Promise<void> {
+    const response = await this.fetchFn(freebuffSessionAttemptUrl(), {
+      method: 'DELETE',
+      headers: freebuffSessionHeaders({ credential, method: 'DELETE', instanceId: claim.instanceId }),
+      signal: watchdog.signal,
+    })
+    const body = await response.text().catch(() => '')
+    const payload = tryJson(body)
+    const status = typeof payload === 'object' && payload !== null
+      ? (payload as Record<string, unknown>).status
+      : undefined
+    // The CLI's own confirmation is `status === "ended"` (`releaseSlot` throws
+    // "The server did not confirm that the session ended." otherwise) — live
+    // 2026-09-29 that answer is `{"status":"ended","desktopAttemptId":"<uuid>",
+    // "refundReceiptId":"…","freebucksRefundPending":true}`. `none` is accepted
+    // as "already gone": there is nothing left to release, and the fresh attempt
+    // below is then admitted (the freed slot admits one immediately).
+    if (status === 'ended' || status === 'none') {
+      freebuffForgetClaim(credential.accessToken, claim.instanceId)
+      return
+    }
+    throw new LlmError(
+      `${label} could not end the ${claim.model} session it was holding (DELETE …/session/attempt answered HTTP `
+      + `${String(response.status)}, status="${String(status)}"${body.trim() === '' ? '' : `: ${body.slice(0, 200)}`}), so `
+      + `the switch to ${model} was not applied. Run \`/end-session\` in the Freebuff CLI, then pick ${model} here. `
+      + '(Sessions end on their own after 1 hour.)',
+      response.status === 401 || response.status === 403 ? 'AUTH' : 'HTTP_409',
+      { status: response.status },
+    )
   }
 
   /** The desktop (Bearer) chat request. */
@@ -423,6 +614,7 @@ export class FreebuffAdapter extends LlmAdapter {
     credential: FreebuffCredential,
     options: GenerateOptions,
     messages: readonly TranslatableMessage[],
+    instanceId: string,
     runId: string,
     watchdog: { signal: AbortSignal },
   ): Promise<Response> {
@@ -438,7 +630,9 @@ export class FreebuffAdapter extends LlmAdapter {
         ...tools === undefined ? {} : { tools },
         ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
         ...options.reasoningEffort === undefined ? {} : { reasoningEffort: String(options.reasoningEffort) },
-        credential: credential.accessToken,
+        // The admitted attempt, not a value recomputed from the credential: the
+        // chat has to name the same instance the run was started for.
+        instanceId,
         runId,
       })),
       signal: watchdog.signal,

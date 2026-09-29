@@ -152,6 +152,20 @@ agent 必须是**模型专属**的免费 agent（`base2-free-space-bunny-alpha`�
 与 CLI 的 `x-freebuff-*` 请求头。agent 这一步很关键：free 模式会把 run 的 agent 和请求的模型
 做校验，因此用通用 `base2-free` 起的 run 除一个模型外都会被拒。
 
+**准入出来的会话是一个 ATTEMPT，而 attempt 是一次性的。** `x-freebuff-desktop-attempt-id`
+就是 `cli:<uuid>` 实例的 uuid 部分，这次「会话开始」一旦结束，上游就把它永久作废：被释放的
+attempt 之后每次准入都答 `409 {"status":"purchase_claim_released",…}`，被取消的
+（`DELETE /api/v1/freebuff/session/attempt` 之后）则答
+`409 {"error":"admission_attempt_closed",…}`，永远如此。所以官方 CLI 是「一个 claim 一个新
+`cli:<uuid>`」（`wr()` = `"cli:" + randomUUID()`），遇到释放就重新开一个会话；而把实例钉在凭据上
+（本插件 2026-09-29 之前的行为）会把该账号的回合永久卡死。现在本插件把活着的 claim 记在内存里：
+还活着就复用重新准入（上游回一样的 `admittedAt`/`expiresAt`，因此幂等、不多占会话），被上游作废
+就换新，切模型前先释放（`DELETE …/session/attempt`）—— 因为活着的 claim 独占该账号**唯一**的免费
+名额（`slotLimit: 1`），在它还活着时另起一个 attempt 会被
+`409 {"status":"purchase_capacity","currentInstanceId":"cli:<占位者>"}` 拒绝。这些状态全部按名字
+处理，并把补救办法用用户自己的话说清楚（去 CLI 里结束那个会话、改问占位者的模型、或在 CLI 里重开
+一次会话），而不是只丢一个 HTTP 409。
+
 线协议形状与钉住的模型清单来自参考项目
 [`lza6/Freebuff-2API`](https://github.com/lza6/Freebuff-2API)；登录流程、凭据路径与额度端点的
 请求头集合则读取自官方 CLI 二进制本身，上面那条 `403` 是实测结果 —— 源码里都按文件与符号
