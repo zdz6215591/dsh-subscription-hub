@@ -163,6 +163,7 @@ export const en = {
   importCommandCode: 'Import from Command Code CLI',
   importTrae: 'Import from Trae',
   importJoyCode: 'Import from JoyCode IDE',
+  importFreebuffCli: 'Import from Freebuff CLI',
   joyCodePasteHint:
     'JoyCode signs in on its own page: the browser button opens it, you authorize (scan with the JD app), and the credential returns here by itself. '
     + 'The import button instead reads what a locally signed-in JoyCode IDE stored (state.vscdb). '
@@ -211,8 +212,8 @@ export const en = {
   clinePinReset: 'Back to auto',
   clinePasteHint: 'Paste a Cline Pass API key (sk_…) from app.cline.bot. Cline has no browser sign-in, so the key itself is the login.',
   clineKeyPlaceholder: 'sk_…',
-  freebuffPasteHint: 'Paste a Freebuff Bearer token, or the freebuff.com cookie string. Freebuff has no OAuth client: a browser session IS the credential.',
-  freebuffPastePlaceholder: 'Bearer token / cookie string',
+  freebuffPasteHint: 'Paste an `authorization: Bearer …` value from a Freebuff CLI request, or the bare token. Cookie strings are not accepted here: that wire has no `tools` field, so a turn through it cannot carry your tools — use “Import from Freebuff CLI” or “Sign in” instead.',
+  freebuffPastePlaceholder: 'Bearer token',
   qoderPasteHint:
     'Qoder signs in with a Personal Access Token: mint one on your Qoder account page (qoder.com, or qoder.com.cn for the China deployment), then paste it here. '
     + 'The token is tried against both deployments and whichever accepts it is recorded, so the region does not need choosing — prefix it with "global:" or "china:" to pin one instead.',
@@ -385,6 +386,7 @@ export const zh = {
   importCommandCode: '从 Command Code CLI 导入',
   importTrae: '从 Trae 导入',
   importJoyCode: '从 JoyCode IDE 导入',
+  importFreebuffCli: '从 Freebuff CLI 导入',
   joyCodePasteHint:
     'JoyCode 在它自己的登录页上授权：点「浏览器登录」打开该页，用京东 App 扫码授权后凭据会自动回到这里。'
     + '「导入」按钮则读取本机已登录的 JoyCode IDE 保存的凭据（state.vscdb）。'
@@ -435,8 +437,8 @@ export const zh = {
   clinePinReset: '恢复自动',
   clinePasteHint: '粘贴 app.cline.bot 控制台里的 Cline Pass API Key（sk_…）。Cline 没有浏览器登录，Key 本身就是登录凭据。',
   clineKeyPlaceholder: 'sk_…',
-  freebuffPasteHint: '粘贴 Freebuff 的 Bearer token，或 freebuff.com 的 Cookie 串。Freebuff 没有 OAuth 客户端：浏览器登录态本身就是凭据。',
-  freebuffPastePlaceholder: 'Bearer token / Cookie 串',
+  freebuffPasteHint: '粘贴 Freebuff CLI 请求里的 `authorization: Bearer …`，或直接粘贴 token。这里不再接受 Cookie 串：那条通道没有 `tools` 字段，会话会静默丢掉全部本地工具——请改用「从 Freebuff CLI 导入」或「登录账号」。',
+  freebuffPastePlaceholder: 'Bearer token',
   qoderPasteHint:
     'Qoder 使用「个人访问令牌」(Personal Access Token) 登录：在 Qoder 账号页面（国内版 qoder.com.cn，国际版 qoder.com）生成后粘贴到这里。'
     + '令牌会依次在两个部署上验证，并记住接受它的那个，所以无需自己选区域——若确知区域，可用 "global:" 或 "china:" 前缀直接指定。',

@@ -1,45 +1,43 @@
 /**
- * Freebuff login: turn pasted browser material into a stored session, and keep
- * that session alive.
+ * Freebuff login: turn a Bearer credential into a stored session, and keep that
+ * session alive.
  *
- * ## There is no discovery path — paste is the only way in
+ * ## Which credentials this route accepts, and where they come from
  *
- * Freebuff publishes no OAuth client, so nothing here can drive a login. The
- * reference gets its credential three ways and this plugin can use NONE of them:
+ * ONE shape: a Bearer token. Two ways to get one, both real:
  *
- *   - a **browser extension** that reads the page's cookies
- *     (`ref-freebuff2api/browser-extension/`);
- *   - a **WebView2 login window**, whose cookie capture works only because the
- *     cookie manager is an OS-level component the page's JS cannot reach
- *     (`ref-freebuff2api/src/login_window_windows.rs:1-20`, `:76-90`) — not
- *     available to a Node plugin, and Windows-only even there;
- *   - **curl / HAR / cookie paste** (`ref-freebuff2api/src/import.rs:1-4`).
+ *   - **the official CLI's login** (`~/.config/manicode/credentials.json` →
+ *     `default.authToken`), imported by `freebuff-cli.ts`;
+ *   - **a pasted `authorization: Bearer …` value** — {@link parseFreebuffPaste}
+ *     reads it out of a bare token, the header text, a curl command, or a HAR
+ *     document.
  *
- * So this module implements the third, which is the one a user can always do:
- * copy the `authorization` header or the cookie string out of DevTools. There is
- * consequently no `freebuffImportFailureMessage`-style helper — there is no
- * discovery to fail, and inventing one would tell the user to look for something
- * that does not exist.
+ * A browser-session COOKIE is NOT accepted. It can only ride Freebuff's web
+ * protocol, which takes one flat prompt string with no `tools` field
+ * (`ref-freebuff2api/src/web_protocol.rs:380-388`), so a turn through it would
+ * lose every harness tool without saying so. A cookie paste therefore fails with
+ * the reason spelled out ({@link freebuffCookieRefusal}) instead of being
+ * accepted and quietly degraded.
  *
  * ## What a paste may contain
  *
- * {@link parseFreebuffPaste} follows the reference's sniffing order
- * (`ref-freebuff2api/src/import.rs:308-350`): a curl command, then a HAR
- * document, then a cookie string carrying the session-token marker, then a bare
- * `Bearer <token>`, then a bare token. The credential is then VALIDATED against
- * the balance endpoint before anything is stored, so a paste that the upstream
- * does not honour fails here with the upstream's own answer rather than at the
- * first chat request.
+ * {@link parseFreebuffPaste} follows the reference's sniffing order for the
+ * Bearer half (`ref-freebuff2api/src/import.rs:308-350`): a HAR document, then a
+ * curl command, then a bare `Bearer <token>`, then a bare token. The credential
+ * is then VALIDATED against the session endpoint before anything is stored, so a
+ * paste the upstream does not honour fails here with the upstream's own answer
+ * rather than at the first chat request.
  *
  * ## Keeping it alive: the 45 s heartbeat, without a timer
  *
  * The reference schedules `x-freebuff-heartbeat: 1` every 45 s on a background
- * loop (`ref-freebuff2api/src/session.rs:7,21-22`, `:262-272`) because a web
- * session is dropped when it goes quiet. A plugin must not own a background
+ * loop (`ref-freebuff2api/src/session.rs:7,21-22`, `:262-272`) because a desktop
+ * session is dropped when it goes quiet — and the CLI sends the same flag on its
+ * session GET (`CV`, the `H==="GET"` branch). A plugin must not own a background
  * timer, so the same effect is produced through the shared token manager: the
  * validation TTL IS the heartbeat interval, and the manager's preempt window
  * makes the next request re-validate — which is where the heartbeat flag rides
- * (`ref-freebuff2api/src/upstream.rs:183-193`). No timer, no polling when idle.
+ * ({@link validateFreebuffCredential}). No timer, no polling when idle.
  *
  * @module dsh-subscription-hub/providers/freebuff-session
  */
@@ -49,13 +47,13 @@ import { proxiedFetch } from '../http.js'
 import type { FreebuffSession } from '../auth/store.js'
 import type { FreebuffCredential } from './freebuff/client.js'
 import {
+  freebuffAssertDesktopCredential,
   freebuffCredentialKind,
+  freebuffCookieRefusal,
+  freebuffInstanceId,
   freebuffSessionHeaders,
   freebuffSessionUrl,
   freebuffSessionUnauthenticated,
-  FREEBUFF_SESSION_COOKIE,
-  FREEBUFF_WEB_AUTH_SESSION_PATH,
-  FREEBUFF_WEB_BASE,
 } from './freebuff/client.js'
 
 /**
@@ -73,59 +71,13 @@ export const FREEBUFF_HEARTBEAT_INTERVAL_MS = 45_000
 /** Bound on one validation call. */
 const VALIDATION_TIMEOUT_MS = 15_000
 
-/** The parsed credential a paste yielded. */
-export interface FreebuffParsedCredential {
-  /** `bearer` for a token the desktop protocol takes, `cookie` for a browser session. */
-  kind: 'bearer' | 'cookie'
-  /** The Bearer token, or the session-token value of a cookie string. */
-  token: string
-  /** The cookie header to send, for a `cookie` credential. */
-  cookie?: string
-}
-
 /** What a successful validation read back. */
 export interface FreebuffIdentity {
   token: string
-  cookie?: string
-  /** Display identity (email or name), when the endpoint disclosed one. */
+  /** Display identity (email or name), when the caller or the endpoint supplied one. */
   account?: string
   /** Plan label: `subscription.tierId`, else `freebucks.planId`, else `accessTier`. */
   plan?: string
-}
-
-/** The NextAuth cookies the reference keeps when it trims a pasted cookie string (`src/import.rs:352-378`). */
-const KEPT_COOKIE_NAMES = [
-  FREEBUFF_SESSION_COOKIE,
-  '__Host-next-auth.csrf-token',
-  '__Secure-next-auth.callback-url',
-]
-
-/**
- * Trim a pasted cookie string down to the cookies the session actually needs.
- *
- * Ported from the reference (`src/import.rs:352-378`): it keeps the session
- * token, the CSRF token and the callback URL, in that order, and drops whatever
- * else the browser happened to have. Keeping the whole header would be more
- * faithful to the browser, but the reference's smaller set is what it validated
- * against live, and a trimmed header is also less to leak.
- * @param text - any text containing cookie pairs.
- * @returns the trimmed cookie string, or undefined when no session token was found.
- */
-export function freebuffTrimCookieString(text: string): string | undefined {
-  const found: string[] = []
-  for (const name of KEPT_COOKIE_NAMES) {
-    const pattern = new RegExp(`(?:^|[;\\s"'])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}=([^;\\s"']+)`)
-    const match = pattern.exec(text)
-    if (match?.[1] !== undefined) found.push(`${name}=${match[1]}`)
-  }
-  return found.length === 0 ? undefined : found.join('; ')
-}
-
-/** The session-token VALUE inside a cookie string. */
-export function freebuffSessionTokenOf(cookie: string): string | undefined {
-  const pattern = new RegExp(`${FREEBUFF_SESSION_COOKIE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}=([^;\\s"']+)`)
-  const match = pattern.exec(cookie)
-  return match?.[1]
 }
 
 /** The `authorization: Bearer <token>` value in a header list, curl command or HAR document. */
@@ -134,13 +86,15 @@ function freebuffBearerIn(text: string): string | undefined {
   return match?.[1]
 }
 
-/** The `cookie: <value>` header in a header list, curl command or HAR document. */
-function freebuffCookieHeaderIn(text: string): string | undefined {
-  const match = /(?:^|[^a-z])cookie["'\s]*:\s*([^"'\r\n]+)/i.exec(text)
-  return match?.[1]
-}
-
-/** Pull one credential out of a HAR document, when the text is one. */
+/**
+ * Pull a Bearer token out of a HAR document, when the text is one.
+ *
+ * Only the `authorization` header is read. The reference's HAR importer also
+ * collects a session cookie (`src/import.rs:308-350`), and that half is
+ * deliberately NOT ported: this route does not accept cookie credentials.
+ * @param text - the candidate document.
+ * @returns the token, or undefined.
+ */
 function freebuffFromHar(text: string): string | undefined {
   if (!text.trimStart().startsWith('{')) return undefined
   let parsed: unknown
@@ -159,56 +113,52 @@ function freebuffFromHar(text: string): string | undefined {
     for (const header of headers) {
       const name = String((header as { name?: unknown })?.name ?? '').toLowerCase()
       const value = (header as { value?: unknown })?.value
-      if (typeof value !== 'string') continue
-      if (name === 'authorization') {
-        const token = /^Bearer\s+(.+)$/i.exec(value.trim())?.[1]
-        if (token !== undefined) return token.trim()
-      }
-      if (name === 'cookie' && /session-token/i.test(value)) return value.trim()
+      if (name !== 'authorization' || typeof value !== 'string') continue
+      const token = /^Bearer\s+(.+)$/i.exec(value.trim())?.[1]
+      if (token !== undefined) return token.trim()
     }
   }
   return undefined
 }
 
 /**
- * Parse pasted login material into one credential.
+ * Parse pasted login material into one Bearer credential.
  *
- * Order of specificity (the reference's own, `src/import.rs:308-350`):
- * a HAR document, a curl command, a cookie string, a bare `Bearer <token>`, then
- * a bare token. A cookie paste wins over a bearer-looking string because the
- * session-token marker is checked first — the same discriminator the reference's
- * credential classifier uses (`src/import.rs:176-183`).
+ * A cookie paste is REFUSED with the reason, not accepted: see the module doc
+ * for why that wire is not implemented here.
  * @param input - the raw pasted text.
- * @returns the credential it named.
- * @throws {LlmError} `MISSING_CREDENTIAL` when nothing usable was pasted.
+ * @returns the Bearer token.
+ * @throws {LlmError} `MISSING_CREDENTIAL` when nothing usable was pasted,
+ *   `UNSUPPORTED` when what was pasted is a cookie string.
  */
-export function parseFreebuffPaste(input: string): FreebuffParsedCredential {
+export function parseFreebuffPaste(input: string): string {
   const trimmed = input.trim()
   if (trimmed === '') {
     throw new LlmError(
-      'Freebuff: paste the credential first — either the `authorization: Bearer …` header value '
-      + 'from a freebuff.com request, or the full Cookie string (it must contain '
-      + `\`${FREEBUFF_SESSION_COOKIE}=\`).`,
+      'Freebuff: paste the credential first — the `authorization: Bearer …` header value from a Freebuff CLI '
+      + 'request, or the bare token. Cookie strings are not accepted on this route.',
       'MISSING_CREDENTIAL',
     )
   }
+  // The cookie check comes first and is a REFUSAL rather than a fallback: a
+  // cookie string also contains token-looking material, so letting the Bearer
+  // rules run over it would happily extract the session-token value and send it
+  // as a Bearer — which is the credential shape the upstream answers with a
+  // ban-shaped 403.
+  if (/session-token/i.test(trimmed)) throw freebuffCookieRefusal()
   const fromHar = freebuffFromHar(trimmed)
   const candidate = fromHar ?? trimmed
-  // A cookie string, whether it was pasted whole or carried in a `cookie:` header.
-  const cookieSource = /session-token/i.test(candidate)
-    ? freebuffCookieHeaderIn(candidate) ?? candidate
-    : undefined
-  if (cookieSource !== undefined) {
-    const cookie = freebuffTrimCookieString(cookieSource)
-    const token = cookie === undefined ? undefined : freebuffSessionTokenOf(cookie)
-    if (cookie !== undefined && token !== undefined) return { kind: 'cookie', token, cookie }
+  const bearer = freebuffBearerIn(candidate)
+    ?? (candidate.startsWith('Bearer ') ? candidate.slice(7).trim() : undefined)
+  if (bearer !== undefined && bearer !== '') {
+    if (/session-token/i.test(bearer)) throw freebuffCookieRefusal()
+    return bearer
   }
-  const bearer = freebuffBearerIn(candidate) ?? (candidate.startsWith('Bearer ') ? candidate.slice(7).trim() : undefined)
-  if (bearer !== undefined && bearer !== '') return { kind: 'bearer', token: bearer }
-  if (/^\S{16,}$/.test(candidate)) return { kind: 'bearer', token: candidate }
+  if (/^\S{16,}$/.test(candidate)) return candidate
   throw new LlmError(
-    'Freebuff: could not find a credential in that text. Paste the bare Bearer token, or the full Cookie '
-    + `string from freebuff.com (it must contain \`${FREEBUFF_SESSION_COOKIE}=\`).`,
+    'Freebuff: could not find a Bearer token in that text. Paste the bare token, or the '
+    + '`authorization: Bearer …` header value from a Freebuff CLI request. '
+    + '(Cookie strings are not accepted on this route.)',
     'MISSING_CREDENTIAL',
   )
 }
@@ -222,18 +172,24 @@ export function freebuffCredentialOf(session: FreebuffSession): FreebuffCredenti
 }
 
 /**
- * Validate a credential against the balance endpoint and read back what it says
+ * Validate a credential against the session endpoint and read back what it says
  * about the account.
  *
- * This is the ONLY credential-validating call either protocol offers, and both
- * wires answer it: a cookie credential is refused with a 401
- * (`src/api.rs:5618`) and a Bearer credential with the desktop session GET.
+ * This is the ONE credentialed read either protocol offers, and it is the quota
+ * read too: live 2026-09-28, `GET https://www.codebuff.com/api/v1/freebuff/session`
+ * with the CLI's own header set answered 200 for a free CLI credential with
+ * `accessTier`, `freebucks{balance, daily{limit,spent,remaining,resetAt}}` and a
+ * per-model `prices` map. No cookie is involved.
  *
- * The desktop call carries `x-freebuff-heartbeat: 1`, which is how the keepalive
- * reaches the upstream (`src/upstream.rs:183-193`).
+ * The call carries `x-freebuff-heartbeat: 1` and
+ * `x-freebuff-include-unused-rate-limits: 1`, which is how the keepalive reaches
+ * the upstream and why the answer carries the per-model rows at all
+ * (`ref-freebuff2api/src/upstream.rs:183-193`, CLI `CV`'s GET branch).
  * @param credential - the credential to validate.
  * @param fetchFn - injectable fetcher for tests.
  * @param signal - optional cancellation.
+ * @param options - `account` supplies a display name the endpoint does not return
+ *   (the CLI import knows the email, the endpoint does not).
  * @returns the identity to store.
  * @throws {LlmError} `MISSING_CREDENTIAL` for an empty credential, `AUTH` when the
  *   upstream refuses it, `TRANSPORT`/`SERVER` when nothing answered.
@@ -242,40 +198,38 @@ export async function validateFreebuffCredential(
   credential: FreebuffCredential,
   fetchFn: typeof fetch = proxiedFetch,
   signal?: AbortSignal,
+  options: { account?: string } = {},
 ): Promise<FreebuffIdentity> {
-  const kind = freebuffCredentialKind(credential)
-  if (kind === undefined) {
-    throw new LlmError(
-      'Freebuff: the credential carries neither a Bearer token nor a cookie string.',
-      'MISSING_CREDENTIAL',
-    )
-  }
-  const wire = kind === 'cookie' ? 'web' : 'chat-completions'
+  freebuffAssertDesktopCredential(credential)
+  if (freebuffCredentialKind(credential) !== 'bearer') throw freebuffCookieRefusal()
+  const url = freebuffSessionUrl()
   const timeout = AbortSignal.timeout(VALIDATION_TIMEOUT_MS)
   const perSignal = signal === undefined ? timeout : AbortSignal.any([signal, timeout])
   let response: Response
   try {
-    response = await fetchFn(freebuffSessionUrl(wire), {
+    response = await fetchFn(url, {
       method: 'GET',
-      headers: freebuffSessionHeaders(credential, wire, { heartbeat: true }),
+      headers: freebuffSessionHeaders({
+        credential,
+        method: 'GET',
+        instanceId: freebuffInstanceId(credential.accessToken),
+      }),
       signal: perSignal,
     })
   } catch (error) {
-    throw new LlmError(
-      `Freebuff: could not reach ${freebuffSessionUrl(wire)} to validate the credential.`,
-      'TRANSPORT',
-      { cause: error },
-    )
+    throw new LlmError(`Freebuff: could not reach ${url} to validate the credential.`, 'TRANSPORT', { cause: error })
   }
   const text = await response.text().catch(() => '')
   if (!response.ok) {
-    // A 401 is the reference's own "this credential is dead" signal: its pool
-    // cools a deterministic failure immediately (`src/web_pool.rs:268-275`), and
-    // a refresh that returns AUTH is what deletes the stored session.
+    // A 401/403 is the reference's own "this credential is dead" signal: its pool
+    // cools a deterministic failure immediately (`src/web_pool.rs:268-275`), and a
+    // refresh that returns AUTH is what deletes the stored session.
     const auth = response.status === 401 || response.status === 403
     throw new LlmError(
       `Freebuff credential check failed (HTTP ${String(response.status)})${text === '' ? '' : `: ${text.slice(0, 200)}`}`
-      + (auth ? ' — the browser session is no longer valid; paste a current token or cookie string.' : ''),
+      + (auth
+        ? ' — the credential is no longer valid; import the CLI login again (`freebuff` → log in) or paste a current token.'
+        : ''),
       auth ? 'AUTH' : 'SERVER',
       { status: response.status },
     )
@@ -293,12 +247,12 @@ export async function validateFreebuffCredential(
       'MALFORMED_RESPONSE',
     )
   }
-  // An authenticated answer always carries `accessTier` or `freebucks`
-  // (`src/api.rs:5618-5621`); anything else is a refusal wearing a 200.
+  // An authenticated answer always carries `accessTier` or `freebucks`; anything
+  // else is a refusal wearing a 200.
   if (freebuffSessionUnauthenticated(payload)) {
     throw new LlmError(
       'Freebuff did not recognise the credential: its balance answer carried no access tier and no credits. '
-      + 'Paste a current Bearer token or cookie string from a signed-in freebuff.com session.',
+      + 'Import the Freebuff CLI login again, or paste a current Bearer token.',
       'AUTH',
     )
   }
@@ -315,48 +269,11 @@ export async function validateFreebuffCredential(
     record.accessTier,
     record.access_tier,
   )
-  const account = kind === 'cookie' ? await freebuffDisplayIdentity(credential, fetchFn, perSignal) : undefined
+  const account = options.account ?? firstString(record.email, record.account)
   return {
     token: credential.accessToken,
-    ...credential.cookie === undefined ? {} : { cookie: credential.cookie },
     ...account === undefined ? {} : { account },
     ...plan === undefined ? {} : { plan },
-  }
-}
-
-/**
- * Best-effort display name for a cookie credential.
- *
- * `/api/auth/session` answers **HTTP 200 with `{}`** for a credential that is not
- * signed in (`src/api.rs:5606-5616`) — so the body is checked for a real `user`
- * subject and nothing is inferred from the status. A failure here is NOT a
- * validation failure: the balance call already proved the credential works, and
- * the account row can be keyed off the credential hash.
- * @param credential - the credential to ask about.
- * @param fetchFn - injectable fetcher for tests.
- * @param signal - the shared cancellation signal.
- * @returns the display identity, or undefined.
- */
-async function freebuffDisplayIdentity(
-  credential: FreebuffCredential,
-  fetchFn: typeof fetch,
-  signal: AbortSignal,
-): Promise<string | undefined> {
-  try {
-    const response = await fetchFn(`${FREEBUFF_WEB_BASE}${FREEBUFF_WEB_AUTH_SESSION_PATH}`, {
-      method: 'GET',
-      headers: freebuffSessionHeaders(credential, 'web'),
-      signal,
-    })
-    if (!response.ok) return undefined
-    const payload = await response.json() as unknown
-    if (typeof payload !== 'object' || payload === null) return undefined
-    const user = (payload as { user?: unknown }).user
-    if (typeof user !== 'object' || user === null) return undefined
-    const fields = user as Record<string, unknown>
-    return firstString(fields.email, fields.name, fields.id)
-  } catch {
-    return undefined
   }
 }
 
@@ -370,34 +287,43 @@ function firstString(...values: readonly unknown[]): string | undefined {
 
 /**
  * Build the session to store from a validated credential.
- * @param credential - the parsed credential.
+ * @param credential - the Bearer token.
  * @param identity - what the validation read back.
  * @returns the session.
- * @throws {LlmError} `MALFORMED_RESPONSE` when a cookie credential validated
- *   without a cookie string surviving: every web request sends the header, so a
- *   session without one would fail on its first call.
  */
-export function freebuffSessionOf(
-  credential: FreebuffParsedCredential,
-  identity: FreebuffIdentity,
-): FreebuffSession {
-  if (credential.kind === 'cookie' && identity.cookie === undefined) {
-    throw new LlmError(
-      'Freebuff validated the cookie credential but no cookie header survived parsing; '
-      + `paste the full freebuff.com Cookie string (it must contain \`${FREEBUFF_SESSION_COOKIE}=\`).`,
-      'MALFORMED_RESPONSE',
-    )
-  }
+export function freebuffSessionOf(credential: string, identity: FreebuffIdentity): FreebuffSession {
   return {
     // One secret held twice, like the JoyCode route: it is what a request sends
     // AND the durable secret a re-validation carries (see `FreebuffSession`).
     accessToken: identity.token,
     refreshToken: identity.token,
     expiresAt: Date.now() + FREEBUFF_VALIDATION_TTL_MS,
-    ...identity.cookie === undefined ? {} : { cookie: identity.cookie },
     ...identity.account === undefined ? {} : { account: identity.account },
     ...identity.plan === undefined ? {} : { plan: identity.plan },
   }
+}
+
+/**
+ * Build a session from a Bearer token, validating it first.
+ *
+ * The one entry point the CLI import, the browser login and the paste path all
+ * share, so every credential this route stores has been checked against the
+ * upstream exactly once with the upstream's own answer.
+ * @param accessToken - the Bearer token.
+ * @param fetchFn - injectable fetcher for tests.
+ * @param signal - optional cancellation.
+ * @param options - `account` supplies a display name the endpoint does not return.
+ * @returns the session to persist.
+ * @throws {LlmError} as {@link validateFreebuffCredential}.
+ */
+export async function freebuffSessionFromBearer(
+  accessToken: string,
+  fetchFn: typeof fetch = proxiedFetch,
+  signal?: AbortSignal,
+  options: { account?: string } = {},
+): Promise<FreebuffSession> {
+  const identity = await validateFreebuffCredential({ accessToken: accessToken.trim() }, fetchFn, signal, options)
+  return freebuffSessionOf(accessToken.trim(), identity)
 }
 
 /**
@@ -406,43 +332,40 @@ export function freebuffSessionOf(
  * @param fetchFn - injectable fetcher for tests.
  * @param signal - optional cancellation.
  * @returns the session to persist.
- * @throws {LlmError} `MISSING_CREDENTIAL` for unusable input, `AUTH` when the
- *   upstream refuses the credential.
+ * @throws {LlmError} `MISSING_CREDENTIAL` for unusable input, `UNSUPPORTED` for a
+ *   cookie paste, `AUTH` when the upstream refuses the token.
  */
 export async function freebuffSessionFromPaste(
   input: string,
   fetchFn?: typeof fetch,
   signal?: AbortSignal,
 ): Promise<FreebuffSession> {
-  const credential = parseFreebuffPaste(input)
-  const identity = await validateFreebuffCredential(
-    { accessToken: credential.token, ...credential.cookie === undefined ? {} : { cookie: credential.cookie } },
-    fetchFn ?? proxiedFetch,
-    signal,
-  )
-  return freebuffSessionOf(credential, identity)
+  const token = parseFreebuffPaste(input)
+  return await freebuffSessionFromBearer(token, fetchFn ?? proxiedFetch, signal)
 }
 
 /**
  * Re-validate a stored session: the shared token manager's "refresh".
  *
- * There is no grant to exchange, so a refresh means asking the balance endpoint
+ * There is no grant to exchange, so a refresh means asking the session endpoint
  * about the credential already held. That re-validates it, extends the window,
- * and (for a Bearer credential) sends the heartbeat flag — which is the whole of
- * this route's keepalive (see the module doc).
+ * and sends the heartbeat flag — which is the whole of this route's keepalive
+ * (see the module doc).
  * @param session - the stored session.
  * @param fetchFn - injectable fetcher for tests.
  * @param signal - optional cancellation.
  * @returns the session to store.
  * @throws {LlmError} `AUTH` when the credential is refused (permanent: only a
- *   fresh paste can replace it).
+ *   fresh import/login can replace it).
  */
 export async function refreshFreebuffSession(
   session: FreebuffSession,
   fetchFn: typeof fetch = proxiedFetch,
   signal?: AbortSignal,
 ): Promise<FreebuffSession> {
-  const identity = await validateFreebuffCredential(freebuffCredentialOf(session), fetchFn, signal)
+  const identity = await validateFreebuffCredential(freebuffCredentialOf(session), fetchFn, signal, {
+    ...session.account === undefined ? {} : { account: session.account },
+  })
   const account = identity.account ?? session.account
   const plan = identity.plan ?? session.plan
   return {
@@ -450,7 +373,6 @@ export async function refreshFreebuffSession(
     accessToken: identity.token,
     refreshToken: identity.token,
     expiresAt: Date.now() + FREEBUFF_VALIDATION_TTL_MS,
-    ...(identity.cookie ?? session.cookie) === undefined ? {} : { cookie: identity.cookie ?? session.cookie },
     ...account === undefined ? {} : { account },
     ...plan === undefined ? {} : { plan },
   }
@@ -459,11 +381,11 @@ export async function refreshFreebuffSession(
 /**
  * Whether a failed re-validation is terminal for this credential.
  *
- * A refusal (`AUTH`) means the browser session is gone and nothing this plugin
- * can do revives it — the user pastes a current token or cookie string. A
+ * A refusal (`AUTH`) means the token is gone and nothing this plugin can do
+ * revives it — the user imports the CLI login or pastes a current token. A
  * transport failure says nothing about the credential, so it is retried.
  * @param error - the thrown value.
- * @returns true when a fresh paste is the only remedy.
+ * @returns true when a fresh credential is the only remedy.
  */
 export function isFreebuffPermanentRefreshError(error: unknown): boolean {
   return error instanceof LlmError && error.code === 'AUTH'

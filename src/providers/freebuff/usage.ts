@@ -1,21 +1,30 @@
 /**
  * Freebuff quota read → the hub's `ProviderUsage`.
  *
- * ## What the endpoint discloses
+ * ## What the endpoint discloses, and that it is the Bearer one
  *
- * `GET {freebuff.com}/api/web/freebuff-session` (cookie) and
- * `GET {codebuff.com}/api/v1/freebuff/session` (Bearer) answer the same balance
- * picture (`src/web_protocol.rs:606-619`, `src/upstream.rs:138-152`):
- * `freebucks{balance, daily{limit,spent,remaining,resetAt}, planId, prices,
- * priceNotices}`, `accessTier`, `subscription`, `rateLimitsByModel{model →
- * {limit, recentCount, resetAt, poolLabel}}`, `referral`, `countryCode` and
- * `countryBlockReason`.
+ * `GET {www.codebuff.com}/api/v1/freebuff/session` answers the balance picture,
+ * and it answers it for a Bearer credential — no cookie involved. Live
+ * 2026-09-28 with a free CLI credential (`default.authToken`) and the CLI's own
+ * header set, it returned HTTP 200 with:
  *
- * The two wires SPELL it differently, and both spellings are read here: the
- * upstream web response is camelCase at top level (`src/web_protocol.rs:727-745`
- * — `accessTier`, `rateLimitsByModel`, `countryCode`), while the reference's own
+ *     {"status":"none","accessTier":"limited",
+ *      "freebucks":{"balance":10,
+ *                   "daily":{"limit":25,"spent":15,"remaining":10,
+ *                            "resetAt":"2026-09-28T16:00:00.000Z","resetTimeZone":"Asia/Shanghai"},
+ *                   "wallet":{"balance":0,"monthlyBonus":0},"planId":null,
+ *                   "prices":{"stealth/space-bunny-alpha":0,"deepseek/deepseek-v4-flash":5,…}},
+ *      …}
+ *
+ * This is the SAME read the session validation and keepalive use
+ * (`freebuff-session.ts`), which is why the header set is the CLI's `GET` one:
+ * `x-freebuff-include-unused-rate-limits: 1` is what makes
+ * `rateLimitsByModel` rows appear at all (`src/upstream.rs:138-152`).
+ *
+ * The response is also read in the reference's own re-spelling: its
  * `/api/account/balance` re-emits the same data snake_case
- * (`src/api.rs:576-584` — `access_tier`, `rate_limits_by_model`, `country_code`).
+ * (`src/api.rs:576-584` — `access_tier`, `rate_limits_by_model`, `country_code`),
+ * so both spellings are accepted here.
  *
  * ## Units
  *
@@ -37,7 +46,8 @@
  *
  * `countryBlockReason` becomes a WARNING (`{@link freebuffQuotaWarnings}`) rather
  * than a window: it is a statement about where the account is, not an allowance,
- * and inventing a window from it would draw a fabricated quota bar.
+ * and inventing a window from it would draw a fabricated quota bar. (The live
+ * read above carried no such field; the reference's does.)
  *
  * @module dsh-subscription-hub/providers/freebuff/usage
  */
@@ -47,7 +57,9 @@ import type { ProviderUsage, UsageWindow } from '../common.js'
 import type { FetchFn } from '../common.js'
 import type { FreebuffCredential } from './client.js'
 import {
+  freebuffAssertDesktopCredential,
   freebuffCredentialKind,
+  freebuffInstanceId,
   freebuffSessionHeaders,
   freebuffSessionUrl,
   freebuffSessionUnauthenticated,
@@ -358,7 +370,9 @@ export function freebuffUsageFromQuota(quota: FreebuffQuota, options: FreebuffUs
  * so instead of failing the whole settings page (`src/providers/qoder/usage.ts`
  * takes the same line). A 401/403 is the credential being refused — the same
  * signal that invalidates a stored session on the request path
- * (`src/web_pool.rs:268-275`).
+ * (`src/web_pool.rs:268-275`). A cookie credential is not read at all: the
+ * cookie wire is gone from this route, and its own quota endpoint needs the
+ * browser session this route no longer accepts.
  * @param credential - the account's stored credential.
  * @param fetchFn - injectable fetcher for tests.
  * @param signal - optional cancellation.
@@ -371,15 +385,25 @@ export async function fetchFreebuffUsage(
   signal?: AbortSignal,
   options: FreebuffUsageOptions = {},
 ): Promise<ProviderUsage> {
-  const kind = freebuffCredentialKind(credential)
-  if (kind === undefined) return { supported: false }
-  const wire = kind === 'cookie' ? 'web' : 'chat-completions'
+  if (freebuffCredentialKind(credential) !== 'bearer') {
+    try {
+      freebuffAssertDesktopCredential(credential)
+    } catch (error) {
+      options.onWarn?.(error instanceof Error ? error.message : String(error))
+      return { supported: false }
+    }
+    return { supported: false }
+  }
   const timeout = AbortSignal.timeout(QUOTA_TIMEOUT_MS)
   const perSignal = signal === undefined ? timeout : AbortSignal.any([signal, timeout])
   try {
-    const response = await fetchFn(freebuffSessionUrl(wire), {
+    const response = await fetchFn(freebuffSessionUrl(), {
       method: 'GET',
-      headers: freebuffSessionHeaders(credential, wire),
+      headers: freebuffSessionHeaders({
+        credential,
+        method: 'GET',
+        instanceId: freebuffInstanceId(credential.accessToken),
+      }),
       signal: perSignal,
     })
     if (!response.ok) {

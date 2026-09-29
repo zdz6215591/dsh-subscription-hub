@@ -1,101 +1,67 @@
 /**
- * Freebuff (freebuff.com / codebuff.com) wire surface: credentials, URLs,
- * headers, request-body shaping, error classification — and the translator for
- * the ONE protocol here that is not OpenAI-shaped.
+ * Freebuff (codebuff.com) wire surface: credentials, URLs, headers, the
+ * desktop request/run bootstrap, error classification.
  *
- * ## Two upstreams behind one credential
+ * ## ONE wire, ONE credential shape
  *
- * Freebuff ships no OAuth client this plugin can drive; the credential is a
- * browser session, and the reference gateway carries it in one of two shapes
- * (`src/import.rs:176-183` classifies them by the `session-token` marker):
+ * This route speaks the DESKTOP protocol only: `POST
+ * {www.codebuff.com}/api/v1/chat/completions` with `authorization: Bearer
+ * <token>` and an OpenAI-chat body (`ref-freebuff2api/src/upstream.rs:127-136`,
+ * `:281-315`). Its SSE is already OpenAI chat-completions format
+ * (`src/protocol/openai_sse.rs:1-9`), so the hub's own `streamChatCompletions`
+ * translator reads it directly.
  *
- *   - **Bearer token** — the DESKTOP protocol, `POST {api}/api/v1/chat/completions`
- *     with `authorization: Bearer <token>` and an OpenAI-chat body
- *     (`src/upstream.rs:127-136`, `:281-315`). Its SSE is already
- *     OpenAI chat-completions format (`src/protocol/openai_sse.rs:1-9`), so the
- *     hub's own `streamChatCompletions` translator reads it.
- *   - **Cookie string** — the WEB protocol, `POST https://freebuff.com/api/chat/stream`
- *     with the whole cookie header (`src/web_protocol.rs:4-12`, `:346-365`).
- *     Its 11 event types are NOT OpenAI-shaped (`src/web_protocol.rs:84-162`), so
- *     {@link freebuffWebToChatCompletions} converts them BEFORE the same
- *     translator sees them — the reference does the same conversion in its
- *     `StreamEncoder` (`src/web_protocol.rs:775-930`) and its own comment says why
- *     the raw events cannot be passed through.
+ * The other upstream Freebuff has — `POST https://freebuff.com/api/chat/stream`,
+ * addressed by a browser session COOKIE — is NOT implemented here and its
+ * code is gone. It takes one flat prompt string with no `tools` field
+ * (`ref-freebuff2api/src/web_protocol.rs:380-388`), so it can never carry the
+ * harness's tools: live-verified 2026-09-28, a `tools` array bolted onto that
+ * body is ignored and the model reports only Freebuff's own server-side agents
+ * as its tool set. Offering it would be offering a chat that silently loses
+ * every local capability, so a cookie credential is REFUSED by name
+ * ({@link freebuffCookieRefusal}) rather than accepted and degraded.
  *
- * Which one a request uses is decided by the credential, not per call: the
- * reference prefers the desktop path and reaches for the web bridge only when no
- * usable Bearer credential exists (`src/api.rs:2664-2685`).
+ * ## The credential is the CLI's, and the run bootstrap is mandatory
  *
- * ## Tools ride ONE of the two wires — and it is not the cookie one
+ * The authoritative client is the official Freebuff CLI, and this module's
+ * request shapes are transcribed from its shipped binary
+ * (`~/.config/manicode/freebuff.exe`, bun-compiled JS). Two things it does that
+ * a plain OpenAI call to the same URL does not:
  *
- * The DESKTOP body forwards the caller's `tools` array untouched and accepts
- * assistant `tool_calls` plus `role:"tool"` results: the reference passes the
- * whole inbound body through and rewrites only `model` and `codebuff_metadata`
- * (`src/api.rs:2707-2708`), which is what {@link freebuffChatBody} reproduces.
+ *  1. **A session admission, then an agent run, before any chat.**
+ *     `POST /api/v1/freebuff/session/admission` (the CLI's own POST target —
+ *     `pJA(H)`, `H==="POST"?pLA:"/api/v1/freebuff/session"`) admits the
+ *     instance, and `POST /api/v1/agent-runs {action:"START", agentId,
+ *     ancestorRunIds}` (`qDA`) yields the `runId` the chat body must carry.
+ *     Without it the upstream answers `400 No runId found in request body`, and
+ *     the run's AGENT is what free mode validates, so the agent must be the
+ *     model-specific `base2-free-*` id ({@link freebuffAgentFor}).
+ *  2. **A CLI-shaped identity.** Free mode accepts requests that look like the
+ *     CLI's: the instance id is `cli:<uuid>` (`wr()`), and when it carries that
+ *     prefix the metadata also declares `freebuff_multi_session:"1"` and
+ *     `surface:"cli"` (`OJA(H)`, `QP`). The session call carries the CLI's
+ *     header set (`CV`): `x-fb-timezone`, `x-freebuff-first-tab-discount`,
+ *     `x-freebuff-multi-session`, `x-freebuff-purchase-continuity`,
+ *     `x-freebuff-desktop-attempt-id` (POST/DELETE), `x-freebuff-instance-id`,
+ *     `x-freebuff-heartbeat` + `x-freebuff-include-unused-rate-limits` (GET) and
+ *     `x-freebuff-model` + `x-freebuff-wallet-spend-limit` (POST).
  *
- * The WEB body has NO tools field and no tool-turn encoding at all. It is
- * `{threadId, content, model, reasoningEffort, gravity, images, attachments}`
- * (`src/web_protocol.rs:380-388`) — one flat prompt string, rendered by
- * {@link freebuffWebPrompt} from `src/web_threads.rs:176-254`. The reference's
- * README advertises 工具调用映射, but that mapping runs DOWNSTREAM ONLY: an
- * upstream `agent_tool` event (Freebuff's OWN server-side agents) becomes an
- * OpenAI `tool_calls` delta for the gateway's generic clients
- * (`src/web_protocol.rs:811-828`, `:885-898`; arguments hardcoded `{}` because
- * upstream never streams them). Nothing carries a CLIENT tool schema upstream:
- * the reference's web bridge never forwards an inbound `tools` array and never
- * reads one (`src/api.rs:1118` calls `chat_stream_raw(thread_id, content, None,
- * Vec::new(), Vec::new())`).
- *
- * Live-verified 2026-09-28 against the real upstream with a cookie credential:
- * a `tools` array bolted onto a web body is IGNORED. Asked to call a declared
- * `read_file`, the model reasoned "I don't have a read_file tool. My available
- * tools are: 1. spawn_agents 2. gravity_index 3. render_ui 4. suggest_followups
- * 5. researcher_web 6. thinker_gemini 7. context_pruner" and answered in prose —
- * the exact shape of this route's reported defect (the harness's local tools
- * vanish and the assistant reports only Freebuff's own server-side tools). So a
- * tool-declaring turn is REFUSED on this wire rather than quietly downgraded to
- * a tool-less chat: {@link freebuffWebToolRefusal}.
- *
- * ## Upstream-only tool calls are DROPPED, not relayed
- *
- * The web translator therefore does NOT surface an upstream `agent_tool` event as
- * a harness tool call, even though that is exactly what the reference does with it
- * (`src/web_protocol.rs:811-828` maps `toolCallId` to a stable `tool_calls` index,
- * `:885-898` emits the delta, `arguments` hardcoded `{}` because upstream never
- * streams them). Live 2026-09-28 on the real upstream, one turn carried FOUR of
- * them — `tool-call` blocks named `web_search`, each `arguments:"{}"`, under
- * `finish_reason: tool_calls`. Re-checks while making this change (same cookie
- * credential, the zero-cost model) saw THIRTEEN in one turn — nine `web_search`
- * plus four `read_url` — and TWENTY-SIX in the next, so four was nowhere near a
- * ceiling: an upstream-only tool call on this wire is normal, not an edge case.
- *
- * Those calls are FREEBUFF's OWN server-side tools. The upstream already ran them;
- * nothing in the exchange asks this client to run anything. The reference relays
- * them because of WHO ITS CONSUMER IS: its own clients asked for an OpenAI
- * `tool_calls` delta so their generic loops could see — and decide what to do
- * about — the upstream's internal activity. DSH is a different consumer, and
- * there the faithful mapping is the harm: DSH sees a tool call it has no handler
- * for, tries to execute it, and the turn breaks. The mismatch is worse here than
- * in general, because this route declares NO tools to anyone (the body has no
- * `tools` field) and refuses a tool-declaring turn up front
- * ({@link freebuffWebToolRefusal}) — an upstream-only tool call is therefore the
- * ONLY way a tool call could ever reach DSH from this wire, and it is always one
- * the harness cannot run.
- *
- * So the call is dropped ({@link freebuffWebToChatCompletions}), recorded ONCE
- * per stream through the translator's `onWarn` so the user can see that upstream
- * used its own tools. Answer text around it still streams, and an upstream
- * `tool_calls` finish becomes a normal completion: the harness must never be left
- * dangling, waiting for a tool result nobody is going to send.
+ * Live 2026-09-28, a free account behind a REAL CLI credential still answers
+ * `403 free_mode_cli_required` ("Calling the API directly is not supported and
+ * may get your account banned") to this route's chat call, so free mode remains
+ * gated to the CLI's own channel — see `src/providers/freebuff.ts` for the
+ * recorded bytes. The shapes above are what the gate is checked against, and
+ * the quota read does work with this credential ({@link FREEBUFF_SESSION_PATH}).
  *
  * ## Errors are TEXT first, status second
  *
  * codebuff answers refusals inside an HTTP 200 body — as a bare text code
  * (`free_mode_invalid_agent_model`, `waiting_room_queued`) or as an
  * `{"error":{...}}` envelope — so classifying on the status alone misses them
- * (`src/errors.rs:1-10`). {@link freebuffTextError} implements that rule table,
- * and {@link freebuffBodyRefusal} is how a refusal that arrived in a 200 gets
- * thrown with the upstream's OWN words instead of becoming an empty stream.
+ * (`ref-freebuff2api/src/errors.rs:1-10`). {@link freebuffTextError} implements
+ * that rule table, and {@link freebuffBodyRefusal} is how a refusal that arrived
+ * in a 200 gets thrown with the upstream's OWN words instead of becoming an
+ * empty stream.
  *
  * @module dsh-subscription-hub/providers/freebuff/client
  */
@@ -107,25 +73,40 @@ import { freebuffEffortFor } from './catalog.js'
 
 /** The desktop/Bearer origin. `codebuff.com` normalizes to `www.codebuff.com` (`src/upstream.rs:113-118`). */
 export const FREEBUFF_API_BASE = 'https://www.codebuff.com'
-/** The web/Cookie origin (`src/web_protocol.rs:21`). */
-export const FREEBUFF_WEB_BASE = 'https://freebuff.com'
+/**
+ * The login/identity origin (`NEXT_PUBLIC_FREEBUFF_APP_URL`, default
+ * `https://freebuff.com`). The CLI's WebSocket-free auth API lives HERE, not on
+ * the chat host: in free mode `A6 = fZ` (the freebuff app URL), while every
+ * session/run/chat call uses `w9() = NEXT_PUBLIC_CODEBUFF_APP_URL`.
+ */
+export const FREEBUFF_LOGIN_BASE = 'https://freebuff.com'
 
 /** Desktop chat completions (`src/upstream.rs:306`). */
 export const FREEBUFF_CHAT_PATH = '/api/v1/chat/completions'
-/** The desktop session endpoint: create (POST), status (GET), end (DELETE) — `src/upstream.rs:4-6`. */
+/**
+ * The desktop session endpoint for READ/DELETE — `GET` answers the balance,
+ * `DELETE` ends the session (`src/upstream.rs:4-6`, CLI `pJA`).
+ */
 export const FREEBUFF_SESSION_PATH = '/api/v1/freebuff/session'
 /**
- * The desktop agent-run bootstrap. The reference injects a `run_id` it got from
- * here into every chat body (`src/upstream.rs:218-250`, `:294`); this route does
- * NOT perform that bootstrap (see {@link freebuffChatBody}).
+ * The session ADMISSION endpoint: what the CLI POSTs to open an hour
+ * (`pLA = "/api/v1/freebuff/session/admission"`). The legacy
+ * `POST /api/v1/freebuff/session` still answers the reference gateway, but the
+ * CLI — the client free mode is written for — uses this one.
+ */
+export const FREEBUFF_SESSION_ADMISSION_PATH = '/api/v1/freebuff/session/admission'
+/**
+ * The desktop agent-run bootstrap (`src/upstream.rs:218-250`; CLI `qDA`). Its
+ * `runId` is what the chat body's `codebuff_metadata.run_id` must carry, and the
+ * agent the run is started for is what free mode validates against the model.
  */
 export const FREEBUFF_AGENT_RUNS_PATH = '/api/v1/agent-runs'
-/** Web chat stream (`src/web_protocol.rs:4`). */
-export const FREEBUFF_WEB_CHAT_PATH = '/api/chat/stream'
-/** The web quota/session endpoint (`src/web_protocol.rs:6`). */
-export const FREEBUFF_WEB_SESSION_PATH = '/api/web/freebuff-session'
-/** Web identity endpoint — `user{id,email,name}`, and 200 + `{}` when not signed in (`src/api.rs:5606-5616`). */
-export const FREEBUFF_WEB_AUTH_SESSION_PATH = '/api/auth/session'
+/** `loginCode` — a login URL for one fingerprint (CLI auth client). */
+export const FREEBUFF_CLI_CODE_PATH = '/api/auth/cli/code'
+/** `loginStatus` — the poll that hands back the credential (CLI auth client). */
+export const FREEBUFF_CLI_STATUS_PATH = '/api/auth/cli/status'
+/** `logout`. */
+export const FREEBUFF_CLI_LOGOUT_PATH = '/api/auth/cli/logout'
 
 /**
  * The `User-Agent` the desktop protocol presents (`src/upstream.rs:21`).
@@ -135,19 +116,50 @@ export const FREEBUFF_WEB_AUTH_SESSION_PATH = '/api/auth/session'
  */
 export const FREEBUFF_CLIENT_USER_AGENT = 'ai-sdk/openai-compatible/1.0.25/codebuff'
 
-/** The desktop browser UA the web protocol's fingerprint claims (`src/upstream.rs:20`). */
-export const FREEBUFF_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-  + '(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36'
-
-/** The NextAuth session cookie whose value identifies the browser session. */
+/**
+ * The marker that identifies a browser-session cookie rather than a token.
+ *
+ * Kept ONLY so a credential in that shape can be recognised and refused
+ * ({@link freebuffCookieRefusal}) — the cookie wire is not implemented.
+ */
 export const FREEBUFF_SESSION_COOKIE = '__Secure-next-auth.session-token'
 
-/** Desktop headers this route must present for the session/usage read (`src/upstream.rs:22-29`). */
-export const FREEBUFF_SESSION_HEADER = 'x-freebuff-model'
+/**
+ * The CLI's own header set, name for name: `bLA`/`uLA`/`kLA`/`dLA`/`iLA`/
+ * `cLA`/`lLA`/`nLA`/`QJA`/`NJA`/`i2` and `kJA()`'s timezone header.
+ */
+export const FREEBUFF_TIMEZONE_HEADER = 'x-fb-timezone'
+export const FREEBUFF_MODEL_HEADER = 'x-freebuff-model'
 export const FREEBUFF_INSTANCE_HEADER = 'x-freebuff-instance-id'
 export const FREEBUFF_MULTI_SESSION_HEADER = 'x-freebuff-multi-session'
 export const FREEBUFF_INCLUDE_UNUSED_HEADER = 'x-freebuff-include-unused-rate-limits'
 export const FREEBUFF_HEARTBEAT_HEADER = 'x-freebuff-heartbeat'
+export const FREEBUFF_COMPACT_SESSION_HEADER = 'x-freebuff-compact-session'
+export const FREEBUFF_PURCHASE_CONTINUITY_HEADER = 'x-freebuff-purchase-continuity'
+export const FREEBUFF_DESKTOP_ATTEMPT_HEADER = 'x-freebuff-desktop-attempt-id'
+export const FREEBUFF_FIRST_TAB_DISCOUNT_HEADER = 'x-freebuff-first-tab-discount'
+export const FREEBUFF_WALLET_SPEND_LIMIT_HEADER = 'x-freebuff-wallet-spend-limit'
+export const FREEBUFF_TAKEOVER_HEADER = 'x-freebuff-takeover-instance-id'
+export const FREEBUFF_ACTING_USER_HEADER = 'x-freebuff-acting-user-id'
+
+/**
+ * The prefix the CLI puts on its instance id (`ZJA = "cli:"`, `wr()`).
+ *
+ * Load-bearing, not cosmetic: the metadata builder tests for it and adds
+ * `freebuff_multi_session` + `surface` only when it is present
+ * (`OJA(H) = {freebuff_instance_id:H, ...(QP(H) ? {freebuff_multi_session:"1",
+ * surface:"cli"} : {})}`).
+ */
+export const FREEBUFF_CLI_INSTANCE_PREFIX = 'cli:'
+
+/**
+ * The root free agent the reference starts its runs for
+ * (`ref-freebuff2api/src/models.rs:16`).
+ *
+ * It is only a fallback here: the CLI starts a MODEL-SPECIFIC free agent
+ * ({@link freebuffAgentFor}), and free mode validates that pair.
+ */
+export const FREEBUFF_ROOT_AGENT = 'base2-free'
 
 /**
  * How long the free tier's single request slot is held before the upstream
@@ -163,14 +175,20 @@ export const FREEBUFF_QUEUE_RETRY_MS = 15_000
 /** The reference's backoff hint for its rate-limit keyword (`src/errors.rs:20`). */
 export const FREEBUFF_RATE_LIMIT_RETRY_MS = 60_000
 
-/** Which upstream a credential must ride. */
-export type FreebuffWire = 'chat-completions' | 'web'
-
-/** The credential fields one request needs. */
+/**
+ * The credential fields one request needs.
+ *
+ * `accessToken` is the Bearer (the CLI's `authToken`). `cookie` is NOT a way in:
+ * it is carried only so a credential stored by an older build — or a cookie
+ * string someone pastes — is RECOGNISED and refused with a reason
+ * ({@link freebuffCookieRefusal}), instead of having its session-token value
+ * replayed as a Bearer, which is what the upstream answers
+ * `free_mode_cli_required` to.
+ */
 export interface FreebuffCredential {
-  /** The Bearer token, or the session-token value of a pasted cookie string. */
+  /** The Bearer token. */
   accessToken: string
-  /** The full `cookie:` header, when the credential came from a browser session. */
+  /** A leftover cookie credential, detected so it can be refused. */
   cookie?: string
 }
 
@@ -185,19 +203,7 @@ export function isFreebuffCookieString(value: string): boolean {
 /**
  * Which of the two credential shapes this session holds.
  *
- * The COOKIE is the stronger signal and is checked first: a credential carrying
- * the session-token cookie is a captured browser session, and the web endpoint is
- * the only one it can reach — its `accessToken` field merely mirrors the
- * session-token VALUE, which is an opaque string that says nothing about the
- * wire by itself. A credential whose only secret is a `Bearer`-shaped token is
- * the desktop shape (`src/import.rs:176-183` classifies exactly this way, by the
- * `session-token` marker).
- *
- * The reference prefers the desktop path over its web bridge when both exist
- * (`src/api.rs:2664-2685`), but that preference is about a POOL holding separate
- * Bearer accounts and separate web cookies — not about one credential. No paste
- * shape produces both, and if one ever did, the cookie is what was actually
- * captured.
+ * Only `bearer` is usable; `cookie` exists so the caller can say WHY it is not.
  * @param credential - the stored credential fields.
  * @returns the shape, or undefined when the credential holds neither secret.
  */
@@ -210,37 +216,105 @@ export function freebuffCredentialKind(credential: FreebuffCredential): 'bearer'
 }
 
 /**
- * The upstream a credential must ride.
+ * Assert a credential can ride this route's wire, and say why when it cannot.
+ *
+ * Called before any request is shaped, so a refused credential costs nothing.
  * @param credential - the stored credential fields.
- * @returns `web` for a cookie credential, `chat-completions` for a Bearer one.
- * @throws {LlmError} `MISSING_CREDENTIAL` when the credential holds no secret.
+ * @throws {LlmError} `UNSUPPORTED` for a cookie credential, `MISSING_CREDENTIAL`
+ *   when the credential holds no secret at all.
  */
-export function freebuffWireFor(credential: FreebuffCredential): FreebuffWire {
+export function freebuffAssertDesktopCredential(credential: FreebuffCredential): void {
   const kind = freebuffCredentialKind(credential)
+  if (kind === 'cookie') throw freebuffCookieRefusal()
   if (kind === undefined) {
     throw new LlmError(
-      'Freebuff: the stored credential carries neither a Bearer token nor a freebuff.com cookie. '
-      + 'Paste one of the two again in Settings → Subscriptions.',
+      'Freebuff: the stored credential carries no Bearer token. Import the Freebuff CLI\'s login '
+      + '(~/.config/manicode/credentials.json) or paste the `authorization: Bearer …` value from a CLI request.',
       'MISSING_CREDENTIAL',
     )
   }
-  return kind === 'cookie' ? 'web' : 'chat-completions'
-}
-
-/** The chat URL for a wire (`src/upstream.rs:306`, `src/web_protocol.rs:389`). */
-export function freebuffChatUrl(wire: FreebuffWire): string {
-  return wire === 'web' ? `${FREEBUFF_WEB_BASE}${FREEBUFF_WEB_CHAT_PATH}` : `${FREEBUFF_API_BASE}${FREEBUFF_CHAT_PATH}`
 }
 
 /**
- * The session/quota URL for a wire.
+ * The refusal a cookie credential receives.
  *
- * Both protocols answer the same balance JSON, in different spellings
- * (`src/upstream.rs:4-11` for the desktop shape, `src/web_protocol.rs:6` for the
- * web one) — see `usage.ts`.
+ * The web wire is not implemented on this route, and it is not implemented
+ * because it cannot do the job: it takes one flat prompt string with no `tools`
+ * field (`src/web_protocol.rs:380-388`), so every harness tool — file
+ * read/write, shell, glob/grep — simply would not exist for the model, which
+ * then reports Freebuff's own server-side agents as its whole tool set
+ * (live-verified 2026-09-28, quoted in `freebuff.ts`'s module doc).
+ *
+ * Replaying a cookie's session-token value as a Bearer is the other wrong turn
+ * this message closes: the upstream answers that with
+ * `403 free_mode_cli_required`, whose own text warns it "may get your account
+ * banned".
+ * @returns the error to throw, before any request is made.
  */
-export function freebuffSessionUrl(wire: FreebuffWire): string {
-  return wire === 'web' ? `${FREEBUFF_WEB_BASE}${FREEBUFF_WEB_SESSION_PATH}` : `${FREEBUFF_API_BASE}${FREEBUFF_SESSION_PATH}`
+export function freebuffCookieRefusal(): LlmError {
+  return new LlmError(
+    'Freebuff: cookie credentials are no longer accepted on this route. A freebuff.com session cookie can only ride '
+    + 'the web protocol (POST https://freebuff.com/api/chat/stream), which takes ONE flat prompt string with no '
+    + '`tools` field — so the model would receive none of your tools and would answer as a plain chat assistant. '
+    + 'Use 「Import from Freebuff CLI」 for the credential the official CLI already stored '
+    + '(`~/.config/manicode/credentials.json`), or 「Sign in」, or paste the `authorization: Bearer …` value from a '
+    + 'CLI request.',
+    'UNSUPPORTED',
+  )
+}
+
+/** The chat URL (`src/upstream.rs:306`). */
+export function freebuffChatUrl(): string {
+  return `${FREEBUFF_API_BASE}${FREEBUFF_CHAT_PATH}`
+}
+
+/** The session READ URL — the balance/quota endpoint (`src/upstream.rs:138-152`). */
+export function freebuffSessionUrl(): string {
+  return `${FREEBUFF_API_BASE}${FREEBUFF_SESSION_PATH}`
+}
+
+/** The session ADMISSION URL the CLI POSTs to (`pJA`). */
+export function freebuffSessionAdmissionUrl(): string {
+  return `${FREEBUFF_API_BASE}${FREEBUFF_SESSION_ADMISSION_PATH}`
+}
+
+/** The agent-run bootstrap URL (`src/upstream.rs:229`; CLI `qDA`). */
+export function freebuffRunUrl(): string {
+  return `${FREEBUFF_API_BASE}${FREEBUFF_AGENT_RUNS_PATH}`
+}
+
+/** The `loginCode` URL. */
+export function freebuffCliCodeUrl(): string {
+  return `${FREEBUFF_LOGIN_BASE}${FREEBUFF_CLI_CODE_PATH}`
+}
+
+/**
+ * The `loginStatus` URL, with the CLI's own query set.
+ *
+ * Order and spelling are the CLI's (`loginStatus(f)`) — the fingerprint plus the
+ * `expiresAt` the code call issued.
+ * @param probe - the attempt's fingerprint and expiry.
+ * @returns the URL to poll.
+ */
+export function freebuffCliStatusUrl(probe: FreebuffCliProbe): string {
+  const query = new URLSearchParams({
+    fingerprintId: probe.fingerprintId,
+    fingerprintHash: probe.fingerprintHash,
+    ...probe.expiresAt === undefined ? {} : { expiresAt: probe.expiresAt },
+  })
+  return `${FREEBUFF_LOGIN_BASE}${FREEBUFF_CLI_STATUS_PATH}?${query.toString()}`
+}
+
+/** What `POST /api/auth/cli/code` answers, plus the attempt it belongs to. */
+export interface FreebuffCliProbe {
+  /** The URL the user opens to sign in. */
+  loginUrl: string
+  /** The attempt's fingerprint — the poll's `fingerprintId` query. */
+  fingerprintId: string
+  /** The one-time hash the status poll must present. */
+  fingerprintHash: string
+  /** When the code expires, as the upstream stated it. */
+  expiresAt?: string
 }
 
 /** FNV-1a 64, the reference's zero-dependency stable hash (`src/web_protocol.rs:23-33`). */
@@ -253,161 +327,227 @@ function fnv1a64(value: string): bigint {
 }
 
 /**
- * The seed for a credential's derived fingerprint: the session-token VALUE, or
- * the whole cookie when the marker is absent (`src/web_protocol.rs:35-47`).
- * @param cookie - the cookie header, or a bearer token.
- * @returns the seed string (never leaves this machine).
- */
-function freebuffFingerprintSeed(cookie: string): string {
-  const parts = cookie.split(';').map(part => part.trim())
-  const marker = parts.find(part => part.startsWith(`${FREEBUFF_SESSION_COOKIE}=`))
-  return marker === undefined ? cookie : marker.slice(FREEBUFF_SESSION_COOKIE.length + 1)
-}
-
-/**
  * The `x-freebuff-instance-id` a credential presents.
  *
- * The reference derives it per credential instead of hardcoding the value it
- * captured, with the note that a MISSING instance header is one of the most
- * easily fingerprinted differences from the real client
- * (`src/web_protocol.rs:49-65`). Same account → same id, different accounts →
- * different ids, computed locally from the session token.
- * @param credential - the credential (cookie or bearer).
- * @returns a UUID-shaped instance id.
+ * The CLI derives a fresh `cli:<uuid>` per process (`wr()`, and its `wr()` uses
+ * `crypto.randomUUID()`) and reuses a stored one when it can resume; deriving it
+ * deterministically from the credential gives the same stability with nothing to
+ * persist — same account → same instance, different accounts → different ones.
+ *
+ * The shape is a REAL UUID v4, version nibble AND variant nibble, not merely
+ * UUID-shaped: live 2026-09-28 the admission endpoint answered
+ * `400 {"error":"invalid_attempt_id"}` to a value whose variant nibble was not
+ * one of 8/9/a/b, so the server parses this as a uuid rather than taking it as an
+ * opaque string.
+ * @param credential - the Bearer token.
+ * @returns a `cli:`-prefixed UUID-v4-shaped instance id.
  */
 export function freebuffInstanceId(credential: string): string {
-  const seed = freebuffFingerprintSeed(credential)
+  const seed = credential.trim()
   const a = fnv1a64(seed).toString(16).padStart(16, '0')
   const b = fnv1a64(`${seed}#instance`).toString(16).padStart(16, '0')
   const hex = `${a}${b}`
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`
+  const variant = (Number.parseInt(hex.slice(16, 17), 16) & 0x3) | 0x8
+  return `${FREEBUFF_CLI_INSTANCE_PREFIX}${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-`
+    + `${variant.toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`
 }
 
 /**
- * The web protocol's `gravity` fingerprint (`src/web_protocol.rs:215-263`).
- *
- * The reference replaced hardcoded capture values with per-account derived ones
- * for a stated reason: every account sharing one fingerprint is itself a
- * detectable signature. The field shapes and the derivation seeds are ported as
- * found; the values are deterministic per credential, which is what makes them
- * testable.
- * @param credential - the cookie or bearer token.
- * @returns the `gravity` object the web body carries.
+ * The `cli:` prefix's payload, or undefined when the id was not the CLI's shape
+ * (`QP(H) = H.startsWith("cli:") ? H.slice(4) : undefined`).
+ * @param instanceId - the instance id.
+ * @returns the bare uuid, or undefined.
  */
-export function freebuffGravity(credential: string): Record<string, unknown> {
-  const seed = freebuffFingerprintSeed(credential)
-  const v = fnv1a64(seed)
-  const v2 = fnv1a64(`${seed}#client-ctx`)
-  const hex16 = (value: bigint): string => (value & 0xffff_ffff_ffff_ffffn).toString(16).padStart(16, '0')
-  const rotateLeft = (value: bigint, bits: bigint): bigint =>
-    ((value << bits) | (value >> (64n - bits))) & 0xffff_ffff_ffff_ffffn
-  const rotateRight = (value: bigint, bits: bigint): bigint =>
-    ((value >> bits) | (value << (64n - bits))) & 0xffff_ffff_ffff_ffffn
-  const pick = (salt: number, low: number, high: number): number =>
-    low + Number(fnv1a64(`${seed}#${String(salt)}`) % BigInt(high - low + 1))
-  const devicePixelRatios = [1, 1.25, 1.5, 2]
-  const deviceMemories = [8, 16, 16, 32, 32]
-  const hardwareConcurrency = [4, 8, 12, 16, 24]
+export function freebuffInstanceUuid(instanceId: string): string | undefined {
+  return instanceId.startsWith(FREEBUFF_CLI_INSTANCE_PREFIX)
+    ? instanceId.slice(FREEBUFF_CLI_INSTANCE_PREFIX.length)
+    : undefined
+}
+
+/**
+ * The free agent a model must be run under.
+ *
+ * Free mode validates the RUN's agent against the model, so getting this wrong
+ * is the difference between a working turn and `403 free_mode_invalid_agent_model`
+ * — which is exactly what the earlier probe hit by starting every run for the
+ * generic `base2-free` (`ref-freebuff2api/src/models.rs:16`) while asking for
+ * `z-ai/glm-5.3-flash`.
+ *
+ * The table is the CLI's own `rl$` map, read out of the shipped binary, pairing
+ * each free orchestrator agent with the model it serves
+ * (`rl$[HV] = "base2-free-space-bunny-alpha"` for `HV = "stealth/space-bunny-alpha"`,
+ * and `n3H(H) = rl$[H] ?? "base2-free"` is the CLI's fallback).
+ * @param model - the wire model id.
+ * @returns the agent id to start the run for.
+ */
+export function freebuffAgentFor(model: string): string {
+  return FREEBUFF_MODEL_AGENTS[model] ?? FREEBUFF_ROOT_AGENT
+}
+
+/** The CLI's model → free-orchestrator-agent table (`rl$`). */
+const FREEBUFF_MODEL_AGENTS: Record<string, string> = {
+  'mimo/mimo-v2.5': 'base2-free-mimo',
+  'mimo/mimo-v2.6-pro': 'base2-free-mimo-2-6-pro',
+  'minimax/minimax-m3': 'base2-free-minimax-m3',
+  'openai/gpt-5.6-luna': 'base2-free-luna',
+  'openai/gpt-6-luna': 'base2-free-luna-6',
+  'openai/gpt-5.6-luna-es': 'base2-free-luna-es',
+  'upstage/solar-pro4': 'base2-free-solar-pro4',
+  'upstage/solar-mini4': 'base2-free-solar-mini4',
+  'stealth/space-bunny-alpha': 'base2-free-space-bunny-alpha',
+  'stealth/ox-alpha': 'base2-free-ox-alpha',
+  'deepseek/deepseek-v4-pro': 'base2-free-deepseek',
+  'deepseek/deepseek-v4-flash': 'base2-free-deepseek-flash',
+  'deepseek/deepseek-v4.1-flash': 'base2-free-deepseek-v4-1-flash',
+  'z-ai/glm-5.2': 'base2-free-glm',
+  'z-ai/glm-5.3-flash': 'base2-free-glm-5-3-flash',
+  'z-ai/glm-5.3': 'base2-free-glm-5-3',
+  'crof/kimi-k3-eco': 'base2-free-kimi-k3-eco',
+  'anthropic/claude-fable-5': 'base2-free-fable',
+  'google/gemini-3.8-flash': 'base2-free-gemini-3-8-flash',
+  'meta/muse-spark-1.2-contributor': 'base2-free-muse-spark',
+  'meta/muse-spark-1.3-contributor': 'base2-free-muse-spark-1-3',
+}
+
+/** The `Authorization` + JSON headers every desktop call carries. */
+function freebuffAuthHeaders(credential: FreebuffCredential): Record<string, string> {
   return {
-    user_data: {
-      // `{:016x}` of the FNV and of its rotations, exactly as the reference
-      // formats them (`src/web_protocol.rs:224-229`): the width is a MINIMUM
-      // there, so a u64 prints all sixteen digits.
-      visitor_id: `gruid_${hex16(v)}${hex16(rotateLeft(v, 21n))}`,
-      session_id: `gr_sess_${hex16(rotateRight(v, 13n))}${hex16(v ^ 0x9e37_79b9_7f4a_7c15n)}`,
-      client_user_agent: FREEBUFF_DESKTOP_USER_AGENT,
-    },
-    event_source_url: `${FREEBUFF_WEB_BASE}/chat`,
-    client_context: {
-      timezone: 'Asia/Shanghai',
-      screen: { width: pick(1, 1366, 2560), height: pick(2, 768, 1440), color_depth: 24, pixel_depth: 24 },
-      viewport: { width: pick(3, 1024, 1600), height: pick(4, 720, 1000) },
-      device_pixel_ratio: devicePixelRatios[Number(v2 % 4n)] ?? 1,
-      platform: 'Windows',
-      device_memory: deviceMemories[Number(v % 5n)] ?? 16,
-      hardware_concurrency: hardwareConcurrency[Number(v2 % 5n)] ?? 8,
-      max_touch_points: null,
-      connection: { effective_type: '4g', downlink: 8.3, rtt: 250, save_data: false },
-      font: 'Arial',
-      webgl: null,
-      fonts: ['Arial', 'Segoe UI', 'Consolas'],
-      audio_fingerprint: '0',
-      navigator_ext: { languages: ['zh-CN', 'zh'], webdriver: false, pdf_viewer: true, cookies_enabled: true },
-      math_fingerprint: '0',
-    },
+    authorization: `Bearer ${credential.accessToken}`,
+    'content-type': 'application/json',
   }
 }
 
 /**
- * Headers for one chat request.
+ * Headers for one chat request (`src/upstream.rs:127-136`).
  *
- * Differences that are load-bearing:
- *   - the desktop path sends `authorization` + the OpenAI-compatible SDK UA and
- *     NOTHING else (`src/upstream.rs:127-136`); its instance id rides in the
- *     body's `codebuff_metadata` instead (`src/upstream.rs:300-302`);
- *   - the web path sends the cookie header plus `origin`/`referer`/`accept` and
- *     the instance header, because the upstream page always sends those and
- *     their absence is a fingerprint (`src/web_protocol.rs:346-365`).
+ * The desktop path sends `authorization` + the OpenAI-compatible SDK UA and
+ * nothing else: its instance id rides in the body's `codebuff_metadata` instead
+ * (`src/upstream.rs:300-302`).
  * @param credential - the credential fields.
- * @param wire - which upstream this request rides.
  * @returns the header set.
  */
-export function freebuffChatHeaders(credential: FreebuffCredential, wire: FreebuffWire): Record<string, string> {
-  if (wire === 'web') return freebuffWebHeaders(credential.cookie ?? credential.accessToken)
+export function freebuffChatHeaders(credential: FreebuffCredential): Record<string, string> {
   return {
-    authorization: `Bearer ${credential.accessToken}`,
-    'content-type': 'application/json',
+    ...freebuffAuthHeaders(credential),
     'user-agent': FREEBUFF_CLIENT_USER_AGENT,
   }
 }
 
-/** The web protocol's common header set (`src/web_protocol.rs:346-365`). */
-function freebuffWebHeaders(cookie: string, options: { json?: boolean } = {}): Record<string, string> {
+/** What {@link freebuffSessionHeaders} needs to shape one CLI session call. */
+export interface FreebuffSessionRequest {
+  /** The credential to present. */
+  credential: FreebuffCredential
+  /** `GET` reads/keeps the session alive, `POST` admits one, `DELETE` ends it. */
+  method: 'GET' | 'POST' | 'DELETE'
+  /** The instance this request speaks for. */
+  instanceId: string
+  /** The model, on a POST — the session is bound to one. */
+  model?: string
+  /**
+   * Whether multi-session mode is on. The CLI defaults it from the instance id's
+   * shape (`I = $.multiSession ?? Boolean(QP(instanceId))`), which for a
+   * `cli:`-prefixed id is true.
+   */
+  multiSession?: boolean
+  /** A short read that skips `rateLimitsByModel` (`$.compact`). */
+  compact?: boolean
+  /** The instance to take the single slot over from (`$.takeoverInstanceId`). */
+  takeoverInstanceId?: string
+  /** Wallet spend consent; the CLI sends `0` when there is none. */
+  walletSpendLimit?: number
+  /** The first-tab discount experiment flag, when the caller tracks it. */
+  firstTabDiscount?: boolean
+  /** Override the timezone, for tests. */
+  timezone?: string
+}
+
+/**
+ * Headers for one session call, transcribed from the CLI's `CV`.
+ *
+ * The logic is ported branch for branch because each branch is a header the
+ * server can key on:
+ *
+ *   - every call carries `authorization`, the timezone (`kJA()`), and
+ *     `x-freebuff-first-tab-discount`;
+ *   - with multi-session on: `x-freebuff-multi-session` and
+ *     `x-freebuff-purchase-continuity`, plus `x-freebuff-desktop-attempt-id` on
+ *     anything but a GET;
+ *   - on a GET it adds `x-freebuff-heartbeat: 1`, and
+ *     `x-freebuff-include-unused-rate-limits: 1` unless the read is `compact`
+ *     (which is the flag that makes the balance answer carry
+ *     `rateLimitsByModel`);
+ *   - the instance header goes on anything but a POST (a POST's instance is
+ *     carried by `x-freebuff-desktop-attempt-id` plus `x-freebuff-instance-id`
+ *     being a NEW id);
+ *   - a POST adds the model and the wallet limit, and the takeover header when a
+ *     slot is being taken over.
+ * @param request - the call being shaped.
+ * @returns the header set.
+ */
+export function freebuffSessionHeaders(request: FreebuffSessionRequest): Record<string, string> {
+  const uuid = freebuffInstanceUuid(request.instanceId)
+  const multiSession = request.multiSession ?? uuid !== undefined
+  const headers: Record<string, string> = {
+    ...freebuffAuthHeaders(request.credential),
+    [FREEBUFF_TIMEZONE_HEADER]: request.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
+    [FREEBUFF_FIRST_TAB_DISCOUNT_HEADER]: request.firstTabDiscount === true ? '1' : '0',
+  }
+  if (multiSession) {
+    headers[FREEBUFF_MULTI_SESSION_HEADER] = '1'
+    headers[FREEBUFF_PURCHASE_CONTINUITY_HEADER] = '1'
+    if (uuid !== undefined && request.method !== 'GET') headers[FREEBUFF_DESKTOP_ATTEMPT_HEADER] = uuid
+    if (request.method === 'GET') {
+      headers[FREEBUFF_HEARTBEAT_HEADER] = '1'
+      if (request.compact !== true) headers[FREEBUFF_INCLUDE_UNUSED_HEADER] = '1'
+    }
+  }
+  if (multiSession || request.method !== 'POST') headers[FREEBUFF_INSTANCE_HEADER] = request.instanceId
+  if (request.method === 'GET' && request.compact === true) headers[FREEBUFF_COMPACT_SESSION_HEADER] = '1'
+  if (request.method === 'POST') {
+    if (request.takeoverInstanceId !== undefined) {
+      headers[FREEBUFF_TAKEOVER_HEADER] = request.takeoverInstanceId
+    }
+    if (request.model !== undefined) headers[FREEBUFF_MODEL_HEADER] = request.model
+    headers[FREEBUFF_WALLET_SPEND_LIMIT_HEADER] = String(request.walletSpendLimit ?? 0)
+  }
+  return headers
+}
+
+/**
+ * The body of one agent-run START (CLI `qDA`; `src/upstream.rs:224-228`).
+ *
+ * `ancestorRunIds` is what makes the upstream's run a ROOT run: this route
+ * starts one run per turn and has no parent to point at
+ * (`src/api.rs:3385-3394` does the same).
+ * @param agentId - the free agent the model runs under ({@link freebuffAgentFor}).
+ * @param ancestors - parent run ids, empty for a root run.
+ * @returns the JSON body.
+ */
+export function freebuffRunBody(agentId: string, ancestors: readonly string[] = []): Record<string, unknown> {
+  return { action: 'START', agentId, ancestorRunIds: [...ancestors] }
+}
+
+/** Headers for one agent-run call (CLI `qDA`: bearer + acting user). */
+export function freebuffRunHeaders(credential: FreebuffCredential, userId?: string): Record<string, string> {
   return {
-    cookie,
-    origin: FREEBUFF_WEB_BASE,
-    referer: `${FREEBUFF_WEB_BASE}/chat`,
-    accept: '*/*',
-    [FREEBUFF_INSTANCE_HEADER]: freebuffInstanceId(cookie),
-    ...options.json === true ? { 'content-type': 'application/json' } : {},
+    ...freebuffAuthHeaders(credential),
+    ...userId === undefined ? {} : { [FREEBUFF_ACTING_USER_HEADER]: userId },
   }
 }
 
 /**
- * Headers for the balance/session read.
+ * Read the `runId` out of a START answer.
  *
- * The desktop read needs three headers beyond auth: the instance id it is
- * querying, `x-freebuff-multi-session: 1`, and — this one is easy to miss —
- * `x-freebuff-include-unused-rate-limits: 1`, without which the response omits
- * the per-model `rateLimitsByModel` rows entirely (`src/upstream.rs:138-152`).
- *
- * The instance id is DERIVED from the credential here rather than kept in a
- * store: the reference persists one per account, and a deterministic derivation
- * gives the same stability (same account → same value, forever) with nothing to
- * persist. `options.instanceId` overrides it for a caller that does keep one.
- * @param credential - the credential fields.
- * @param wire - which upstream this read uses.
- * @param options - `heartbeat` adds the keepalive flag (see `freebuff-session.ts`).
- * @returns the header set.
+ * Both spellings are live: the reference's own struct accepts `runId` and
+ * `run_id` (`src/upstream.rs:86-97`).
+ * @param payload - the parsed body.
+ * @returns the run id, or undefined when the body carried none.
  */
-export function freebuffSessionHeaders(
-  credential: FreebuffCredential,
-  wire: FreebuffWire,
-  options: { heartbeat?: boolean, instanceId?: string } = {},
-): Record<string, string> {
-  if (wire === 'web') return freebuffWebHeaders(credential.cookie ?? credential.accessToken)
-  const instance = options.instanceId ?? freebuffInstanceId(credential.accessToken)
-  return {
-    authorization: `Bearer ${credential.accessToken}`,
-    'content-type': 'application/json',
-    'user-agent': FREEBUFF_CLIENT_USER_AGENT,
-    [FREEBUFF_MULTI_SESSION_HEADER]: '1',
-    [FREEBUFF_INCLUDE_UNUSED_HEADER]: '1',
-    [FREEBUFF_INSTANCE_HEADER]: instance,
-    // The keepalive is a request-level flag on this SAME GET, not a separate
-    // endpoint (`src/upstream.rs:183-193`, `src/session.rs:7`).
-    ...options.heartbeat === true ? { [FREEBUFF_HEARTBEAT_HEADER]: '1' } : {},
-  }
+export function parseFreebuffRunId(payload: unknown): string | undefined {
+  if (typeof payload !== 'object' || payload === null) return undefined
+  const record = payload as Record<string, unknown>
+  const value = record.runId ?? record.run_id
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
 }
 
 /** Everything {@link freebuffChatBody} needs to shape one desktop request. */
@@ -421,13 +561,13 @@ export interface FreebuffChatBodyInput {
   /** The credential, so the body's instance id matches the account. */
   credential: string
   /**
-   * The run id the reference would have obtained from `POST /api/v1/agent-runs`.
+   * The run id `POST /api/v1/agent-runs` handed back.
    *
-   * Absent for this route: it does not run that bootstrap (see the module doc).
-   * The field is injected when a caller HAS one, so the omission is explicit
-   * rather than silently dropped.
+   * REQUIRED: the upstream refuses a body without one (`400 No runId found in
+   * request body`, reproduced live), and the run is also what carries the agent
+   * free mode validates against the model.
    */
-  runId?: string
+  runId: string
 }
 
 /**
@@ -451,16 +591,29 @@ export function freebuffEffortBodyField(model: string, requested?: string): Reco
  * The desktop (OpenAI-shaped) request body.
  *
  * The reference forwards its inbound body and MERGES a `codebuff_metadata`
- * object into it, adding `run_id`, `cost_mode: "free"`, a fresh `client_id` and
- * the instance id (`src/upstream.rs:288-304`). This builds the same shape from
- * what the hub has: `cost_mode` and `client_id` are produced here, the instance
- * id is derived from the credential, and `run_id` is injected only when the
- * caller supplies one — the agent-run bootstrap (`src/upstream.rs:218-250`) is
- * NOT performed by this route, so claiming a run id would be an invented value.
+ * object into it (`src/upstream.rs:288-304`); the CLI builds the same object
+ * through its provider options (`OXH`):
+ *
+ *     codebuff_metadata: {...extraCodebuffMetadata, run_id, client_id,
+ *                        ...(costMode && {cost_mode: costMode})}
+ *
+ * with, in free mode, `extraCodebuffMetadata = {...OJA(instanceId),
+ * ...(effort ? {freebuff_reasoning_effort: effort} : {})}` and
+ * `OJA(H) = {freebuff_instance_id:H, ...(cli:-prefixed ? {freebuff_multi_session:"1",
+ * surface:"cli"} : {})}`.
+ *
+ * So this body carries, besides the OpenAI fields the caller supplied: the
+ * instance id with its `cli:` prefix, the two fields that prefix turns on, the
+ * run id, a fresh client id, `cost_mode: "free"`, and the clamped reasoning
+ * level — the last one under the CLI's own free-mode key
+ * (`freebuff_reasoning_effort`) as well as the top-level `reasoning_effort` the
+ * reference's router sets, because the two clients spell it differently.
  * @param input - the request fields.
  * @returns the JSON body to send.
  */
 export function freebuffChatBody(input: FreebuffChatBodyInput): Record<string, unknown> {
+  const instance = freebuffInstanceId(input.credential)
+  const level = freebuffEffortFor(input.model, input.reasoningEffort)
   return {
     model: input.model,
     messages: [...input.messages],
@@ -469,10 +622,15 @@ export function freebuffChatBody(input: FreebuffChatBodyInput): Record<string, u
     ...freebuffEffortBodyField(input.model, input.reasoningEffort),
     stream: true,
     codebuff_metadata: {
-      cost_mode: 'free',
+      freebuff_instance_id: instance,
+      ...freebuffInstanceUuid(instance) === undefined ? {} : {
+        freebuff_multi_session: '1',
+        surface: 'cli',
+      },
+      ...level === undefined ? {} : { freebuff_reasoning_effort: level },
+      run_id: input.runId,
       client_id: freebuffClientSessionId(),
-      freebuff_instance_id: freebuffInstanceId(input.credential),
-      ...input.runId === undefined ? {} : { run_id: input.runId },
+      cost_mode: 'free',
     },
   }
 }
@@ -480,81 +638,6 @@ export function freebuffChatBody(input: FreebuffChatBodyInput): Record<string, u
 /** An opaque per-request client session id, shaped like the reference's (`src/upstream.rs:296-299`). */
 function freebuffClientSessionId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
-}
-
-/** Everything {@link freebuffWebBody} needs. */
-export interface FreebuffWebBodyInput {
-  model: string
-  /** The last user message's text: the web protocol takes ONE string, not a message array. */
-  content: string
-  credential: string
-  reasoningEffort?: string
-  /** An upstream thread to continue, when one is known. */
-  threadId?: string
-}
-
-/**
- * The web (cookie) request body — an entirely different shape from the desktop
- * one (`src/web_protocol.rs:380-388`): a single `content` string rather than a
- * message array, `camelCase` keys, and a `gravity` fingerprint.
- *
- * There is deliberately no `tools` key here, and there must not be one: the wire
- * has no channel for caller-declared tools (see the module doc, and the live
- * check recorded there that upstream ignores one bolted on anyway). Tool usage on
- * this wire is upstream-side — Freebuff runs its OWN tools and the calls it emits
- * for them are dropped with a one-per-stream warning, never forwarded as harness
- * tool calls (module doc). A caller that declares tools is refused before this
- * body is built ({@link freebuffWebToolRefusal}).
- *
- * The effort rides as `reasoningEffort` because that is the web protocol's own
- * spelling of the field. The reference's bridge sends `null` there
- * (`src/api.rs:1118` passes `None`), so forwarding the clamped level is an
- * EXTENSION of the reference rather than a ported behaviour — chosen because
- * dropping a level the user explicitly picked, silently, is the failure the
- * whole ladder mechanism exists to prevent.
- * @param input - the request fields.
- * @returns the JSON body to send.
- */
-export function freebuffWebBody(input: FreebuffWebBodyInput): Record<string, unknown> {
-  const level = freebuffEffortFor(input.model, input.reasoningEffort)
-  return {
-    threadId: input.threadId ?? null,
-    content: input.content,
-    model: input.model,
-    reasoningEffort: level ?? null,
-    gravity: freebuffGravity(input.credential),
-    images: [],
-    attachments: [],
-  }
-}
-
-/**
- * The refusal a caller that declares tools receives on the web wire.
- *
- * Failing here is the whole point: the alternative is what this route used to do
- * — send the flattened prompt WITHOUT the schemas, and let the model answer as a
- * plain chat assistant whose "available tools" are Freebuff's own server-side
- * agents. That silent downgrade is indistinguishable, from the session, from a
- * model that simply chose not to call a tool, and it costs the user every local
- * capability (file read/write, shell, glob/grep) without saying so.
- *
- * The message names the wire fact (no `tools` field), the observed upstream
- * behaviour, and the only tool-carrying alternative, so the reader can act.
- * @param toolCount - how many tool schemas the refused turn declared.
- * @returns the error to throw, before any upstream call is made.
- */
-export function freebuffWebToolRefusal(toolCount: number): LlmError {
-  return new LlmError(
-    `Freebuff (web protocol) cannot carry tools: ${String(toolCount)} tool schema(s) were declared, but this wire `
-    + 'takes one flat prompt string with no `tools` field (ref-freebuff2api/src/web_protocol.rs:380-388), so the '
-    + 'model would receive none of them and would answer as a plain chat assistant with no file, shell or search '
-    + 'tools — verified against the live upstream on 2026-09-28: a `tools` array added to the web body is ignored '
-    + 'and the model reports only its own server-side tools. Tool-carrying turns need the desktop/Bearer protocol '
-    + '(src/upstream.rs:281-315), which a freebuff.com cookie cannot ride (src/api.rs:1809-1813 keeps web cookies '
-    + 'out of the Bearer pool; live 2026-09-28 the desktop wire\'s free mode answers HTTP 403 '
-    + '`free_mode_cli_required` to direct API callers anyway). Use another route for tool-using turns.',
-    'UNSUPPORTED',
-  )
 }
 
 /** The upstream error envelope kinds this route reads. */
@@ -605,19 +688,6 @@ function freebuffFirstString(...values: readonly unknown[]): string | undefined 
 }
 
 /**
- * One event's text payload, VERBATIM.
- *
- * Deliberately not trimmed: a delta's leading or trailing space is part of the
- * answer — the reference pushes `text` straight through (`src/web_protocol.rs:879-884`),
- * and trimming " world" to "world" glues words together in the rendered reply.
- * @param value - the raw field.
- * @returns the text, or undefined when the field was absent or empty.
- */
-function freebuffTextOf(value: unknown): string | undefined {
-  return typeof value === 'string' && value !== '' ? value : undefined
-}
-
-/**
  * The reference's text-rule classification, as an `LlmError`.
  *
  * Rules and their order are `src/errors.rs:157-178` — waiting room, then rate
@@ -625,12 +695,17 @@ function freebuffTextOf(value: unknown): string | undefined {
  * is only the FALLBACK (`src/errors.rs:180-191`), because a 200 body can carry
  * any of them.
  *
- * Two mappings deserve their own line:
+ * Three mappings deserve their own line:
  *   - `queue` alone is a waiting room only on a 429/503 (`src/errors.rs:158-162`);
  *   - the model-unavailable words become `HTTP_404`, not `SERVER`: the reference's
  *     own status table maps 404 to "model unavailable" (`src/errors.rs:186`) and
  *     this is a non-retryable, wrong-model condition, so a 4xx-family code is what
- *     keeps the retry plugin from hammering a model upstream has withdrawn.
+ *     keeps the retry plugin from hammering a model upstream has withdrawn;
+ *   - `free_mode_cli_required` becomes `UNSUPPORTED` with the upstream's warning
+ *     quoted: it is not a retryable state and not this credential's fault — free
+ *     mode is gated to the CLI's own channel — so the user must be told that
+ *     plainly rather than have the retry plugin hammer a refusal that will never
+ *     stop refusing.
  * @param status - the HTTP status (0 for a transport failure).
  * @param body - the raw body, or an SSE fragment.
  * @param label - diagnostic prefix.
@@ -641,6 +716,17 @@ export function freebuffTextError(status: number, body: string, label: string): 
   const has = (...needles: readonly string[]): boolean => needles.some(needle => lowered.includes(needle))
   const shown = body.slice(0, 300)
   const message = `${label} refused the call (HTTP ${String(status)})${shown.trim() === '' ? '' : `: ${shown}`}`
+  // Free mode's channel gate comes first: its own text says the account is at
+  // risk, so nothing else may be reported over it.
+  if (has('free_mode_cli_required', 'free_mode_device_required')) {
+    return new LlmError(
+      `${message} — Freebuff gates free mode to its official CLI's own channel: a direct API call with a valid free `
+      + 'credential is refused, and the upstream warns that calling the API directly "may get your account banned". '
+      + 'Use the `freebuff` CLI itself for free-tier turns, or a paid/other credential on this route.',
+      'UNSUPPORTED',
+      { status },
+    )
+  }
   // The free tier's single request slot (`src/semaphore.rs:27-33`) is the most
   // specific refusal of the lot, so it is tested before the generic rate-limit
   // words its own text happens to contain.
@@ -649,6 +735,15 @@ export function freebuffTextError(status: number, body: string, label: string): 
       status,
       providerRetryAfterMs: FREEBUFF_CONCURRENCY_BUSY_RETRY_MS,
     })
+  }
+  if (has('purchase_capacity', 'premium_slot_taken', 'purchase_in_use')) {
+    return new LlmError(
+      `${message} — another desktop session holds this account's only free slot. The Freebuff CLI resolves this by `
+      + 'offering to take the session over; end the other session there (`/end-session`) or wait for it to expire, '
+      + 'then try again.',
+      'HTTP_409',
+      { status },
+    )
   }
   if (has('waiting_room', 'waiting room', '排队') || ((status === 429 || status === 503) && has('queue'))) {
     return new LlmError(message, 'RATE_LIMIT', { status, providerRetryAfterMs: FREEBUFF_QUEUE_RETRY_MS })
@@ -667,6 +762,58 @@ export function freebuffTextError(status: number, body: string, label: string): 
     return new LlmError(message, 'HTTP_400', { status })
   }
   return undefined
+}
+
+/**
+ * Classify a session/admission answer.
+ *
+ * The desktop session endpoint answers HTTP 200 with a `status` field rather
+ * than an error code, and the CLI drives a whole state machine off it
+ * (`CV` → `active`/`none`/`queued`/`disabled`/`ended`/`superseded`, plus the
+ * takeover and model-lock statuses). Only `active` means the instance may chat:
+ *
+ *   - `queued` is the waiting room, and taking the queue's own retry hint is what
+ *     the reference does (`src/errors.rs:158-162` treats a bare `queue` as a
+ *     waiting room on a 429/503);
+ *   - `purchase_capacity` / `premium_slot_taken` / `purchase_in_use` mean another
+ *     desktop session holds this account's only free slot — live 2026-09-28 the
+ *     admission POST answered `409 {"status":"purchase_capacity","concurrency":
+ *     "slot-bound","slotLimit":1}` for exactly that reason. The CLI answers this
+ *     with an interactive "take over?" prompt, which a plugin must not do
+ *     unattended, so the upstream's words are reported instead;
+ *   - anything else (including `banned`/`country_blocked`) goes through the same
+ *     text rules as every other refusal, with the status word included so the
+ *     reader sees what the upstream called it.
+ * @param payload - the parsed answer body.
+ * @param httpStatus - the HTTP status it arrived with.
+ * @param label - diagnostic prefix.
+ * @returns the error to throw, or undefined when the session is active.
+ */
+export function freebuffSessionStatusError(
+  payload: unknown,
+  httpStatus: number,
+  label: string,
+): LlmError | undefined {
+  const record = typeof payload === 'object' && payload !== null ? payload as Record<string, unknown> : {}
+  const status = freebuffFirstString(record.status, record.error) ?? ''
+  const text = JSON.stringify(payload)
+  if (status === 'active') return undefined
+  if (status.startsWith('queued') || status.includes('waiting_room')) {
+    return new LlmError(
+      `${label} is in the waiting room (${status})${record.position === undefined ? '' : ` at position ${String(record.position)}`}`,
+      'RATE_LIMIT',
+      { status: httpStatus, providerRetryAfterMs: FREEBUFF_QUEUE_RETRY_MS },
+    )
+  }
+  const textRule = freebuffTextError(httpStatus, text, label)
+  if (textRule !== undefined) return textRule
+  const message = freebuffFirstString(record.message, record.error)
+  return new LlmError(
+    `${label} did not answer an active session (HTTP ${String(httpStatus)}, status="${status}")`
+    + `${message === undefined ? `: ${text.slice(0, 300)}` : `: ${message}`}`,
+    httpStatus === 409 ? 'HTTP_409' : 'HTTP_404',
+    { status: httpStatus },
+  )
 }
 
 /** The retry hint this route's own text rules disclose, as an epoch instant. */
@@ -719,12 +866,11 @@ export async function freebuffResponseError(
 /**
  * The refusal a NON-stream 200 body carries, if it carries one.
  *
- * The reference feeds a 200 body straight into its SSE parser, and a refused
- * call then produces zero events — which is how a gateway policy refusal gets
- * reported as "the stream ended early" (`src/joycode`'s twin bug is documented
- * for the sibling route; here the evidence is the same shape of body). The
- * `{"error": …}` envelope is also what the web protocol can deliver in-band, so
- * this sniffs the OPENING of a body before any parser sees it.
+ * This upstream answers a refused call with HTTP 200 and a JSON body — one bare
+ * object, no SSE framing at all — and a 200 body handed to a stream parser
+ * produces zero events, which surfaces as "the stream ended before a finish
+ * chunk": a message about the wrong thing entirely. The decision is made once,
+ * on the opening bytes, and every later byte is passed through untouched.
  *
  * A body whose opening is an SSE frame carrying real content (`data: {"choices":…}`)
  * is NOT a refusal: only an envelope, a bare known text code, or nothing.
@@ -768,8 +914,7 @@ type FreebuffHeadScan =
  * function: `{"object":"chat.completion.chunk","choices":[…]}` carries none of
  * the envelope keys, and running the bare text rules over model OUTPUT would let
  * the first token of an answer ("unauthorized", "rate limit") be read as a
- * refusal. The reference's own sibling guard tests for `choices`/`type` before
- * classifying a body for exactly this reason.
+ * refusal.
  * @param text - the opening bytes.
  * @returns the scan result.
  */
@@ -788,13 +933,8 @@ function freebuffHeadScan(text: string): FreebuffHeadScan {
     if (envelope !== undefined) return { kind: 'envelope', envelope }
     if (typeof parsed === 'object' && parsed !== null) {
       const record = parsed as Record<string, unknown>
-      // `object`/`choices`/`usage` are the desktop protocol's chunk fields and
-      // `type` is the web protocol's event tag (`src/web_protocol.rs:84-95`).
-      // Testing for `type` matters as much as the other three: without it, a WEB
-      // event whose model output happens to contain the words "rate limit" would
-      // be read as a refusal and end a healthy turn.
-      if (record.choices !== undefined || record.usage !== undefined
-        || record.object !== undefined || record.type !== undefined) {
+      // `object`/`choices`/`usage` are this protocol's chunk fields.
+      if (record.choices !== undefined || record.usage !== undefined || record.object !== undefined) {
         sawFrame = true
       }
     }
@@ -805,12 +945,6 @@ function freebuffHeadScan(text: string): FreebuffHeadScan {
 /**
  * Wrap an upstream body stream so a refusal delivered inside a 200 CANNOT reach
  * the SSE translator.
- *
- * This upstream answers a refused call with HTTP 200 and a JSON body — one bare
- * object, no SSE framing at all — and a 200 body handed to a stream parser
- * produces zero events, which surfaces as "the stream ended before a finish
- * chunk": a message about the wrong thing entirely. The decision is made once,
- * on the opening bytes, and every later byte is passed through untouched.
  * @param stream - the upstream body stream.
  * @param options - the status the body arrived with, the diagnostic label, and the activity pulse.
  * @returns a stream that errors with the refusal instead of yielding empty content.
@@ -871,6 +1005,15 @@ function freebuffDecidable(buffer: string): boolean {
   return trimmed.trimEnd().length >= 64
 }
 
+/** The offset just past the first SSE event boundary, or -1. */
+function freebuffEventBoundary(buffer: string): number {
+  const lf = buffer.indexOf('\n\n')
+  const crlf = buffer.indexOf('\r\n\r\n')
+  if (lf === -1) return crlf === -1 ? -1 : crlf + 4
+  if (crlf === -1) return lf + 2
+  return Math.min(lf + 2, crlf + 4)
+}
+
 /** Whether the first JSON object in `text` is complete. */
 function freebuffJsonClosed(text: string): boolean {
   let depth = 0
@@ -903,11 +1046,12 @@ function tryJson(text: string): unknown {
 }
 
 /**
- * Whether a body is the web protocol's in-band session refusal.
+ * Whether a body is an in-band session refusal.
  *
- * `src/api.rs:5618-5621` is the source: `/api/web/freebuff-session` answers 401
- * for a bad credential, and an authenticated answer always carries `accessTier`
- * or `freebucks` — so a body with neither is a refusal, not an empty account.
+ * `src/api.rs:5618-5621` is the source: an authenticated answer always carries
+ * `accessTier` or `freebucks` — so a body with neither is a refusal, not an
+ * empty account (`ref-freebuff2api/src/api.rs:5618`; live 2026-09-28, the
+ * desktop session GET answered exactly this shape).
  * @param payload - the parsed body.
  * @returns true when the body proves the credential was not honoured.
  */
@@ -919,104 +1063,10 @@ export function freebuffSessionUnauthenticated(payload: unknown): boolean {
 }
 
 /**
- * One message as the web prompt flattener needs it.
- *
- * `role` is a hub message role, plus ONE route-local addition: `tool-call`, the
- * assistant's half of a tool exchange. The web wire has no `tool_calls` field, so
- * an assistant turn that called a tool can only survive as a labelled text part —
- * see {@link freebuffWebPrompt}.
- */
-export interface FreebuffPromptMessage {
-  role: string
-  /** The message's own text, already extracted from its content blocks. */
-  text: string
-}
-
-/** The role labels the flattener prefixes (`src/web_threads.rs:240-245`). */
-const FREEBUFF_PROMPT_LABELS: Record<string, string> = {
-  assistant: '[助手]',
-  tool: '[工具结果]',
-  // NOT in the reference: the reference's web bridge never has to render a
-  // client tool call, because its own clients cannot pass tools through this
-  // wire (module doc) and `flatten_messages` therefore only ever sees text
-  // (`src/web_threads.rs:181-200` drops every non-text content part, assistant
-  // `tool_calls` included). This route renders the call instead of dropping it,
-  // so the `[工具结果]` that follows keeps its antecedent — the body is the
-  // reference's own `{name}: {label}` rendering of a tool
-  // (`src/web_protocol.rs:991`), with the call's arguments in the label slot.
-  'tool-call': '[工具调用]',
-}
-
-/**
- * Flatten a conversation into the single `content` string the web protocol
- * takes.
- *
- * The web endpoint accepts ONE string, not a message array, so a conversation
- * has to be rendered into text. The rendering is the reference's own
- * (`src/web_threads.rs:172-254`) and it is specific enough to be worth following
- * exactly rather than reinventing:
- *
- *   - `system`/`developer` messages are pulled out (the FIRST one only) and
- *     prefixed `[系统指令]`;
- *   - a conversation of exactly ONE non-system message is sent VERBATIM — no
- *     role labels, no joining, because the common case is a client sending just
- *     the current user turn;
- *   - anything longer is labelled per message: `[用户]`, `[助手]`, `[工具结果]`
- *     (everything unrecognized counts as user), joined with a blank line;
- *   - an empty last user message yields `undefined`, which the caller must treat
- *     as a bad request rather than sending an empty prompt.
- *
- * One label is an extension beyond the reference and is marked where it is
- * defined: a `tool-call` part, which keeps an assistant's tool call in the
- * transcript instead of dropping it ({@link FREEBUFF_PROMPT_LABELS}). The
- * `[工具结果]` side is a straight port — the reference labels tool results in
- * exactly this text form (`src/web_threads.rs:242`) precisely because the wire
- * has nowhere else to put them.
- * @param messages - the conversation, in order.
- * @returns the flattened prompt, or undefined when there is nothing to send.
- */
-export function freebuffWebPrompt(messages: readonly FreebuffPromptMessage[]): string | undefined {
-  const text = (message: FreebuffPromptMessage): string | undefined => {
-    const trimmed = message.text.trim()
-    return trimmed === '' ? undefined : trimmed
-  }
-  const lastUser = [...messages].reverse().find(message => message.role === 'user')
-  if (lastUser === undefined || text(lastUser) === undefined) return undefined
-  const systems: string[] = []
-  const rest: FreebuffPromptMessage[] = []
-  for (const message of messages) {
-    if (message.role === 'system' || message.role === 'developer') {
-      const body = text(message)
-      if (body !== undefined) systems.push(body)
-      continue
-    }
-    rest.push(message)
-  }
-  const parts: string[] = []
-  const first = systems[0]
-  if (first !== undefined) parts.push(`[系统指令]\n${first}`)
-  if (rest.length === 1) {
-    const only = rest[0]
-    const body = only === undefined ? undefined : text(only)
-    if (body !== undefined) parts.push(body)
-  } else {
-    for (const message of rest) {
-      const body = text(message)
-      if (body === undefined) continue
-      const label = FREEBUFF_PROMPT_LABELS[message.role] ?? '[用户]'
-      parts.push(`${label}\n${body}`)
-    }
-  }
-  const prompt = parts.join('\n\n')
-  return prompt.trim() === '' ? undefined : prompt
-}
-
-/**
  * Where the reference tops up its model roster from (`src/models.rs:566`).
  *
  * It is a public TypeScript constant file in the upstream client's repository,
- * NOT a credentialed API: there is no model-list endpoint on either protocol this
- * route can read.
+ * NOT a credentialed API: neither protocol exposes a model-list endpoint.
  */
 export const FREEBUFF_UPSTREAM_MODELS_URL =
   'https://raw.githubusercontent.com/CodebuffAI/codebuff/main/common/src/constants/free-agents.ts'
@@ -1047,232 +1097,4 @@ export function parseFreebuffUpstreamModels(source: string): string[] {
     }
   }
   return found
-}
-
-/**
- * One OpenAI chat-completions chunk, as the hub's translator reads it.
- *
- * The shape is the reference's own (`src/web_protocol.rs:906-924`), including
- * the `object` field and `index: 0`: it is what makes the converted web stream
- * indistinguishable from the desktop protocol's SSE.
- */
-function freebuffChunk(delta: Record<string, unknown>, finishReason: string | null): string {
-  return `data: ${JSON.stringify({
-    object: 'chat.completion.chunk',
-    choices: [{ index: 0, delta, finish_reason: finishReason }],
-  })}\n\n`
-}
-
-/** The web protocol's event `type` values this translator acts on (`src/web_protocol.rs:95-162`). */
-export const FREEBUFF_WEB_EVENT_TYPES: readonly string[] = [
-  'meta',
-  'title',
-  'reasoning_delta',
-  'delta',
-  'suggestions',
-  'agent_start',
-  'agent_tool',
-  'agent_tool_done',
-  'agent_delta',
-  'agent_finish',
-  'button',
-  'done',
-]
-
-/** Options for {@link freebuffWebToChatCompletions}. */
-export interface FreebuffWebTranslatorOptions {
-  /** Diagnostic prefix for an in-band refusal. */
-  label: string
-  /** Called on every received byte, to keep the idle watchdog fed. */
-  onActivity?: () => void
-  /** Called when an event names the upstream thread, for a caller that reuses it. */
-  onThread?: (threadId: string) => void
-  /**
-   * Called ONCE per stream when upstream fires a tool call of its OWN, which this
-   * translator drops (module doc). Never called per event: one turn can carry
-   * several such calls, and they are the same fact about the same turn.
-   */
-  onWarn?: (message: string) => void
-}
-
-/**
- * Translate the web protocol's SSE into OpenAI chat-completions SSE.
- *
- * This is the ONE parser this route owns. The reference does exactly this
- * conversion in `StreamEncoder::encode_block` (`src/web_protocol.rs:843-930`) and
- * its event→chunk mapping is ported here field for field, with ONE deliberate
- * exception:
- *
- *   - `delta.text` → `delta.content`;
- *   - `agent_delta.text` → `delta.content` TOO, not dropped: the reference's
- *     comment records that tool-produced prose arrives on this event
- *     (`src/web_protocol.rs:880-883`), so treating it as a private channel loses
- *     the model's answer;
- *   - `reasoning_delta.text` → `delta.reasoning_content`, emitted BEFORE the
- *     content chunks of the same event block (`src/web_protocol.rs:906-918`);
- *   - `agent_tool` → NOTHING on the wire. It is a call Freebuff ran on its own
- *     side, and the harness cannot run it — the whole case is in the module doc,
- *     and the warning it raises is the only trace it leaves;
- *   - `done` → a terminal chunk whose `finish_reason` is ALWAYS `stop`, then the
- *     `[DONE]` sentinel (`src/web_protocol.rs:830-841`, `:925-928`). The
- *     reference finishes `tool_calls` when any tool fired; that reason is what
- *     tells a client to go run something and come back, which is precisely the
- *     dangling state this route must not create (module doc);
- *   - `meta`/`title` → the thread id, and nothing on the wire;
- *   - `suggestions`, `button`, `agent_start`, `agent_finish`, `agent_tool_done`
- *     and unknown types → ignored, like the reference's `_ => {}` arm.
- *
- * Two further divergences, both because the hub's translator has no channel they
- * would fit in:
- *   - an in-band `{"error": …}` envelope ERRORS the stream with the upstream's
- *     own words. The reference merely records it in a side slot
- *     (`src/web_protocol.rs:859-874`) because its own bridge forwards raw events;
- *   - an upstream EOF WITHOUT `done` still emits the terminal chunk, which the
- *     reference also does (`src/web_protocol.rs:454-461`) — that one is a port.
- * @param stream - the upstream body stream.
- * @param options - label, activity pulse, thread sink, dropped-tool warning sink.
- * @returns a stream carrying OpenAI chat-completions SSE.
- */
-export function freebuffWebToChatCompletions(
-  stream: ReadableStream<Uint8Array>,
-  options: FreebuffWebTranslatorOptions,
-): ReadableStream<Uint8Array> {
-  const decoder = new TextDecoder()
-  const encoder = new TextEncoder()
-  const state: FreebuffWebState = { buffer: '', finished: false, droppedUpstreamTool: false }
-  // The finish is ALWAYS a normal completion, even when upstream said
-  // `tool_calls`: see the module doc for why that reason must not reach DSH here.
-  const finishChunk = (): string => freebuffChunk({}, 'stop') + 'data: [DONE]\n\n'
-  return stream.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) {
-      options.onActivity?.()
-      state.buffer += decoder.decode(chunk, { stream: true })
-      for (;;) {
-        const boundary = freebuffEventBoundary(state.buffer)
-        if (boundary === -1) break
-        const block = state.buffer.slice(0, boundary)
-        state.buffer = state.buffer.slice(boundary)
-        const translated = freebuffTranslateEventBlock(block, state, options)
-        if (translated.error !== undefined) {
-          controller.error(translated.error)
-          return
-        }
-        if (translated.text !== '') controller.enqueue(encoder.encode(translated.text))
-        if (translated.done) state.finished = true
-      }
-    },
-    flush(controller) {
-      // An upstream that ends without `done` still owes the caller a terminal
-      // chunk, or the hub's translator reports a truncated stream
-      // (`src/web_protocol.rs:454-461`).
-      if (!state.finished) controller.enqueue(encoder.encode(finishChunk()))
-    },
-  }))
-}
-
-/** Translator state for ONE upstream stream. */
-interface FreebuffWebState {
-  /** Bytes received but not yet a complete SSE event block. */
-  buffer: string
-  /** Whether the upstream's own `done` event was seen. */
-  finished: boolean
-  /** Whether the dropped-upstream-tool warning was already emitted. */
-  droppedUpstreamTool: boolean
-}
-
-/** The offset just past the first SSE event boundary, or -1. */
-function freebuffEventBoundary(buffer: string): number {
-  const lf = buffer.indexOf('\n\n')
-  const crlf = buffer.indexOf('\r\n\r\n')
-  if (lf === -1) return crlf === -1 ? -1 : crlf + 4
-  if (crlf === -1) return lf + 2
-  return Math.min(lf + 2, crlf + 4)
-}
-
-/** One event block → OpenAI chunk text (plus an error, when one is in band). */
-function freebuffTranslateEventBlock(
-  block: string,
-  state: FreebuffWebState,
-  options: FreebuffWebTranslatorOptions,
-): { text: string, done: boolean, error?: LlmError } {
-  const reasoning: string[] = []
-  const content: string[] = []
-  let done = false
-  for (const line of block.split(/\r?\n/)) {
-    const trimmed = line.trim()
-    if (!trimmed.startsWith('data:')) continue
-    const payload = trimmed.slice('data:'.length).trim()
-    if (payload === '' || payload === '[DONE]') continue
-    const value = tryJson(payload)
-    if (value === undefined) continue
-    const envelope = freebuffErrorEnvelope(value)
-    if (envelope !== undefined) {
-      const refusal = freebuffTextError(200, JSON.stringify(envelope), options.label)
-        ?? new LlmError(
-          `${options.label} refused the call in-band: ${envelope.message}`,
-          'HTTP_200',
-        )
-      return { text: '', done: false, error: refusal }
-    }
-    if (typeof value !== 'object' || value === null) continue
-    const event = value as Record<string, unknown>
-    const type = typeof event.type === 'string' ? event.type : ''
-    switch (type) {
-      case 'reasoning_delta': {
-        const text = freebuffTextOf(event.text)
-        if (text !== undefined) reasoning.push(text)
-        break
-      }
-      case 'delta': {
-        const text = freebuffTextOf(event.text)
-        if (text !== undefined) content.push(text)
-        break
-      }
-      case 'agent_delta': {
-        const text = freebuffTextOf(event.text)
-        if (text !== undefined) content.push(text)
-        break
-      }
-      case 'agent_tool': {
-        // Freebuff's OWN server-side tool call: the upstream already ran it, and
-        // nothing here asks this client to run anything. Faithfully translated
-        // (the reference's `tool_slot`/`encode_block`, `src/web_protocol.rs:811-828`,
-        // `:885-898`), it becomes a harness `tool-call` block for a tool this
-        // route never declared and the harness has no handler for — which breaks
-        // the turn. Dropped instead, and reported ONCE per stream: the module doc
-        // carries the live evidence (four `web_search` calls in one turn,
-        // `arguments:"{}"`, `finish_reason: tool_calls`) and why the reference's
-        // mapping serves a different consumer.
-        const name = freebuffFirstString(event.toolName)
-        if (name === undefined) break
-        if (!state.droppedUpstreamTool) {
-          state.droppedUpstreamTool = true
-          options.onWarn?.(
-            `freebuff: upstream ran its own tool "${name}"; this route does not forward upstream-only tool calls`,
-          )
-        }
-        break
-      }
-      case 'meta':
-      case 'title': {
-        const threadId = freebuffFirstString(event.threadId)
-        if (threadId !== undefined) options.onThread?.(threadId)
-        break
-      }
-      case 'done':
-        done = true
-        break
-      default:
-        // Every other event type is deliberately dropped, matching the
-        // reference's catch-all arm (`src/web_protocol.rs:903`).
-        break
-    }
-  }
-  let text = ''
-  for (const value of reasoning) text += freebuffChunk({ reasoning_content: value }, null)
-  for (const value of content) text += freebuffChunk({ content: value }, null)
-  // Never `tool_calls`, whatever upstream's own finish reason was: the harness
-  // must not be told to wait for a tool result on this wire (module doc).
-  if (done) text += freebuffChunk({}, 'stop') + 'data: [DONE]\n\n'
-  return { text, done }
 }

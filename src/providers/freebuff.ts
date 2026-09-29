@@ -1,19 +1,76 @@
 /**
- * Freebuff (freebuff.com) subscription route.
+ * Freebuff (codebuff.com) subscription route.
  *
  * ## What this route is
  *
- * Freebuff is a browser product whose only credential is a browser session
- * (`src/providers/freebuff-session.ts` explains why there is no OAuth flow and no
- * discovery path). This adapter takes that session and speaks whichever of the
- * two upstream protocols it can: the desktop/Bearer OpenAI-shaped completions
- * endpoint, or the web protocol's `/api/chat/stream`. Both are described in
- * `src/providers/freebuff/client.ts`, which also owns the one SSE translator this
- * route needs (the web protocol's 11 event types are NOT OpenAI-shaped).
+ * Freebuff is a product whose free tier rides its own desktop protocol, and this
+ * adapter speaks exactly that: the Bearer/OpenAI-shaped
+ * `POST {www.codebuff.com}/api/v1/chat/completions`, whose SSE the hub's own
+ * `streamChatCompletions` translator already reads. Everything protocol-shaped
+ * lives in `freebuff/client.ts`; the credential paths live in
+ * `freebuff-cli.ts` (the official CLI's login) and `freebuff-session.ts`
+ * (validation + keepalive). This file is the adapter plumbing — provider
+ * identity, retry policy, roster, capability resolution and the stream path.
  *
- * Everything protocol-shaped lives in `freebuff/`: this file is the adapter
- * plumbing — provider identity, retry policy, roster, capability resolution and
- * the stream path.
+ * ## The credential is a Bearer, and there is exactly one wire
+ *
+ * A browser COOKIE is refused by name (`freebuffCookieRefusal`): the only wire it
+ * can ride takes one flat prompt string with no `tools` field
+ * (`ref-freebuff2api/src/web_protocol.rs:380-388`), so a turn through it would
+ * lose every harness tool without saying so. Live-verified 2026-09-28 with a
+ * cookie credential, a `tools` array bolted onto that body is ignored and the
+ * model answers that its available tools are Freebuff's own server-side agents —
+ * the exact silent downgrade this route must not ship. So the cookie wire's code
+ * (its body builder, prompt flattener and SSE translator) has been DELETED
+ * rather than kept behind a branch nothing can reach.
+ *
+ * ## Every turn is bootstrapped, and the free AGENT matters
+ *
+ * The upstream does not accept a bare OpenAI request: without a run id it answers
+ * `400 No runId found in request body`. Following the CLI (`qDA`, `CV`), a turn
+ * is:
+ *
+ *   1. `POST /api/v1/freebuff/session/admission` with the CLI's header set and the
+ *      model — this admits the instance and is also what the session is bound to;
+ *   2. `POST /api/v1/agent-runs {action:"START", agentId, ancestorRunIds:[]}` —
+ *      the `runId` the chat body must carry, started for the MODEL-SPECIFIC free
+ *      agent (`base2-free-space-bunny-alpha` for `stealth/space-bunny-alpha`);
+ *   3. `POST /api/v1/chat/completions` with that `run_id` in `codebuff_metadata`,
+ *      beside the `cli:`-prefixed instance id, `freebuff_multi_session:"1"` and
+ *      `surface:"cli"`.
+ *
+ * Step 2's agent is the difference between a turn and
+ * `403 free_mode_invalid_agent_model`: free mode validates the RUN's agent
+ * against the requested model, so starting every run for the generic
+ * `base2-free` (which is what `ref-freebuff2api/src/models.rs:16` does, and what
+ * the first probe here did) fails for every model but one.
+ *
+ * ## What a FREE CLI credential actually gets: not the tools, a refusal
+ *
+ * Live 2026-09-28, with the credential the official CLI itself stored
+ * (`~/.config/manicode/credentials.json` → `default.authToken`) and the complete
+ * CLI-shaped bootstrap above, a PLAIN chat turn (no tools, nothing but
+ * "Reply with exactly: ok") was refused:
+ *
+ *     POST /api/v1/chat/completions -> 403
+ *     {"error":"free_mode_cli_required","message":"Free mode is only available
+ *      through the freebuff CLI. Install it with `npm i -g freebuff`, then run
+ *      `freebuff`. Calling the API directly is not supported and may get your
+ *      account banned."}
+ *
+ * So free mode is gated to the CLI's own channel, not to the credential: the
+ * tool question is never reached, and the refusal warns about the account. Probing
+ * stopped there by design. {@link freebuffTextError} maps that code to
+ * `UNSUPPORTED` with the upstream's own warning in the message, so the card shows
+ * the gate instead of the retry plugin hammering a refusal that will not change.
+ * Two further observations from the same run: the run bootstrap itself SUCCEEDS
+ * (200 + a run id) even for a gated chat, and the session ADMISSION can be
+ * refused independently with `409 purchase_capacity` when another desktop session
+ * holds the account's single free slot — both are reported with the upstream's
+ * own words.
+ *
+ * The QUOTA read is the one credentialed call that works: see
+ * `freebuff/usage.ts`.
  *
  * ## The roster is PINNED, not discovered
  *
@@ -31,25 +88,6 @@
  *     guessed ladder turns into a picker value the upstream would coerce);
  *   - a failed top-up does not empty the roster: the pinned half is always
  *     served, and the failure is reported through `notFetchedReason`.
- *
- * ## Tools exist on ONE wire, and the cookie credential cannot reach it
- *
- * A caller's `tools` array rides the desktop body unchanged (the reference
- * forwards it, `src/api.rs:2707-2708`), so the Bearer path is the tool-capable
- * one. The web body has no `tools` field at all and no tool-turn encoding — it is
- * one flat prompt string (`src/web_protocol.rs:380-388`,
- * `src/web_threads.rs:176-254`). Its only tool vocabulary is FREEBUFF'S OWN
- * server-side activity: upstream `agent_tool` events are calls the upstream
- * already ran on its side, and they are DROPPED (with one warning per stream)
- * rather than relayed as harness tool calls, because DSH has no handler to run
- * them with — evidence and reasoning in `freebuff/client.ts`'s module doc.
- * A tool-declaring turn on the web wire is therefore REFUSED
- * ({@link freebuffWebToolRefusal}) rather than downgraded to a tool-less chat,
- * which is the defect this route was reported for: the harness's local tools
- * silently disappeared and the assistant reported Freebuff's own server-side
- * agents as its entire tool set. A replayed tool turn (assistant `tool_calls` +
- * a result) still renders into that prompt so the transcript stays coherent —
- * see {@link webPromptMessages}.
  *
  * @module dsh-subscription-hub/providers/freebuff
  */
@@ -71,23 +109,28 @@ import { idleWatchdog, mapFetchFailure, mergeReasoning } from './common.js'
 import type { PoolAdapter } from './pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, DEFAULT_RETRY, subscriptionRetryPolicy } from './rate-limit.js'
 import type { RateLimitWait } from './rate-limit.js'
-import { resolveImages, toolResultsOf } from '../translate/resolved.js'
-import type { TranslatableBlock, TranslatableMessage } from '../translate/resolved.js'
+import { resolveImages } from '../translate/resolved.js'
+import type { TranslatableMessage } from '../translate/resolved.js'
 import { streamChatCompletions, toChatMessages, toChatTools } from '../translate/chat-completions.js'
 import { freebuffModel, freebuffRoster } from './freebuff/catalog.js'
 import type { FreebuffModel } from './freebuff/catalog.js'
-import type { FreebuffCredential, FreebuffPromptMessage, FreebuffWire } from './freebuff/client.js'
+import type { FreebuffCredential } from './freebuff/client.js'
 import {
+  freebuffAgentFor,
+  freebuffAssertDesktopCredential,
   freebuffChatBody,
   freebuffChatHeaders,
   freebuffChatUrl,
   freebuffGuardStream,
+  freebuffInstanceId,
   freebuffResponseError,
-  freebuffWebBody,
-  freebuffWebPrompt,
-  freebuffWebToChatCompletions,
-  freebuffWebToolRefusal,
-  freebuffWireFor,
+  freebuffRunBody,
+  freebuffRunHeaders,
+  freebuffRunUrl,
+  freebuffSessionAdmissionUrl,
+  freebuffSessionHeaders,
+  freebuffSessionStatusError,
+  parseFreebuffRunId,
   FREEBUFF_UPSTREAM_MODELS_URL,
   parseFreebuffUpstreamModels,
 } from './freebuff/client.js'
@@ -114,7 +157,7 @@ export interface FreebuffAdapterOptions {
   pool?: () => PoolAdapter | undefined
 }
 
-/** Freebuff wire adapter: one instance serves the `freebuff` provider route. */
+/** Freebuff desktop wire adapter: one instance serves the `freebuff` provider route. */
 export class FreebuffAdapter extends LlmAdapter {
   /** Extra ids the upstream roster declared, per model id (no capabilities attached). */
   private readonly discovered = new Map<string, string>()
@@ -266,68 +309,129 @@ export class FreebuffAdapter extends LlmAdapter {
     return this.streamCore(options, account)
   }
 
+  /**
+   * One turn: bootstrap, then stream.
+   *
+   * The bootstrap is per turn on purpose, matching the reference (its
+   * `ensure_root_run` starts a fresh root run for every attempt,
+   * `src/api.rs:3385-3394`) and the CLI (a run is one task). The instance id is
+   * derived from the credential, so it is stable across turns — which is what
+   * makes the session admission idempotent for one account.
+   * @param options - the caller's request.
+   * @param account - the account to serve, or undefined for the default one.
+   * @yields the translated stream chunks.
+   */
   private async *streamCore(options: GenerateOptions, account?: string): AsyncGenerator<StreamChunk> {
     const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
-    let wire: FreebuffWire = 'chat-completions'
     try {
       const session = await this.options.tokens.session(account)
       const credential = freebuffCredentialOf(session)
-      wire = freebuffWireFor(credential)
-      const label = `freebuff ${wire}`
+      // A cookie credential is refused BEFORE anything is sent: see the module doc.
+      freebuffAssertDesktopCredential(credential)
+      const label = 'freebuff desktop'
       const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), watchdog.signal)
-      const response = wire === 'web'
-        ? await this.webRequest(credential, options, messages, watchdog)
-        : await this.desktopRequest(credential, options, messages, watchdog)
+      const runId = await this.bootstrap(credential, options.model, label, watchdog)
+      const response = await this.desktopRequest(credential, options, messages, runId, watchdog)
       if (!response.ok) {
         const body = await response.text().catch(() => '')
         const error = await freebuffResponseError(response.status, response.headers, body, label, this.options.onWarn)
-        // A 401 invalidates the credential (`src/web_pool.rs:268-275` cools a
+        // A 401/403 invalidates the credential (`src/web_pool.rs:268-275` cools a
         // deterministic failure immediately). Forcing a refresh puts the
         // re-validation through the token manager, which DELETES the stored
         // session when the upstream refuses the credential there too — so the
-        // next attempt asks the user for a fresh paste instead of retrying a
-        // credential nobody honours.
+        // next attempt asks for a fresh import instead of retrying a credential
+        // nobody honours.
         if (response.status === 401 || response.status === 403) await this.invalidateCredential(account)
         throw error
       }
       if (response.body === null) {
-        throw new LlmError(`Freebuff ${wire} answered no body`, 'MALFORMED_RESPONSE')
+        throw new LlmError(`Freebuff ${label} answered no body`, 'MALFORMED_RESPONSE')
       }
       // A refusal can arrive inside a 200 body; the guard reads the opening bytes
       // and errors the stream with the upstream's own words instead of letting an
       // empty stream surface as a truncated one.
       const guarded = freebuffGuardStream(response.body, { label, status: response.status, onActivity: watchdog.pulse })
-      const stream = wire === 'web'
-        ? freebuffWebToChatCompletions(guarded, {
-          label,
-          onActivity: watchdog.pulse,
-          // Freebuff's own server-side tool calls are dropped by the translator
-          // instead of becoming harness tool calls the harness cannot run; this
-          // sink is the only trace they leave, and it fires once per stream.
-          ...this.options.onWarn === undefined ? {} : { onWarn: this.options.onWarn },
-        })
-        : guarded
-      yield* streamChatCompletions(stream, watchdog.pulse)
+      yield* streamChatCompletions(guarded, watchdog.pulse)
     } catch (error) {
-      throw mapFetchFailure(`freebuff ${wire}`, error, watchdog, options.signal)
+      throw mapFetchFailure('freebuff desktop', error, watchdog, options.signal)
     } finally {
       watchdog.stop()
     }
   }
 
-  /** The desktop (Bearer) request. */
+  /**
+   * Admit a session and start the agent run this turn needs.
+   *
+   * The sequence is the CLI's (`CV` then `qDA`), and both halves are load-bearing:
+   * the admission binds the instance to the model, and the run is what the chat
+   * body's `run_id` refers to — without it the upstream answers
+   * `400 No runId found in request body`.
+   * @param credential - the Bearer credential.
+   * @param model - the model this turn asks for.
+   * @param label - diagnostic prefix.
+   * @param watchdog - the turn's abort/idle watchdog.
+   * @returns the run id to put in the body.
+   * @throws {LlmError} the upstream's own refusal, classified.
+   */
+  private async bootstrap(
+    credential: FreebuffCredential,
+    model: string,
+    label: string,
+    watchdog: { signal: AbortSignal },
+  ): Promise<string> {
+    const instanceId = freebuffInstanceId(credential.accessToken)
+    const admissionLabel = `${label} session admission`
+    const admission = await this.fetchFn(freebuffSessionAdmissionUrl(), {
+      method: 'POST',
+      headers: freebuffSessionHeaders({ credential, method: 'POST', instanceId, model }),
+      // The CLI sends no body here (`CV` calls `fetch(E, {method, headers, signal})`);
+      // an empty JSON object is what the legacy session POST took and is ignored.
+      body: '{}',
+      signal: watchdog.signal,
+    })
+    const admissionBody = await admission.text().catch(() => '')
+    const admissionPayload = tryJson(admissionBody)
+    if (!admission.ok) {
+      throw await freebuffResponseError(admission.status, admission.headers, admissionBody, admissionLabel, this.options.onWarn)
+    }
+    const statusError = freebuffSessionStatusError(admissionPayload, admission.status, admissionLabel)
+    if (statusError !== undefined) throw statusError
+
+    const runLabel = `${label} agent run`
+    const runResponse = await this.fetchFn(freebuffRunUrl(), {
+      method: 'POST',
+      headers: freebuffRunHeaders(credential),
+      body: JSON.stringify(freebuffRunBody(freebuffAgentFor(model))),
+      signal: watchdog.signal,
+    })
+    const runBody = await runResponse.text().catch(() => '')
+    if (!runResponse.ok) {
+      throw await freebuffResponseError(runResponse.status, runResponse.headers, runBody, runLabel, this.options.onWarn)
+    }
+    const runId = parseFreebuffRunId(tryJson(runBody))
+    if (runId === undefined) {
+      throw new LlmError(
+        `${runLabel} answered no runId, and a chat body without one is refused: ${runBody.slice(0, 200)}`,
+        'MALFORMED_RESPONSE',
+      )
+    }
+    return runId
+  }
+
+  /** The desktop (Bearer) chat request. */
   private async desktopRequest(
     credential: FreebuffCredential,
     options: GenerateOptions,
     messages: readonly TranslatableMessage[],
+    runId: string,
     watchdog: { signal: AbortSignal },
   ): Promise<Response> {
     const tools = options.tools === undefined || options.tools.length === 0
       ? undefined
       : toChatTools(options.tools)
-    return await this.fetchFn(freebuffChatUrl('chat-completions'), {
+    return await this.fetchFn(freebuffChatUrl(), {
       method: 'POST',
-      headers: freebuffChatHeaders(credential, 'chat-completions'),
+      headers: freebuffChatHeaders(credential),
       body: JSON.stringify(freebuffChatBody({
         model: options.model,
         messages: toChatMessages(messages, options.system),
@@ -335,58 +439,7 @@ export class FreebuffAdapter extends LlmAdapter {
         ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
         ...options.reasoningEffort === undefined ? {} : { reasoningEffort: String(options.reasoningEffort) },
         credential: credential.accessToken,
-      })),
-      signal: watchdog.signal,
-    })
-  }
-
-  /** The web (cookie) request. */
-  private async webRequest(
-    credential: FreebuffCredential,
-    options: GenerateOptions,
-    messages: readonly TranslatableMessage[],
-    watchdog: { signal: AbortSignal },
-  ): Promise<Response> {
-    // The web body has no `tools` field and no tool-turn encoding, so a turn that
-    // declares tools can only ever reach the model as a tool-LESS chat: the
-    // harness's local tools (file read/write, shell, glob/grep) simply do not
-    // exist for it, and the assistant reports Freebuff's own server-side agents
-    // as its whole tool set. That is a silent loss of every local capability, so
-    // it is refused outright instead — see the module doc in `freebuff/client.ts`
-    // for the wire citation and the live evidence.
-    const tools = options.tools?.length ?? 0
-    if (tools > 0) throw freebuffWebToolRefusal(tools)
-    // The web protocol takes images through a SEPARATE upload endpoint
-    // (`POST /api/chat/upload`, `src/web_protocol.rs:5`) which this route does not
-    // implement. Sending `images: []` and letting the turn proceed would answer a
-    // question about a picture the model never received, so an image-bearing turn
-    // fails here and says why.
-    if (messages.some(message => message.content.some(block => block.type === 'image'))) {
-      throw new LlmError(
-        'Freebuff (web protocol) cannot carry images: they require the upload endpoint this route does not '
-        + 'implement. Use a Bearer credential (the desktop protocol takes image parts inline) or ask without the image.',
-        'HTTP_400',
-      )
-    }
-    const prompt = freebuffWebPrompt([
-      ...translatableToPrompt(options.system),
-      ...messages.flatMap(webPromptMessages),
-    ])
-    if (prompt === undefined) {
-      throw new LlmError(
-        'Freebuff (web protocol) needs at least one non-empty user message: this wire takes a single prompt string, '
-        + 'not a message array.',
-        'HTTP_400',
-      )
-    }
-    return await this.fetchFn(freebuffChatUrl('web'), {
-      method: 'POST',
-      headers: freebuffChatHeaders(credential, 'web'),
-      body: JSON.stringify(freebuffWebBody({
-        model: options.model,
-        content: prompt,
-        credential: credential.cookie ?? credential.accessToken,
-        ...options.reasoningEffort === undefined ? {} : { reasoningEffort: String(options.reasoningEffort) },
+        runId,
       })),
       signal: watchdog.signal,
     })
@@ -458,73 +511,11 @@ function effortLabel(id: string): string {
   return id === 'xhigh' ? 'Extra High' : id.charAt(0).toUpperCase() + id.slice(1)
 }
 
-/** One system message as the web prompt flattener wants it. */
-function translatableToPrompt(system?: string): FreebuffPromptMessage[] {
-  const text = system?.trim() ?? ''
-  return text === '' ? [] : [{ role: 'system', text }]
-}
-
-/** The text of every text block in a content list, joined with newlines. */
-function textOf(blocks: readonly TranslatableBlock[]): string {
-  return blocks
-    .map(block => (block.type === 'text' ? block.text : ''))
-    .filter(part => part !== '')
-    .join('\n')
-}
-
-/**
- * One hub message as the web prompt flattener wants it — TOOL TURNS included.
- *
- * The web wire takes a flat prompt, so every part of a tool exchange has to be
- * rendered into it or it is lost:
- *
- *   - a tool result becomes one `[工具结果]` part — the reference's own label for
- *     exactly this case (`src/web_threads.rs:242`) — whether it arrives as a
- *     `role:"tool"` message or as a `tool-result` block inside a user-role message
- *     (`toolResultsOf` is the hub's reader for both spellings). The tool-call id
- *     has no home in that rendering — the reference drops it too, because the wire
- *     has no field for it — so a transcript with parallel calls pairs by text,
- *     like the reference's. Before this, the text INSIDE a `tool-result` block was
- *     dropped outright on this wire (the message carrying it had no text blocks of
- *     its own), losing the tool's entire output;
- *   - an assistant `tool-call` block becomes its own `[工具调用]` part (see
- *     `FREEBUFF_PROMPT_LABELS` in the client for why that one label is an
- *     extension and where its body rendering comes from). Dropping it, as the
- *     route used to, left the `[工具结果]` that follows with no antecedent and an
- *     assistant turn that called several tools with no text at all.
- *
- * One message can therefore produce SEVERAL prompt parts, and the split is what
- * keeps each of them labelled: `freebuffWebPrompt` sends a one-message
- * conversation VERBATIM, so an unlabelled `[工具结果]` is the failure this
- * avoids.
- * @param message - one hub message.
- * @returns the prompt parts it renders to, in reading order.
- */
-function webPromptMessages(message: TranslatableMessage): FreebuffPromptMessage[] {
-  if (message.role === 'system') {
-    const text = textOf(message.content).trim()
-    return text === '' ? [] : [{ role: 'system', text }]
+/** Parse JSON without throwing. */
+function tryJson(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown
+  } catch {
+    return undefined
   }
-  if (message.role === 'tool') {
-    const result = toolResultsOf(message)[0]
-    const text = result === undefined ? '' : textOf(result.content).trim()
-    return text === '' ? [] : [{ role: 'tool', text }]
-  }
-  const parts: FreebuffPromptMessage[] = []
-  const text = textOf(message.content).trim()
-  if (text !== '') parts.push({ role: message.role === 'assistant' ? 'assistant' : 'user', text })
-  if (message.role === 'assistant') {
-    for (const block of message.content) {
-      if (block.type !== 'tool-call') continue
-      // The reference's own rendering of a tool as text (`src/web_protocol.rs:991`,
-      // `format!("{name}: {label}")`), with the call's arguments as the label.
-      parts.push({ role: 'tool-call', text: `${block.name}: ${block.arguments}` })
-    }
-    return parts
-  }
-  for (const result of toolResultsOf(message)) {
-    const body = textOf(result.content).trim()
-    if (body !== '') parts.push({ role: 'tool', text: body })
-  }
-  return parts
 }

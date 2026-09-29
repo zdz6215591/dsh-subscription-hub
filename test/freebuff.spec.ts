@@ -1,15 +1,19 @@
 /**
- * The Freebuff route: the pinned model table, the two credential shapes, the
- * balance mapping, the error table, and the web protocol's SSE translator.
+ * The Freebuff route: the pinned model table, the Bearer credential shape and its
+ * refusal paths, the balance mapping, the error table, the CLI credential
+ * import/login, and the desktop request bootstrap (session admission + agent
+ * run) that every turn goes through.
  *
- * Every assertion traces to the Rust reference this route was ported from
- * (`ref-freebuff2api`), cited by file:line in the modules themselves — the
- * effort ladder and its clamp, the paused ids, the published context windows,
- * the two session payload spellings, the `concurrency_busy` retry window, and the
- * eleven web event types are all things that reference documents.
+ * Every assertion traces to a source: the Rust reference this route was ported
+ * from (`ref-freebuff2api`, cited by file:line in the modules themselves), or the
+ * official Freebuff CLI's own shipped code, which is where the session headers,
+ * the metadata fields and the model → free-agent table come from.
  */
 
 import './keep-alive.js'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { LlmError, MessageId, ReasoningEffortId, ToolCallId } from '@deepseek-ai/dsh-llm'
@@ -20,6 +24,15 @@ import type { FreebuffSession, ProviderId } from '../src/auth/store.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
 import type { ModelEntry } from '../src/providers/common.js'
 import { FreebuffAdapter } from '../src/providers/freebuff.js'
+import {
+  FREEBUFF_CLI_CREDENTIALS_FILE,
+  freebuffCliCredentialPaths,
+  freebuffCliFailureMessage,
+  freebuffCliFingerprintId,
+  importFreebuffCliCredential,
+  parseFreebuffCliCredentials,
+  startFreebuffCliLogin,
+} from '../src/providers/freebuff-cli.js'
 import {
   FREEBUFF_LADDER_FULL,
   FREEBUFF_LADDER_MUSE,
@@ -36,28 +49,39 @@ import {
 import {
   FREEBUFF_API_BASE,
   FREEBUFF_CHAT_PATH,
+  FREEBUFF_CLI_CODE_PATH,
+  FREEBUFF_CLI_STATUS_PATH,
   FREEBUFF_CONCURRENCY_BUSY_RETRY_MS,
+  FREEBUFF_LOGIN_BASE,
   FREEBUFF_QUEUE_RETRY_MS,
+  FREEBUFF_SESSION_ADMISSION_PATH,
   FREEBUFF_SESSION_COOKIE,
-  FREEBUFF_WEB_BASE,
-  FREEBUFF_WEB_CHAT_PATH,
+  FREEBUFF_TIMEZONE_HEADER,
+  freebuffAgentFor,
+  freebuffAssertDesktopCredential,
   freebuffBodyRefusal,
   freebuffChatBody,
   freebuffChatHeaders,
   freebuffChatUrl,
+  freebuffCliCodeUrl,
+  freebuffCliStatusUrl,
+  freebuffCookieRefusal,
   freebuffCredentialKind,
   freebuffErrorEnvelope,
   freebuffEffortBodyField,
   freebuffGuardStream,
   freebuffInstanceId,
+  freebuffInstanceUuid,
   freebuffResponseError,
+  freebuffRunBody,
+  freebuffRunUrl,
+  freebuffSessionAdmissionUrl,
   freebuffSessionHeaders,
+  freebuffSessionStatusError,
   freebuffSessionUnauthenticated,
-  freebuffWebBody,
-  freebuffWebPrompt,
-  freebuffWebToChatCompletions,
-  freebuffWireFor,
-  FREEBUFF_WEB_EVENT_TYPES,
+  freebuffSessionUrl,
+  freebuffTextError,
+  parseFreebuffRunId,
   parseFreebuffUpstreamModels,
 } from '../src/providers/freebuff/client.js'
 import {
@@ -70,9 +94,9 @@ import {
 } from '../src/providers/freebuff/usage.js'
 import {
   freebuffCredentialOf,
+  freebuffSessionFromBearer,
   freebuffSessionFromPaste,
   freebuffSessionOf,
-  freebuffTrimCookieString,
   isFreebuffPermanentRefreshError,
   parseFreebuffPaste,
   refreshFreebuffSession,
@@ -374,11 +398,10 @@ test('freebuff: a balance read that is refused reports no usage and says why', a
   assert.match(warnings[0] ?? '', /refused the stored credential/)
 })
 
-test('freebuff: a balance read that succeeds is mapped, per wire', async () => {
+test('freebuff: a balance read that succeeds is mapped, on the Bearer wire', async () => {
   const calls: string[] = []
-  const cookie = `${FREEBUFF_SESSION_COOKIE}=sess-value-123456`
   const usage = await fetchFreebuffUsage(
-    { accessToken: 'sess-value-123456', cookie },
+    { accessToken: 'bearer-token-value' },
     async (input) => {
       calls.push(String(input))
       return new Response(JSON.stringify({
@@ -387,65 +410,134 @@ test('freebuff: a balance read that succeeds is mapped, per wire', async () => {
       }), { status: 200 })
     },
   )
-  assert.deepEqual(calls, [`${FREEBUFF_WEB_BASE}/api/web/freebuff-session`])
+  // Live 2026-09-28: this exact URL answers the balance for a free CLI Bearer with
+  // no cookie involved.
+  assert.deepEqual(calls, [`${FREEBUFF_API_BASE}/api/v1/freebuff/session`])
   assert.equal(usage.supported, true)
   assert.equal(usage.remaining, 100)
 })
 
-test('freebuff: a Bearer credential rides the desktop API for both chat and balance', () => {
-  assert.equal(freebuffCredentialKind({ accessToken: 'bearer-token-value' }), 'bearer')
-  assert.equal(freebuffWireFor({ accessToken: 'bearer-token-value' }), 'chat-completions')
-  assert.equal(freebuffChatUrl('chat-completions'), `${FREEBUFF_API_BASE}${FREEBUFF_CHAT_PATH}`)
-  assert.equal(freebuffChatUrl('web'), `${FREEBUFF_WEB_BASE}${FREEBUFF_WEB_CHAT_PATH}`)
-})
-
-test('freebuff: a cookie-only credential rides the web protocol', () => {
+test('freebuff: a cookie credential is refused by name, and its usage is not read', async () => {
   const cookie = `${FREEBUFF_SESSION_COOKIE}=sess-value-123456`
   assert.equal(freebuffCredentialKind({ accessToken: 'sess-value-123456', cookie }), 'cookie')
-  assert.equal(freebuffWireFor({ accessToken: 'sess-value-123456', cookie }), 'web')
-  // A whole cookie string pasted into the token field is still a cookie credential:
-  // this is exactly the shape the reference's importer stores (`src/import.rs:352-378`).
   assert.equal(freebuffCredentialKind({ accessToken: cookie }), 'cookie')
-  // A credential with neither secret cannot be routed.
+  assert.throws(() => freebuffAssertDesktopCredential({ accessToken: cookie }), (error: unknown) =>
+    error instanceof LlmError && error.code === 'UNSUPPORTED' && /cookie credentials are no longer accepted/.test(error.message))
+  // A whole cookie string in the TOKEN field is refused too: extracting its
+  // session-token value and replaying it as a Bearer is the shape the upstream
+  // answers with a ban-shaped 403.
+  assert.throws(() => parseFreebuffPaste(cookie), (error: unknown) =>
+    error instanceof LlmError && error.code === 'UNSUPPORTED')
+  // The balance read does not go out at all for one.
+  const urls: string[] = []
+  const warnings: string[] = []
+  const usage = await fetchFreebuffUsage(
+    { accessToken: cookie },
+    async (input) => { urls.push(String(input)); return new Response('{}', { status: 200 }) },
+    undefined,
+    { onWarn: message => warnings.push(message) },
+  )
+  assert.deepEqual(usage, { supported: false })
+  assert.deepEqual(urls, [])
+  assert.equal(warnings.length, 1)
+  // A credential with neither secret cannot be routed and says which to get.
   assert.equal(freebuffCredentialKind({ accessToken: '' }), undefined)
-  assert.throws(() => freebuffWireFor({ accessToken: '' }), (error: unknown) =>
+  assert.throws(() => freebuffAssertDesktopCredential({ accessToken: '' }), (error: unknown) =>
     error instanceof LlmError && error.code === 'MISSING_CREDENTIAL')
 })
 
-test('freebuff: headers follow the two protocols', () => {
-  const desktop = freebuffChatHeaders({ accessToken: 'tok' }, 'chat-completions')
+test('freebuff: the chat headers are the desktop protocol, with no cookie anywhere', () => {
+  const desktop = freebuffChatHeaders({ accessToken: 'tok' })
   assert.equal(desktop.authorization, 'Bearer tok')
   assert.equal(desktop['user-agent'], 'ai-sdk/openai-compatible/1.0.25/codebuff')
-  assert.equal(desktop.cookie, undefined, 'no cookie on the desktop path')
-  const web = freebuffChatHeaders({ accessToken: 'tok', cookie: `${FREEBUFF_SESSION_COOKIE}=abc` }, 'web')
-  assert.equal(web.cookie, `${FREEBUFF_SESSION_COOKIE}=abc`)
-  assert.equal(web.origin, FREEBUFF_WEB_BASE)
-  assert.equal(web.referer, `${FREEBUFF_WEB_BASE}/chat`)
-  assert.notEqual(web['x-freebuff-instance-id'], undefined)
-  // The desktop balance read needs the include-unused flag or the response omits
-  // every per-model row (`src/upstream.rs:145-146`).
-  const session = freebuffSessionHeaders({ accessToken: 'tok' }, 'chat-completions', { heartbeat: true })
-  assert.equal(session['x-freebuff-multi-session'], '1')
-  assert.equal(session['x-freebuff-include-unused-rate-limits'], '1')
-  assert.equal(session['x-freebuff-heartbeat'], '1')
-  assert.equal(session['x-freebuff-instance-id'], freebuffInstanceId('tok'))
+  assert.equal(desktop.cookie, undefined)
+  assert.equal(desktop.origin, undefined, 'the web origin header is gone with that wire')
+  assert.equal(freebuffChatUrl(), `${FREEBUFF_API_BASE}${FREEBUFF_CHAT_PATH}`)
+  assert.equal(freebuffSessionUrl(), `${FREEBUFF_API_BASE}/api/v1/freebuff/session`)
+  assert.equal(freebuffSessionAdmissionUrl(), `${FREEBUFF_API_BASE}${FREEBUFF_SESSION_ADMISSION_PATH}`)
+  assert.equal(freebuffRunUrl(), `${FREEBUFF_API_BASE}/api/v1/agent-runs`)
 })
 
-test('freebuff: the instance id is stable per credential and differs across accounts', () => {
-  const first = freebuffInstanceId(`${FREEBUFF_SESSION_COOKIE}=aaa`)
-  const again = freebuffInstanceId(`other=1; ${FREEBUFF_SESSION_COOKIE}=aaa`)
-  const second = freebuffInstanceId(`${FREEBUFF_SESSION_COOKIE}=bbb`)
-  assert.equal(first, again, 'same session token, same id')
-  assert.notEqual(first, second, 'different accounts must not share a fingerprint')
-  assert.match(first, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+test('freebuff: the session GET carries the CLI header set the balance read needs', () => {
+  const instanceId = freebuffInstanceId('tok')
+  const get = freebuffSessionHeaders({ credential: { accessToken: 'tok' }, method: 'GET', instanceId, timezone: 'Asia/Shanghai' })
+  assert.equal(get[FREEBUFF_TIMEZONE_HEADER], 'Asia/Shanghai')
+  assert.equal(get.authorization, 'Bearer tok')
+  assert.equal(get['x-freebuff-multi-session'], '1')
+  assert.equal(get['x-freebuff-purchase-continuity'], '1')
+  // Without this one the answer omits every per-model row (CLI `CV`, GET branch;
+  // `src/upstream.rs:145-146`).
+  assert.equal(get['x-freebuff-include-unused-rate-limits'], '1')
+  assert.equal(get['x-freebuff-heartbeat'], '1', 'the CLI heartbeats on the session GET')
+  assert.equal(get['x-freebuff-instance-id'], instanceId)
+  assert.equal(get['x-freebuff-model'], undefined, 'only a POST names the model')
+  assert.equal(get['x-freebuff-desktop-attempt-id'], undefined, 'that one is POST/DELETE only')
 })
 
-test('freebuff: the desktop body carries the effort field and the metadata block', () => {
+test('freebuff: the session POST carries the model, the attempt id and the wallet limit', () => {
+  const instanceId = freebuffInstanceId('tok')
+  const post = freebuffSessionHeaders({
+    credential: { accessToken: 'tok' },
+    method: 'POST',
+    instanceId,
+    model: 'stealth/space-bunny-alpha',
+    timezone: 'UTC',
+  })
+  assert.equal(post['x-freebuff-model'], 'stealth/space-bunny-alpha')
+  assert.equal(post['x-freebuff-wallet-spend-limit'], '0')
+  // The CLI sends the bare uuid here, and the prefixed id as the instance header.
+  assert.equal(post['x-freebuff-desktop-attempt-id'], freebuffInstanceUuid(instanceId))
+  assert.equal(post['x-freebuff-instance-id'], instanceId)
+  assert.equal(post['x-freebuff-heartbeat'], undefined, 'the heartbeat is the GET branch')
+  assert.equal(post['x-freebuff-include-unused-rate-limits'], undefined)
+  // A takeover names the instance the slot is being taken from.
+  const takeover = freebuffSessionHeaders({
+    credential: { accessToken: 'tok' },
+    method: 'POST',
+    instanceId,
+    takeoverInstanceId: 'uuid-elsewhere',
+  })
+  assert.equal(takeover['x-freebuff-takeover-instance-id'], 'uuid-elsewhere')
+})
+
+test('freebuff: the instance id is a stable cli:-prefixed UUID v4 per credential', () => {
+  const first = freebuffInstanceId('token-aaa')
+  const again = freebuffInstanceId('token-aaa')
+  const second = freebuffInstanceId('token-bbb')
+  assert.equal(first, again, 'same credential, same instance')
+  assert.notEqual(first, second, 'different accounts must not share an instance')
+  // A REAL uuid v4 shape, VARIANT nibble included. Live 2026-09-28 the admission
+  // endpoint answered `400 {"error":"invalid_attempt_id"}` to a value that had the
+  // version nibble but no variant nibble, so this is not cosmetic.
+  assert.match(first, /^cli:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+  assert.equal(freebuffInstanceUuid(first), first.slice(4))
+  assert.equal(freebuffInstanceUuid('8fe895f8-43fc-4f4a-41e3-971277cdf538'), undefined,
+    'a server-assigned id has no cli: prefix, which is what turns off surface/multi_session')
+})
+
+test('freebuff: every free model maps to its own free agent', () => {
+  // The pair free mode validates. `base2-free` is only the CLI's own fallback.
+  assert.equal(freebuffAgentFor('stealth/space-bunny-alpha'), 'base2-free-space-bunny-alpha')
+  assert.equal(freebuffAgentFor('z-ai/glm-5.3-flash'), 'base2-free-glm-5-3-flash')
+  assert.equal(freebuffAgentFor('mimo/mimo-v2.5'), 'base2-free-mimo')
+  assert.equal(freebuffAgentFor('some/unknown-model'), 'base2-free')
+  assert.deepEqual(freebuffRunBody('base2-free-space-bunny-alpha'), {
+    action: 'START',
+    agentId: 'base2-free-space-bunny-alpha',
+    ancestorRunIds: [],
+  })
+  assert.equal(parseFreebuffRunId({ runId: 'run-1' }), 'run-1')
+  assert.equal(parseFreebuffRunId({ run_id: 'run-2' }), 'run-2', 'the reference accepts both spellings')
+  assert.equal(parseFreebuffRunId({}), undefined)
+})
+
+test('freebuff: the desktop body carries the run id, the cli identity and the effort', () => {
   const body = freebuffChatBody({
     model: 'z-ai/glm-5.3-flash',
     messages: [{ role: 'user', content: 'hi' }],
     reasoningEffort: 'xhigh',
     credential: 'tok',
+    runId: 'run-abc',
   })
   assert.equal(body.reasoning_effort, 'max', 'the clamp reaches the body')
   assert.equal(body.stream, true)
@@ -454,31 +546,64 @@ test('freebuff: the desktop body carries the effort field and the metadata block
   assert.equal(metadata.cost_mode, 'free')
   assert.equal(typeof metadata.client_id, 'string')
   assert.equal(metadata.freebuff_instance_id, freebuffInstanceId('tok'))
-  // The reference always injects a run id it obtained from its own agent-run
-  // bootstrap (`src/upstream.rs:294`); this route does not run that bootstrap, so
-  // the field is absent rather than invented.
-  assert.equal(metadata.run_id, undefined)
-  // And a no-ladder model has no effort key at all.
-  const solar = freebuffChatBody({ model: 'upstage/solar-pro4', messages: [], reasoningEffort: 'high', credential: 'tok' })
+  // The upstream refuses a body without one: `400 No runId found in request body`.
+  assert.equal(metadata.run_id, 'run-abc')
+  // The two fields the cli: prefix turns on (the CLI's `OJA`).
+  assert.equal(metadata.freebuff_multi_session, '1')
+  assert.equal(metadata.surface, 'cli')
+  // The CLI's own free-mode spelling of the level.
+  assert.equal(metadata.freebuff_reasoning_effort, 'max')
+  // And a no-ladder model has no effort key at all, in either spelling.
+  const solar = freebuffChatBody({
+    model: 'upstage/solar-pro4',
+    messages: [],
+    reasoningEffort: 'high',
+    credential: 'tok',
+    runId: 'run-abc',
+  })
   assert.equal('reasoning_effort' in solar, false)
+  assert.equal((solar.codebuff_metadata as Record<string, unknown>).freebuff_reasoning_effort, undefined)
 })
 
-test('freebuff: the web body is the other shape entirely', () => {
-  const body = freebuffWebBody({
-    model: 'z-ai/glm-5.3-flash',
-    content: 'hello',
-    credential: `${FREEBUFF_SESSION_COOKIE}=abc`,
-    reasoningEffort: 'high',
+test('freebuff: a non-cli instance id would drop the surface fields, and ours never is one', () => {
+  // The metadata builder derives the instance itself, so this asserts the
+  // derivation and the gate agree: `cli:` present → surface declared.
+  const instance = freebuffInstanceId('tok')
+  assert.notEqual(freebuffInstanceUuid(instance), undefined)
+  const metadata = freebuffChatBody({ model: 'mimo/mimo-v2.5', messages: [], credential: 'tok', runId: 'r' })
+    .codebuff_metadata as Record<string, unknown>
+  assert.equal(metadata.surface, 'cli')
+  assert.equal(metadata.freebuff_multi_session, '1')
+})
+
+test('freebuff: free_mode_cli_required is reported as UNSUPPORTED with the ban warning', () => {
+  const error = freebuffTextError(403, JSON.stringify({
+    error: 'free_mode_cli_required',
+    message: 'Free mode is only available through the freebuff CLI. Install it with `npm i -g freebuff`, then run '
+      + '`freebuff`. Calling the API directly is not supported and may get your account banned.',
+  }), 'freebuff desktop')
+  assert.equal(error?.code, 'UNSUPPORTED')
+  assert.match(error?.message ?? '', /may get your account banned/)
+  assert.match(error?.message ?? '', /gates free mode to its official CLI/)
+})
+
+test('freebuff: a taken free slot is reported with the upstream status and a remedy', () => {
+  const text = JSON.stringify({
+    status: 'purchase_capacity',
+    concurrency: 'slot-bound',
+    slotLimit: 1,
+    currentInstanceId: '8fe895f8-43fc-4f4a-41e3-971277cdf538',
   })
-  assert.equal(body.content, 'hello')
-  assert.equal(body.threadId, null, 'a fresh web thread is named null, not omitted')
-  assert.equal(body.reasoningEffort, 'high', 'the level rides under the web spelling')
-  assert.deepEqual(body.images, [])
-  assert.deepEqual(body.attachments, [])
-  const gravity = body.gravity as { user_data?: Record<string, unknown> }
-  assert.match(String(gravity.user_data?.visitor_id), /^gruid_[0-9a-f]{32}$/)
-  assert.match(String(gravity.user_data?.session_id), /^gr_sess_[0-9a-f]{32}$/)
-  assert.equal(body.reasoning_effort, undefined, 'the snake_case spelling is the desktop one')
+  const error = freebuffTextError(409, text, 'freebuff desktop session admission')
+  assert.equal(error?.code, 'HTTP_409')
+  assert.match(error?.message ?? '', /holds this account's only free slot/)
+  // The status-based reader reaches the same conclusion from a 200 body.
+  const fromStatus = freebuffSessionStatusError(JSON.parse(text) as unknown, 409, 'label')
+  assert.equal(fromStatus?.code, 'HTTP_409')
+  assert.equal(freebuffSessionStatusError({ status: 'active' }, 200, 'label'), undefined)
+  const queued = freebuffSessionStatusError({ status: 'queued', position: 3 }, 200, 'label')
+  assert.equal(queued?.code, 'RATE_LIMIT')
+  assert.match(queued?.message ?? '', /waiting room/)
 })
 
 test('freebuff: 429 concurrency_busy is a rate limit with the reference 2s window', async () => {
@@ -498,7 +623,7 @@ test('freebuff: 429 concurrency_busy is a rate limit with the reference 2s windo
 })
 
 test('freebuff: a 429 with only plural wording still discloses a wait', async () => {
-  const error = await freebuffResponseError(429, new Headers(), 'Too Many Requests', 'freebuff web')
+  const error = await freebuffResponseError(429, new Headers(), 'Too Many Requests', 'freebuff desktop')
   assert.equal(error.code, 'RATE_LIMIT')
   const delay = error.failure.providerRetryAfterMs ?? 0
   assert.ok(delay >= 59_000 && delay <= 61_000, `expected about a minute, got ${String(delay)}`)
@@ -514,9 +639,9 @@ test('freebuff: a 429 with only plural wording still discloses a wait', async ()
 })
 
 test('freebuff: 401 is AUTH and 500 is SERVER', async () => {
-  const unauthorized = await freebuffResponseError(401, new Headers(), '', 'freebuff web')
+  const unauthorized = await freebuffResponseError(401, new Headers(), '', 'freebuff desktop')
   assert.equal(unauthorized.code, 'AUTH')
-  const server = await freebuffResponseError(503, new Headers(), 'boom', 'freebuff web')
+  const server = await freebuffResponseError(503, new Headers(), 'boom', 'freebuff desktop')
   assert.equal(server.code, 'SERVER')
 })
 
@@ -539,12 +664,12 @@ test('freebuff: a 200 error envelope is refused in the upstream own words', () =
 })
 
 test('freebuff: a bare text code in a 200 body is also a refusal', () => {
-  const waiting = freebuffBodyRefusal('waiting_room_queued', 200, 'freebuff web')
+  const waiting = freebuffBodyRefusal('waiting_room_queued', 200, 'freebuff desktop')
   assert.equal(waiting?.code, 'RATE_LIMIT')
   const delay = waiting?.failure.providerRetryAfterMs ?? 0
   assert.ok(delay >= FREEBUFF_QUEUE_RETRY_MS - 100 && delay <= FREEBUFF_QUEUE_RETRY_MS + 100)
 
-  const unauthorized = freebuffBodyRefusal('{"message":"session expired"}', 200, 'freebuff web')
+  const unauthorized = freebuffBodyRefusal('{"message":"session expired"}', 200, 'freebuff desktop')
   assert.equal(unauthorized?.code, 'AUTH')
 })
 
@@ -554,19 +679,15 @@ test('freebuff: model OUTPUT is never mistaken for a refusal', () => {
   const frame = 'data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"rate limit"},"finish_reason":null}]}\n\n'
   assert.equal(freebuffBodyRefusal(frame, 200, 'freebuff chat-completions'), undefined)
   assert.equal(freebuffBodyRefusal('{"choices":[{"delta":{"content":"unauthorized"}}]}', 200, 'freebuff x'), undefined)
-  // The web protocol's events carry a `type` tag instead of `choices`, and the
-  // same words can appear inside a delta's own text.
+  // The desktop protocol's frames also carry `usage` and `object`, and a frame
+  // whose model output is reasoning text matches the same words.
   assert.equal(
-    freebuffBodyRefusal('data: {"type":"delta","text":"the rate limit was reached"}\n\n', 200, 'freebuff web'),
+    freebuffBodyRefusal('data: {"object":"chat.completion.chunk","choices":[{"delta":{"content":"the rate limit was reached"}}],"usage":null}\n\n', 200, 'freebuff desktop'),
     undefined,
   )
-  assert.equal(
-    freebuffBodyRefusal('data: {"type":"reasoning_delta","text":"session expired"}\n\n', 200, 'freebuff web'),
-    undefined,
-  )
-  // But a web body that really is an error envelope is still refused.
+  // But a body that really is an error envelope is still refused.
   assert.notEqual(
-    freebuffBodyRefusal('data: {"type":"error","error":{"message":"session expired"}}\n\n', 200, 'freebuff web'),
+    freebuffBodyRefusal('data: {"error":{"message":"session expired"}}\n\n', 200, 'freebuff desktop'),
     undefined,
   )
 })
@@ -574,7 +695,7 @@ test('freebuff: model OUTPUT is never mistaken for a refusal', () => {
 test('freebuff: the guard turns a 200 refusal into a thrown error, not an empty stream', async () => {
   const body = new Response(JSON.stringify({ error: { message: 'free mode is unavailable right now' } })).body
   assert.notEqual(body, null)
-  const guarded = freebuffGuardStream(body as ReadableStream<Uint8Array>, { label: 'freebuff web', status: 200 })
+  const guarded = freebuffGuardStream(body as ReadableStream<Uint8Array>, { label: 'freebuff desktop', status: 200 })
   await assert.rejects(
     async () => await new Response(guarded).text(),
     (error: unknown) => error instanceof LlmError && /free mode is unavailable right now/.test(error.message),
@@ -583,219 +704,38 @@ test('freebuff: the guard turns a 200 refusal into a thrown error, not an empty 
 
 test('freebuff: a real stream passes the guard through untouched', async () => {
   const sse = [
-    'data: {"type":"delta","text":"hi"}\n\n',
-    'data: {"type":"done"}\n\n',
+    'data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}\n\n',
+    'data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
   ].join('')
   const guarded = freebuffGuardStream(new Response(sse).body as ReadableStream<Uint8Array>, {
-    label: 'freebuff web',
+    label: 'freebuff desktop',
     status: 200,
   })
-  const translated = freebuffWebToChatCompletions(guarded, { label: 'freebuff web' })
-  const text = await new Response(translated).text()
-  assert.match(text, /"content":"hi"/)
-  assert.match(text, /data: \[DONE\]/)
-})
-
-test('freebuff web: the event vocabulary is the reference enum', () => {
-  // `src/web_protocol.rs:95-162` names twelve `type` tags (plus an `#[serde(other)]`
-  // catch-all), which is the "eleven-ish event types" the protocol is described by.
-  assert.deepEqual([...FREEBUFF_WEB_EVENT_TYPES], [
-    'meta', 'title', 'reasoning_delta', 'delta', 'suggestions', 'agent_start',
-    'agent_tool', 'agent_tool_done', 'agent_delta', 'agent_finish', 'button', 'done',
-  ])
-})
-
-/** One chunk of a translated web stream, as the choices of a chat-completions chunk. */
-interface TranslatedChoice {
-  index: number
-  delta: Record<string, unknown>
-  finish_reason: string | null
-}
-
-/** The choices a translated web stream carried, in order. */
-function translatedChunks(text: string): TranslatedChoice[] {
-  return text.split('\n\n')
-    .filter(line => line.startsWith('data:') && line !== 'data: [DONE]')
-    .map(line => JSON.parse(line.slice('data:'.length).trim()) as { choices: TranslatedChoice[] })
-    .map(chunk => chunk.choices[0] as TranslatedChoice)
-}
-
-/** The upstream event field shape of one of Freebuff's own server-side tool calls. */
-function upstreamToolEvent(id: string, name: string): string {
-  return `data: ${JSON.stringify({ type: 'agent_tool', agentId: 'a1', toolCallId: id, toolName: name, label: 'searching' })}\n\n`
-}
-
-/** The once-per-stream warning a dropped upstream-only tool call produces. */
-const UPSTREAM_TOOL_WARNING =
-  'freebuff: upstream ran its own tool "web_search"; this route does not forward upstream-only tool calls'
-
-test('freebuff web: the upstream events translate into OpenAI chat chunks', async () => {
-  const sse = [
-    'data: {"type":"meta","threadId":"thread-1","model":"z-ai/glm-5.3-flash","accessTier":"free"}\n\n',
-    'data: {"type":"reasoning_delta","text":"thinking"}\n\n',
-    'data: {"type":"delta","text":"Hello"}\n\n',
-    'data: {"type":"agent_start","agentId":"a1","agentType":"researcher","name":"researcher","prompt":"p"}\n\n',
-    'data: {"type":"agent_delta","agentId":"a1","text":" world"}\n\n',
-    'data: {"type":"agent_tool_done","toolCallId":"t1"}\n\n',
-    'data: {"type":"suggestions","toolCallId":"t1","followups":[{"prompt":"p","label":"l"}]}\n\n',
-    'data: {"type":"button"}\n\n',
-    'data: {"type":"agent_finish","agentId":"a1"}\n\n',
-    'data: {"type":"done"}\n\n',
-  ].join('')
-  const threads: string[] = []
-  const translated = freebuffWebToChatCompletions(new Response(sse).body as ReadableStream<Uint8Array>, {
-    label: 'freebuff web',
-    onThread: id => threads.push(id),
-  })
-  const text = await new Response(translated).text()
-  const chunks = translatedChunks(text)
-  assert.deepEqual(threads, ['thread-1'])
-  // Chunks come out in the reference's per-event order — reasoning, then content
-  // — and every event the reference ignores produces nothing at all.
-  const deltas = chunks.map(chunk => chunk.delta).filter(delta => Object.keys(delta).length > 0)
-  assert.deepEqual(deltas, [
-    { reasoning_content: 'thinking' },
-    { content: 'Hello' },
-    // `agent_delta` carries tool-produced prose and must reach content, not be
-    // dropped; its leading space is content, not padding.
-    { content: ' world' },
-  ])
-  assert.equal(chunks.at(-1)?.finish_reason, 'stop')
-  assert.equal(text.endsWith('data: [DONE]\n\n'), true)
-})
-
-test('freebuff web: an upstream-only tool call never becomes a harness tool call', async () => {
-  // The LIVE shape (2026-09-28): four of Freebuff's OWN server-side `web_search`
-  // calls inside one turn, `arguments:"{}"` because upstream never streams them,
-  // around the answer text — the turn upstream would have us finish `tool_calls`.
-  // Those blocks are what made DSH try to run a tool it has no handler for.
-  const warnings: string[] = []
-  const sse = [
-    'data: {"type":"meta","threadId":"t-live"}\n\n',
-    upstreamToolEvent('53r53sozGTI', 'web_search'),
-    'data: {"type":"delta","text":"The date is"}\n\n',
-    upstreamToolEvent('53sB45Py0FM', 'web_search'),
-    upstreamToolEvent('53sLKSLm0S4', 'web_search'),
-    'data: {"type":"delta","text":" today."}\n\n',
-    upstreamToolEvent('53sRinCshao', 'web_search'),
-    'data: {"type":"done"}\n\n',
-  ].join('')
-  const text = await new Response(freebuffWebToChatCompletions(
-    new Response(sse).body as ReadableStream<Uint8Array>,
-    { label: 'freebuff web', onWarn: message => warnings.push(message) },
-  )).text()
-  const chunks = translatedChunks(text)
-  assert.equal(text.includes('tool_calls'), false, 'no tool-call delta may reach the harness')
-  assert.equal(text.includes('call_53r53sozGTI'), false, 'not even the id')
-  // The answer still streams, in order and intact.
-  const deltas = chunks.map(chunk => chunk.delta).filter(delta => Object.keys(delta).length > 0)
-  assert.deepEqual(deltas, [{ content: 'The date is' }, { content: ' today.' }])
-  assert.equal(chunks.at(-1)?.finish_reason, 'stop', 'a normal completion, not a harness tool-call finish')
-  assert.equal(text.endsWith('data: [DONE]\n\n'), true)
-  assert.deepEqual(warnings, [UPSTREAM_TOOL_WARNING], 'exactly ONE warning for four upstream tool calls')
-})
-
-test('freebuff web: a turn of nothing but upstream tool events still finishes cleanly', async () => {
-  // The whole turn is Freebuff's own server-side work: no text delta at all. What
-  // must NOT happen is a `tool-call` block (dangling forever, waiting for a result
-  // nobody sends) or a `tool_calls` finish telling the harness to go run one.
-  const warnings: string[] = []
-  const sse = [
-    'data: {"type":"meta","threadId":"t-only"}\n\n',
-    upstreamToolEvent('53r53sozGTI', 'web_search'),
-    upstreamToolEvent('53sB45Py0FM', 'web_search'),
-    'data: {"type":"done"}\n\n',
-  ].join('')
-  const text = await new Response(freebuffWebToChatCompletions(
-    new Response(sse).body as ReadableStream<Uint8Array>,
-    { label: 'freebuff web', onWarn: message => warnings.push(message) },
-  )).text()
-  // Exactly one choice reaches the wire: the terminal chunk, then the sentinel.
-  // (One layer up, `streamChatCompletions` maps a completed answer with NO content
-  // at all to its own `EMPTY_RESPONSE` finish — harness-wide behaviour for an
-  // empty answer, not a dangling tool call. This route's part is the normal `stop`
-  // chunk asserted here, and the adapter-level test below covers the text case.)
-  assert.deepEqual(translatedChunks(text), [{ index: 0, delta: {}, finish_reason: 'stop' }])
-  assert.equal(text.endsWith('data: [DONE]\n\n'), true)
-  assert.deepEqual(warnings, [UPSTREAM_TOOL_WARNING])
-})
-
-test('freebuff web: an upstream EOF without done still terminates the stream', async () => {
-  const sse = 'data: {"type":"delta","text":"partial"}\n\n'
-  const translated = freebuffWebToChatCompletions(new Response(sse).body as ReadableStream<Uint8Array>, {
-    label: 'freebuff web',
-  })
-  const text = await new Response(translated).text()
-  assert.match(text, /"finish_reason":"stop"/)
-  assert.equal(text.endsWith('data: [DONE]\n\n'), true)
-})
-
-test('freebuff web: an in-band error envelope errors the stream with its own words', async () => {
-  const sse = 'data: {"error":{"message":"session expired","code":"unauthorized"}}\n\n'
-  const translated = freebuffWebToChatCompletions(new Response(sse).body as ReadableStream<Uint8Array>, {
-    label: 'freebuff web',
-  })
-  await assert.rejects(
-    async () => await new Response(translated).text(),
-    (error: unknown) => error instanceof LlmError && error.code === 'AUTH' && /session expired/.test(error.message),
-  )
-})
-
-test('freebuff web: the prompt flattener follows the reference rendering', () => {
-  assert.equal(freebuffWebPrompt([{ role: 'user', text: 'just this' }]), 'just this')
-  assert.equal(freebuffWebPrompt([
-    { role: 'system', text: 'be terse' },
-    { role: 'user', text: 'one' },
-    { role: 'assistant', text: 'two' },
-    { role: 'tool', text: 'three' },
-  ]), '[系统指令]\nbe terse\n\n[用户]\none\n\n[助手]\ntwo\n\n[工具结果]\nthree')
-  // A single non-system message is sent VERBATIM, with no role label.
-  assert.equal(freebuffWebPrompt([
-    { role: 'system', text: 'be terse' },
-    { role: 'user', text: 'only' },
-  ]), '[系统指令]\nbe terse\n\nonly')
-  assert.equal(freebuffWebPrompt([{ role: 'assistant', text: 'no user turn' }]), undefined)
-  assert.equal(freebuffWebPrompt([{ role: 'user', text: '   ' }]), undefined)
-  assert.equal(freebuffWebPrompt([]), undefined)
-})
-
-test('freebuff web: a tool call and its result are labelled, not dropped', () => {
-  // `[工具结果]` is the reference's own label for a tool result on this wire
-  // (`src/web_threads.rs:242`); `[工具调用]` is this route's addition, so the
-  // assistant half of the exchange keeps the result's antecedent.
-  assert.equal(freebuffWebPrompt([
-    { role: 'user', text: 'read the readme' },
-    { role: 'assistant', text: 'On it.' },
-    { role: 'tool-call', text: 'read_file: {"path":"README.md"}' },
-    { role: 'tool', text: '# hello' },
-    { role: 'user', text: 'what is its first line?' },
-  ]), '[用户]\nread the readme\n\n[助手]\nOn it.\n\n[工具调用]\nread_file: {"path":"README.md"}'
-    + '\n\n[工具结果]\n# hello\n\n[用户]\nwhat is its first line?')
+  const text = await new Response(guarded).text()
+  assert.equal(text, sse, 'a real stream is byte-for-byte untouched')
 })
 
 test('freebuff: a pasted Bearer token parses', () => {
-  const parsed = parseFreebuffPaste('Bearer abcdefghijklmnopqrst')
-  assert.deepEqual(parsed, { kind: 'bearer', token: 'abcdefghijklmnopqrst' })
+  assert.equal(parseFreebuffPaste('Bearer abcdefghijklmnopqrst'), 'abcdefghijklmnopqrst')
   // A bare token is what a user copies out of the header's value side.
-  assert.deepEqual(parseFreebuffPaste('abcdefghijklmnopqrst'), { kind: 'bearer', token: 'abcdefghijklmnopqrst' })
+  assert.equal(parseFreebuffPaste('abcdefghijklmnopqrst'), 'abcdefghijklmnopqrst')
   // The same header inside a curl command.
   const fromCurl = parseFreebuffPaste(`curl 'https://www.codebuff.com/api/v1/chat/completions' -H 'authorization: Bearer zzzzzzzzzzzzzzzz'`)
-  assert.equal(fromCurl.kind, 'bearer')
-  assert.equal(fromCurl.token, 'zzzzzzzzzzzzzzzz')
+  assert.equal(fromCurl, 'zzzzzzzzzzzzzzzz')
 })
 
-test('freebuff: a pasted cookie string parses into the trimmed session cookie', () => {
+test('freebuff: a pasted cookie string is refused, with the reason attached', () => {
   const pasted = `__Host-next-auth.csrf-token=csrf123; ${FREEBUFF_SESSION_COOKIE}=sess-token-value-1234; `
     + '__Secure-next-auth.callback-url=https%3A%2F%2Ffreebuff.com; _ga=GA1.1.999'
-  const parsed = parseFreebuffPaste(pasted)
-  assert.equal(parsed.kind, 'cookie')
-  assert.equal(parsed.token, 'sess-token-value-1234')
-  // The reference reduces a cookie header to these three cookies, session token
-  // FIRST (`src/import.rs:352-378`), and drops the analytics cookie.
-  assert.equal(parsed.cookie, `${FREEBUFF_SESSION_COOKIE}=sess-token-value-1234; __Host-next-auth.csrf-token=csrf123; `
-    + '__Secure-next-auth.callback-url=https%3A%2F%2Ffreebuff.com')
-  assert.equal(parsed.cookie?.includes('_ga='), false)
-  assert.equal(freebuffTrimCookieString('nothing here'), undefined)
+  assert.throws(() => parseFreebuffPaste(pasted), (error: unknown) =>
+    error instanceof LlmError
+    && error.code === 'UNSUPPORTED'
+    && /no `tools` field/.test(error.message)
+    && /Import from Freebuff CLI/.test(error.message))
+  // Even a lone session-token pair, which is the shape a user copies out of
+  // DevTools, is refused — not silently replayed as a Bearer.
+  assert.throws(() => parseFreebuffPaste(`${FREEBUFF_SESSION_COOKIE}=sess-token-value-1234`), (error: unknown) =>
+    error instanceof LlmError && error.code === 'UNSUPPORTED')
 })
 
 test('freebuff: junk does not become a credential', () => {
@@ -818,7 +758,14 @@ test('freebuff: a HAR document yields the credential it recorded', () => {
       }],
     },
   })
-  assert.deepEqual(parseFreebuffPaste(har), { kind: 'bearer', token: 'har-token-value-9876' })
+  assert.equal(parseFreebuffPaste(har), 'har-token-value-9876')
+  // A HAR whose only credential is a cookie is NOT a credential here: the
+  // session-token marker is what makes it one, and it is refused by name.
+  const cookieHar = JSON.stringify({
+    log: { entries: [{ request: { headers: [{ name: 'cookie', value: `${FREEBUFF_SESSION_COOKIE}=abc123` }] } }] },
+  })
+  assert.throws(() => parseFreebuffPaste(cookieHar), (error: unknown) =>
+    error instanceof LlmError && error.code === 'UNSUPPORTED')
 })
 
 test('freebuff: the roster file parser takes declared ids and skips agent names', () => {
@@ -982,310 +929,159 @@ async function collect(stream: AsyncIterable<StreamChunk>): Promise<StreamChunk[
   return chunks
 }
 
-test('freebuff adapter: a Bearer session streams through the desktop protocol', async () => {
-  const requests: { url: string, body: string, authorization: string | undefined }[] = []
+/** The CLI's own free-agent/mode pairs, as the admission answer spells them. */
+const ADMISSION_ACTIVE = JSON.stringify({ status: 'active', accessTier: 'limited', instanceId: 'server-assigned' })
+const RUN_ANSWER = JSON.stringify({ runId: 'run-1' })
+
+/** One OpenAI-shaped SSE answer, as the desktop wire sends it. */
+const DESKTOP_SSE = [
+  'data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}\n\n',
+  'data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+  'data: [DONE]\n\n',
+].join('')
+
+/** One request the adapter made, whatever it was. */
+interface MadeRequest {
+  url: string
+  method: string
+  body: string
+  headers: Headers
+}
+
+/**
+ * A fetcher that answers the CLI bootstrap and the chat, recording every request.
+ *
+ * The bootstrap is answered from the constants above unless the test overrides a
+ * leg, which is how the refusal paths are driven without inventing a shape.
+ */
+function bootstrapFetch(
+  requests: MadeRequest[],
+  overrides: {
+    admission?: () => Response
+    run?: () => Response
+    chat?: () => Response
+  } = {},
+): (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> {
+  return (input, init) => {
+    const url = String(input)
+    requests.push({
+      url,
+      method: init?.method ?? 'GET',
+      body: String(init?.body ?? ''),
+      headers: new Headers(init?.headers),
+    })
+    if (url.endsWith('/api/v1/freebuff/session/admission')) {
+      return Promise.resolve(overrides.admission?.() ?? new Response(ADMISSION_ACTIVE, { status: 200 }))
+    }
+    if (url.endsWith('/api/v1/agent-runs')) {
+      return Promise.resolve(overrides.run?.() ?? new Response(RUN_ANSWER, { status: 200 }))
+    }
+    return Promise.resolve(overrides.chat?.() ?? new Response(DESKTOP_SSE, { status: 200 }))
+  }
+}
+
+test('freebuff adapter: a turn bootstraps the session and the run, then streams', async () => {
+  const requests: MadeRequest[] = []
+  const { adapter, sessions } = adapterOf({ fetchFn: bootstrapFetch(requests) })
+  const chunks = await collect(adapter.streamAccount(generateOptions('stealth/space-bunny-alpha'), [...sessions.keys()][0] as string))
+  assert.equal(chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''), 'hi')
+
+  // The sequence is the CLI's own: admit, start a run, chat.
+  assert.deepEqual(requests.map(request => request.url), [
+    `${FREEBUFF_API_BASE}${FREEBUFF_SESSION_ADMISSION_PATH}`,
+    `${FREEBUFF_API_BASE}/api/v1/agent-runs`,
+    `${FREEBUFF_API_BASE}${FREEBUFF_CHAT_PATH}`,
+  ])
+  assert.deepEqual(requests.map(request => request.method), ['POST', 'POST', 'POST'])
+  for (const request of requests) {
+    assert.equal(request.headers.get('authorization'), `Bearer ${SESSION.accessToken}`)
+  }
+  // The admission is bound to the MODEL and to this credential's cli: instance.
+  const admission = requests[0]
+  assert.equal(admission?.headers.get('x-freebuff-model'), 'stealth/space-bunny-alpha')
+  assert.equal(admission?.headers.get('x-freebuff-instance-id'), freebuffInstanceId(SESSION.accessToken))
+  assert.equal(admission?.headers.get('x-freebuff-wallet-spend-limit'), '0')
+  assert.equal(admission?.headers.get('x-freebuff-multi-session'), '1')
+  // The run is started for the MODEL-SPECIFIC free agent, which is what free mode
+  // validates; the generic `base2-free` is the reference's fallback and would be
+  // refused for this model.
+  assert.deepEqual(JSON.parse(requests[1]?.body ?? '{}'), {
+    action: 'START',
+    agentId: 'base2-free-space-bunny-alpha',
+    ancestorRunIds: [],
+  })
+  // And the chat carries the run id plus the cli identity.
+  const chat = JSON.parse(requests[2]?.body ?? '{}') as Record<string, unknown>
+  assert.equal(chat.model, 'stealth/space-bunny-alpha')
+  // This model has no effort ladder, so the field is absent rather than guessed.
+  assert.equal('reasoning_effort' in chat, false)
+  const metadata = chat.codebuff_metadata as Record<string, unknown>
+  assert.equal(metadata.run_id, 'run-1')
+  assert.equal(metadata.surface, 'cli')
+  assert.equal(metadata.freebuff_multi_session, '1')
+  assert.equal(metadata.cost_mode, 'free')
+})
+
+test('freebuff adapter: a refused session admission is reported with the upstream status', async () => {
+  const requests: MadeRequest[] = []
   const { adapter, sessions } = adapterOf({
-    fetchFn: async (input, init) => {
-      const headers = new Headers(init?.headers)
-      requests.push({
-        url: String(input),
-        body: String(init?.body ?? ''),
-        authorization: headers.get('authorization') ?? undefined,
-      })
-      return new Response([
-        'data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}\n\n',
-        'data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
-        'data: [DONE]\n\n',
-      ].join(''), { status: 200 })
-    },
+    fetchFn: bootstrapFetch(requests, {
+      admission: () => new Response(JSON.stringify({
+        status: 'purchase_capacity',
+        concurrency: 'slot-bound',
+        slotLimit: 1,
+        currentInstanceId: '8fe895f8-43fc-4f4a-41e3-971277cdf538',
+      }), { status: 409 }),
+    }),
   })
-  const options = { ...generateOptions('z-ai/glm-5.3-flash'), reasoningEffort: ReasoningEffortId('high') }
-  const chunks = await collect(adapter.streamAccount(options, [...sessions.keys()][0] as string))
-  const text = chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join('')
-  assert.equal(text, 'hi')
-  assert.equal(requests.length, 1)
-  assert.equal(requests[0]?.url, `${FREEBUFF_API_BASE}${FREEBUFF_CHAT_PATH}`)
-  assert.equal(requests[0]?.authorization, `Bearer ${SESSION.accessToken}`)
-  assert.equal((JSON.parse(requests[0]?.body ?? '{}') as Record<string, unknown>).reasoning_effort, 'high')
-})
-
-test('freebuff adapter: a cookie session streams through the web protocol', async () => {
-  const sessions = new Map<string, FreebuffSession>([['cookie-account', {
-    accessToken: 'sess-value-123456',
-    refreshToken: 'sess-value-123456',
-    expiresAt: Date.now() + 3_600_000,
-    cookie: `${FREEBUFF_SESSION_COOKIE}=sess-value-123456`,
-  }]])
-  const urls: string[] = []
-  const adapter = new FreebuffAdapter({
-    models: [],
-    streamIdleTimeoutMs: 5_000,
-    tokens: tokensOf(sessions),
-    discovery: false,
-    fetchFn: async (input) => {
-      urls.push(String(input))
-      return new Response([
-        'data: {"type":"meta","threadId":"t-9"}\n\n',
-        'data: {"type":"delta","text":"from the web"}\n\n',
-        'data: {"type":"done"}\n\n',
-      ].join(''), { status: 200 })
-    },
-  })
-  const chunks = await collect(adapter.streamAccount(generateOptions('z-ai/glm-5.3-flash'), 'cookie-account'))
-  const text = chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join('')
-  assert.equal(text, 'from the web')
-  assert.deepEqual(urls, [`${FREEBUFF_WEB_BASE}${FREEBUFF_WEB_CHAT_PATH}`])
-})
-
-test('freebuff adapter: upstream-only tool calls never reach the harness', async () => {
-  // The end-to-end shape of the reported breakage: the web wire tells the harness
-  // Freebuff ran `web_search`, the harness tries to run a tool it never declared
-  // (and has no handler for), and the turn breaks. Nothing may reach it.
-  const sessions = new Map<string, FreebuffSession>([['cookie-account', {
-    accessToken: 'sess-value-123456',
-    refreshToken: 'sess-value-123456',
-    expiresAt: Date.now() + 3_600_000,
-    cookie: `${FREEBUFF_SESSION_COOKIE}=sess-value-123456`,
-  }]])
-  const warnings: string[] = []
-  const adapter = new FreebuffAdapter({
-    models: [],
-    streamIdleTimeoutMs: 5_000,
-    tokens: tokensOf(sessions),
-    discovery: false,
-    onWarn: message => warnings.push(message),
-    fetchFn: async () => new Response([
-      'data: {"type":"meta","threadId":"t-live"}\n\n',
-      upstreamToolEvent('53r53sozGTI', 'web_search'),
-      'data: {"type":"delta","text":"The date is"}\n\n',
-      upstreamToolEvent('53sB45Py0FM', 'web_search'),
-      'data: {"type":"delta","text":" today."}\n\n',
-      'data: {"type":"done"}\n\n',
-    ].join(''), { status: 200 }),
-  })
-  const chunks = await collect(adapter.streamAccount(generateOptions('z-ai/glm-5.3-flash'), 'cookie-account'))
-  const text = chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join('')
-  assert.equal(text, 'The date is today.', 'the answer text is intact')
-  assert.equal(chunks.some(chunk => chunk.type === 'tool-call-delta'), false)
-  const blocks = chunks.filter(chunk => chunk.type === 'block-end').map(chunk => chunk.block)
-  assert.equal(blocks.some(block => block.type === 'tool-call'), false, 'no tool-call block, so nothing dangles')
-  // The turn ends with a finish of its own, and it is NOT the harness's
-  // `tool-calls` reason — that is what would leave DSH waiting for a result.
-  assert.deepEqual(chunks.filter(chunk => chunk.type === 'finish').map(chunk => chunk.reason), [{ kind: 'stop' }])
-  assert.deepEqual(warnings, [UPSTREAM_TOOL_WARNING])
-})
-
-test('freebuff adapter: the web protocol refuses an image rather than dropping it', async () => {
-  const sessions = new Map<string, FreebuffSession>([['cookie-account', {
-    accessToken: 'sess-value-123456',
-    refreshToken: 'sess-value-123456',
-    expiresAt: Date.now() + 3_600_000,
-    cookie: `${FREEBUFF_SESSION_COOKIE}=sess-value-123456`,
-  }]])
-  let called = false
-  // A mounted attachment store, so `resolveImages` gets past its own
-  // missing-service check and the refusal under test is the one that fires.
-  const attachments = {
-    readImage: async () => ({ ref: { mediaType: 'image/png' }, data: new Uint8Array([1, 2, 3]) }),
-  } as unknown as AttachmentStore
-  const adapter = new FreebuffAdapter({
-    models: [],
-    streamIdleTimeoutMs: 5_000,
-    tokens: tokensOf(sessions),
-    discovery: false,
-    resolveAttachments: () => attachments,
-    fetchFn: async () => {
-      called = true
-      return new Response('', { status: 200 })
-    },
-  })
-  const options: GenerateOptions = {
-    ...generateOptions('z-ai/glm-5.3-flash'),
-    messages: [{
-      id: MessageId('m-img'),
-      role: 'user',
-      content: [
-        { type: 'text', text: 'what is this' },
-        { type: 'image', attachment: { attachmentId: AttachmentId('a-1'), mediaType: 'image/png', bytes: 12, width: 2, height: 2 } },
-      ],
-      source: { kind: 'user' },
-    }],
-  }
   await assert.rejects(
-    async () => await collect(adapter.streamAccount(options, 'cookie-account')),
-    (error: unknown) => error instanceof LlmError && /cannot carry images/.test(error.message),
+    async () => await collect(adapter.streamAccount(generateOptions('stealth/space-bunny-alpha'), [...sessions.keys()][0] as string)),
+    (error: unknown) => error instanceof LlmError
+      && error.code === 'HTTP_409'
+      && /only free slot/.test(error.message),
   )
-  assert.equal(called, false, 'the refusal happens before any upstream call')
+  // Nothing downstream of the admission was attempted.
+  assert.equal(requests.some(request => request.url.endsWith('/api/v1/chat/completions')), false)
 })
 
-test('freebuff adapter: a turn that declares tools is refused on the web wire', async () => {
-  // The live-reported defect: with a cookie credential the harness's tool schemas
-  // never reached upstream, the model answered as a plain chat assistant, and
-  // every local capability (file read/write, shell, glob/grep) silently vanished.
-  // The wire cannot carry them (see the client module doc), so the turn is refused
-  // instead of downgraded.
+test('freebuff adapter: a run bootstrap without a runId is a malformed answer, not a chat', async () => {
+  const requests: MadeRequest[] = []
+  const { adapter, sessions } = adapterOf({
+    fetchFn: bootstrapFetch(requests, { run: () => new Response(JSON.stringify({ ok: true }), { status: 200 }) }),
+  })
+  await assert.rejects(
+    async () => await collect(adapter.streamAccount(generateOptions('stealth/space-bunny-alpha'), [...sessions.keys()][0] as string)),
+    (error: unknown) => error instanceof LlmError && error.code === 'MALFORMED_RESPONSE' && /runId/.test(error.message),
+  )
+  assert.equal(requests.some(request => request.url.endsWith('/api/v1/chat/completions')), false)
+})
+
+test('freebuff adapter: a cookie session never reaches the wire', async () => {
+  const requests: MadeRequest[] = []
   const sessions = new Map<string, FreebuffSession>([['cookie-account', {
     accessToken: 'sess-value-123456',
     refreshToken: 'sess-value-123456',
     expiresAt: Date.now() + 3_600_000,
     cookie: `${FREEBUFF_SESSION_COOKIE}=sess-value-123456`,
   }]])
-  let called = false
   const adapter = new FreebuffAdapter({
     models: [],
     streamIdleTimeoutMs: 5_000,
     tokens: tokensOf(sessions),
     discovery: false,
-    fetchFn: async () => {
-      called = true
-      return new Response('data: {"type":"delta","text":"plain answer"}\n\ndata: {"type":"done"}\n\n', { status: 200 })
-    },
+    fetchFn: bootstrapFetch(requests),
   })
-  const options: GenerateOptions = {
-    ...generateOptions('z-ai/glm-5.3-flash'),
-    tools: [{
-      name: 'read_file',
-      description: 'Read a file',
-      parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
-    }],
-  }
   await assert.rejects(
-    async () => await collect(adapter.streamAccount(options, 'cookie-account')),
+    async () => await collect(adapter.streamAccount(generateOptions('z-ai/glm-5.3-flash'), 'cookie-account')),
     (error: unknown) => error instanceof LlmError && error.code === 'UNSUPPORTED'
-      && /cannot carry tools/.test(error.message)
-      && /no `tools` field/.test(error.message)
-      && /1 tool schema/.test(error.message),
+      && /cookie credentials are no longer accepted/.test(error.message),
   )
-  assert.equal(called, false, 'the refusal happens before any upstream call')
-  // A turn WITHOUT tools still streams: the refusal is scoped to tool-declaring
-  // turns, and plain chat on this wire is unaffected.
-  const web = await collect(adapter.streamAccount(generateOptions('z-ai/glm-5.3-flash'), 'cookie-account'))
-  assert.equal(called, true)
-  assert.equal(web.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''), 'plain answer')
+  assert.deepEqual(requests, [], 'not one request goes out for a cookie credential')
 })
 
-test('freebuff adapter: a tool turn rides the web prompt as labelled text', async () => {
-  const sessions = new Map<string, FreebuffSession>([['cookie-account', {
-    accessToken: 'sess-value-123456',
-    refreshToken: 'sess-value-123456',
-    expiresAt: Date.now() + 3_600_000,
-    cookie: `${FREEBUFF_SESSION_COOKIE}=sess-value-123456`,
-  }]])
-  const bodies: Record<string, unknown>[] = []
-  const adapter = new FreebuffAdapter({
-    models: [],
-    streamIdleTimeoutMs: 5_000,
-    tokens: tokensOf(sessions),
-    discovery: false,
-    fetchFn: async (_input, init) => {
-      bodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
-      return new Response('data: {"type":"delta","text":"ok"}\n\ndata: {"type":"done"}\n\n', { status: 200 })
-    },
-  })
-  const options: GenerateOptions = {
-    ...generateOptions('z-ai/glm-5.3-flash'),
-    messages: [
-      {
-        id: MessageId('m-1'),
-        role: 'user',
-        content: [{ type: 'text', text: 'read the readme' }],
-        source: { kind: 'user' },
-      },
-      {
-        id: MessageId('m-2'),
-        role: 'assistant',
-        content: [{ type: 'tool-call', id: ToolCallId('call_1'), name: 'read_file', arguments: '{"path":"README.md"}' }],
-        source: { kind: 'model', provider: 'freebuff', model: 'z-ai/glm-5.3-flash' },
-      },
-      {
-        id: MessageId('m-3'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('call_1'),
-          content: [{ type: 'text', text: '# hello' }],
-        }],
-        source: { kind: 'tool', callId: ToolCallId('call_1') },
-      },
-      {
-        id: MessageId('m-4'),
-        role: 'user',
-        content: [{ type: 'text', text: 'what is its first line?' }],
-        source: { kind: 'user' },
-      },
-    ],
-  }
-  const chunks = await collect(adapter.streamAccount(options, 'cookie-account'))
-  assert.equal(chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''), 'ok')
-  const body = bodies[0] ?? {}
-  assert.equal(
-    body.content,
-    '[用户]\nread the readme\n\n[工具调用]\nread_file: {"path":"README.md"}\n\n[工具结果]\n# hello'
-    + '\n\n[用户]\nwhat is its first line?',
-  )
-  assert.equal('tools' in body, false, 'the web body has no tools field to put schemas in')
-  assert.equal(body.threadId, null)
-})
-
-test('freebuff adapter: a legacy tool-result block inside a user message is kept', async () => {
-  const sessions = new Map<string, FreebuffSession>([['cookie-account', {
-    accessToken: 'sess-value-123456',
-    refreshToken: 'sess-value-123456',
-    expiresAt: Date.now() + 3_600_000,
-    cookie: `${FREEBUFF_SESSION_COOKIE}=sess-value-123456`,
-  }]])
-  const bodies: Record<string, unknown>[] = []
-  const adapter = new FreebuffAdapter({
-    models: [],
-    streamIdleTimeoutMs: 5_000,
-    tokens: tokensOf(sessions),
-    discovery: false,
-    fetchFn: async (_input, init) => {
-      bodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
-      return new Response('data: {"type":"delta","text":"ok"}\n\ndata: {"type":"done"}\n\n', { status: 200 })
-    },
-  })
-  const options: GenerateOptions = {
-    ...generateOptions('z-ai/glm-5.3-flash'),
-    messages: [
-      {
-        id: MessageId('m-1'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('call_1'),
-          content: [{ type: 'text', text: '# hello' }],
-        }],
-        source: { kind: 'user' },
-      },
-      {
-        id: MessageId('m-2'),
-        role: 'user',
-        content: [{ type: 'text', text: 'what is its first line?' }],
-        source: { kind: 'user' },
-      },
-    ],
-  }
-  await collect(adapter.streamAccount(options, 'cookie-account'))
-  assert.equal(
-    bodies[0]?.content,
-    '[工具结果]\n# hello\n\n[用户]\nwhat is its first line?',
-    'the tool result inside the block reaches the prompt instead of vanishing',
-  )
-})
-
-test('freebuff adapter: the desktop wire carries tools and tool turns unchanged', async () => {
-  let body: Record<string, unknown> = {}
-  const { adapter, sessions } = adapterOf({
-    fetchFn: async (_input, init) => {
-      body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
-      return new Response([
-        'data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}\n\n',
-        'data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
-        'data: [DONE]\n\n',
-      ].join(''), { status: 200 })
-    },
-  })
+test('freebuff adapter: the desktop body carries tools and tool turns unchanged', async () => {
+  const requests: MadeRequest[] = []
+  const { adapter, sessions } = adapterOf({ fetchFn: bootstrapFetch(requests) })
   const options: GenerateOptions = {
     ...generateOptions('z-ai/glm-5.3-flash'),
     tools: [{
@@ -1319,6 +1115,7 @@ test('freebuff adapter: the desktop wire carries tools and tool turns unchanged'
     ],
   }
   await collect(adapter.streamAccount(options, [...sessions.keys()][0] as string))
+  const body = JSON.parse(requests.at(-1)?.body ?? '{}') as Record<string, unknown>
   // The desktop body forwards the caller's tools unchanged (the reference passes
   // the inbound body through, `src/api.rs:2707-2708`), and the tool exchange is
   // native here: `tool_calls` on the assistant turn, `role:"tool"` for the result.
@@ -1341,8 +1138,40 @@ test('freebuff adapter: the desktop wire carries tools and tool turns unchanged'
   ])
 })
 
+test('freebuff adapter: an image rides the desktop body inline', async () => {
+  const requests: MadeRequest[] = []
+  // A mounted attachment store, so `resolveImages` gets past its own
+  // missing-service check and the image under test is the one that is carried.
+  const attachments = {
+    readImage: async () => ({ ref: { mediaType: 'image/png' }, data: new Uint8Array([1, 2, 3]) }),
+  } as unknown as AttachmentStore
+  const { adapter, sessions } = adapterOf({
+    fetchFn: bootstrapFetch(requests),
+    resolveAttachments: () => attachments,
+  })
+  const options: GenerateOptions = {
+    ...generateOptions('z-ai/glm-5.3-flash'),
+    messages: [{
+      id: MessageId('m-img'),
+      role: 'user',
+      content: [
+        { type: 'text', text: 'what is this' },
+        { type: 'image', attachment: { attachmentId: AttachmentId('a-1'), mediaType: 'image/png', bytes: 12, width: 2, height: 2 } },
+      ],
+      source: { kind: 'user' },
+    }],
+  }
+  await collect(adapter.streamAccount(options, [...sessions.keys()][0] as string))
+  const body = JSON.parse(requests.at(-1)?.body ?? '{}') as { messages: { content: unknown }[] }
+  const content = body.messages[0]?.content
+  assert.equal(Array.isArray(content), true, 'the desktop protocol takes content PARTS, images included')
+})
+
 test('freebuff adapter: a 401 from upstream is an AUTH failure', async () => {
-  const { adapter, sessions } = adapterOf({ fetchFn: async () => new Response('', { status: 401 }) })
+  const requests: MadeRequest[] = []
+  const { adapter, sessions } = adapterOf({
+    fetchFn: bootstrapFetch(requests, { chat: () => new Response('', { status: 401 }) }),
+  })
   await assert.rejects(
     async () => await collect(adapter.streamAccount(generateOptions('z-ai/glm-5.3-flash'), [...sessions.keys()][0] as string)),
     (error: unknown) => error instanceof LlmError && error.code === 'AUTH' && error.failure.status === 401,
@@ -1350,10 +1179,13 @@ test('freebuff adapter: a 401 from upstream is an AUTH failure', async () => {
 })
 
 test('freebuff adapter: a 200 refusal surfaces the upstream own words', async () => {
+  const requests: MadeRequest[] = []
   const { adapter, sessions } = adapterOf({
-    fetchFn: async () => new Response(JSON.stringify({
-      error: { message: 'free mode is paused for this account', code: 'free_mode_invalid' },
-    }), { status: 200 }),
+    fetchFn: bootstrapFetch(requests, {
+      chat: () => new Response(JSON.stringify({
+        error: { message: 'free mode is paused for this account', code: 'free_mode_invalid' },
+      }), { status: 200 }),
+    }),
   })
   await assert.rejects(
     async () => await collect(adapter.streamAccount(generateOptions('z-ai/glm-5.3-flash'), [...sessions.keys()][0] as string)),
@@ -1361,16 +1193,43 @@ test('freebuff adapter: a 200 refusal surfaces the upstream own words', async ()
   )
 })
 
+test('freebuff adapter: the free_mode_cli_required gate reaches the caller verbatim', async () => {
+  // The live 2026-09-28 answer for a real free CLI credential, byte for byte.
+  const requests: MadeRequest[] = []
+  const { adapter, sessions } = adapterOf({
+    fetchFn: bootstrapFetch(requests, {
+      chat: () => new Response(JSON.stringify({
+        error: 'free_mode_cli_required',
+        message: 'Free mode is only available through the freebuff CLI. Install it with `npm i -g freebuff`, then run '
+          + '`freebuff`. Calling the API directly is not supported and may get your account banned.',
+      }), { status: 403 }),
+    }),
+  })
+  await assert.rejects(
+    async () => await collect(adapter.streamAccount(generateOptions('stealth/space-bunny-alpha'), [...sessions.keys()][0] as string)),
+    (error: unknown) => error instanceof LlmError
+      && error.code === 'UNSUPPORTED'
+      && /may get your account banned/.test(error.message),
+  )
+})
+
 test('freebuff: session validation accepts a credential and reports its plan', async () => {
-  const identity = await validateFreebuffCredential({ accessToken: 'token-value' }, async () =>
-    new Response(JSON.stringify({
+  const requests: MadeRequest[] = []
+  const identity = await validateFreebuffCredential({ accessToken: 'token-value' }, (input, init) => {
+    requests.push({ url: String(input), method: init?.method ?? 'GET', body: '', headers: new Headers(init?.headers) })
+    return Promise.resolve(new Response(JSON.stringify({
       accessTier: 'free',
       freebucks: { daily: { limit: 10, remaining: 7 }, planId: 'plan_free' },
     }), { status: 200 }))
+  })
   assert.equal(identity.token, 'token-value')
   // Precedence is the reference's: `subscription.tierId`, then `freebucks.planId`,
   // then the access tier (`src/api.rs:5660-5670` reads the subscription first).
   assert.equal(identity.plan, 'plan_free')
+  // And the validation IS the quota read: one GET, with the CLI keepalive flags.
+  assert.deepEqual(requests.map(request => request.url), [`${FREEBUFF_API_BASE}/api/v1/freebuff/session`])
+  assert.equal(requests[0]?.headers.get('x-freebuff-heartbeat'), '1')
+  assert.equal(requests[0]?.headers.get('x-freebuff-include-unused-rate-limits'), '1')
 })
 
 test('freebuff: a refused session validation is AUTH and therefore permanent', async () => {
@@ -1390,7 +1249,7 @@ test('freebuff: a refused session validation is AUTH and therefore permanent', a
 test('freebuff: a paste becomes a session only after the upstream honours it', async () => {
   const calls: string[] = []
   const session = await freebuffSessionFromPaste(
-    `Bearer pasted-token-value-123456`,
+    'Bearer pasted-token-value-123456',
     async (input) => {
       calls.push(String(input))
       return new Response(JSON.stringify({ accessTier: 'free', freebucks: { daily: { remaining: 3 } } }), { status: 200 })
@@ -1404,28 +1263,227 @@ test('freebuff: a paste becomes a session only after the upstream honours it', a
   assert.deepEqual(calls, [`${FREEBUFF_API_BASE}/api/v1/freebuff/session`])
 })
 
-test('freebuff: a cookie paste validates, names the account, and survives a refresh', async () => {
-  const cookie = `${FREEBUFF_SESSION_COOKIE}=sess-token-123456`
-  const session = await freebuffSessionFromPaste(cookie, async (input) => {
-    const url = String(input)
-    if (url.includes('/api/auth/session')) {
-      return new Response(JSON.stringify({ user: { email: 'person@example.com' } }), { status: 200 })
-    }
-    return new Response(JSON.stringify({ accessTier: 'free', freebucks: { daily: { remaining: 3 } } }), { status: 200 })
-  })
-  assert.equal(session.cookie, cookie)
+test('freebuff: an import supplies the display name the endpoint does not return', async () => {
+  const session = await freebuffSessionFromBearer('cli-token-value-123456', async () => new Response(JSON.stringify({
+    accessTier: 'limited',
+    freebucks: { daily: { limit: 25, spent: 15, remaining: 10 } },
+  }), { status: 200 }), undefined, { account: 'person@example.com' })
   assert.equal(session.account, 'person@example.com')
+  assert.equal(session.plan, 'limited')
+  // A refresh re-validates and keeps the identity it cannot re-read.
   const refreshed = await refreshFreebuffSession(
     { ...session, expiresAt: 0 },
-    async () => new Response(JSON.stringify({ accessTier: 'free', freebucks: { daily: { remaining: 2 } } }), { status: 200 }),
+    async () => new Response(JSON.stringify({ accessTier: 'limited', freebucks: { daily: { remaining: 9 } } }), { status: 200 }),
   )
   assert.equal(refreshed.expiresAt > Date.now(), true)
   assert.equal(refreshed.account, 'person@example.com')
-  assert.equal(refreshed.cookie, cookie)
-  assert.deepEqual(freebuffCredentialOf(refreshed), { accessToken: session.accessToken, cookie })
+  assert.deepEqual(freebuffCredentialOf(refreshed), { accessToken: session.accessToken })
 })
 
-test('freebuff: a cookie credential that lost its cookie header is not stored', () => {
-  assert.throws(() => freebuffSessionOf({ kind: 'cookie', token: 'abc' }, { token: 'abc' }), (error: unknown) =>
-    error instanceof LlmError && error.code === 'MALFORMED_RESPONSE')
+// ---------- the CLI credential import and the CLI's own browser login ----------
+
+/** A home directory with a CLI credential file, for discovery tests. */
+function tempHome(contents: string | undefined): { home: string, cleanup: () => void } {
+  const home = mkdtempSync(join(tmpdir(), 'freebuff-cli-'))
+  const dir = join(home, '.config', 'manicode')
+  mkdirSync(dir, { recursive: true })
+  if (contents !== undefined) writeFileSync(join(dir, FREEBUFF_CLI_CREDENTIALS_FILE), contents, 'utf8')
+  return { home, cleanup: () => { rmSync(home, { recursive: true, force: true }) } }
+}
+
+test('freebuff CLI: the credential path is the launcher\'s own convention', () => {
+  assert.deepEqual(freebuffCliCredentialPaths('/home/tester', {}), [
+    join('/home/tester', '.config', 'manicode', 'credentials.json'),
+  ])
+  // Windows is NOT special-cased: the launcher computes the same
+  // `.config/manicode` under `os.homedir()` on every platform, which is why a
+  // check for a Windows-style path would look in the wrong place.
+  assert.deepEqual(freebuffCliCredentialPaths('C:\\Users\\tester', {}), [
+    'C:\\Users\\tester\\.config\\manicode\\credentials.json',
+  ])
+  // And the documented override wins when set, without hiding the default.
+  assert.deepEqual(freebuffCliCredentialPaths('/home/tester', { MANICODE_CONFIG_DIR: '/opt/manicode' }), [
+    join('/opt/manicode', 'credentials.json'),
+    join('/home/tester', '.config', 'manicode', 'credentials.json'),
+  ])
+})
+
+test('freebuff CLI: the credential file parses to its DEFAULT entry', () => {
+  const parsed = parseFreebuffCliCredentials(JSON.stringify({
+    default: {
+      id: '9aadeb0d-86d1-4272-8fa7-8661bfb7617c',
+      name: 'dai pingshui',
+      email: 'person@example.com',
+      authToken: 'x'.repeat(36),
+      fingerprintId: 'enhanced-abc',
+      fingerprintHash: 'hash',
+    },
+    work: { email: 'other@example.com', authToken: 'y'.repeat(36) },
+  }))
+  assert.equal(parsed?.entry.email, 'person@example.com')
+  assert.equal(parsed?.entry.authToken, 'x'.repeat(36))
+  assert.equal(parsed?.entry.fingerprintId, 'enhanced-abc')
+  // Every profile is reported, so the import can say it took `default` alone.
+  assert.deepEqual(parsed?.profiles, ['default', 'work'])
+  // The CLI's schema requires email AND authToken; a file missing either is not a
+  // credential, and a file with no `default` is a named-profile file.
+  assert.equal(parseFreebuffCliCredentials(JSON.stringify({ default: { authToken: 'z'.repeat(36) } })), undefined)
+  assert.equal(parseFreebuffCliCredentials(JSON.stringify({ work: { email: 'a@b.c', authToken: 'z'.repeat(36) } })), undefined)
+  assert.equal(parseFreebuffCliCredentials('not json'), undefined)
+  assert.equal(parseFreebuffCliCredentials('[]'), undefined)
+})
+
+test('freebuff CLI: the import reads the file, validates the token and stores the email', async () => {
+  const { home, cleanup } = tempHome(JSON.stringify({
+    default: { email: 'person@example.com', authToken: 'cli-token-value-123456' },
+  }))
+  try {
+    const urls: string[] = []
+    const session = await importFreebuffCliCredential(async (input) => {
+      urls.push(String(input))
+      return new Response(JSON.stringify({ accessTier: 'limited', freebucks: { planId: 'free' } }), { status: 200 })
+    }, undefined, { homeDir: home, env: {} })
+    assert.equal(session.accessToken, 'cli-token-value-123456')
+    assert.equal(session.account, 'person@example.com')
+    // The import validates before storing: one read, against the balance endpoint.
+    assert.deepEqual(urls, [`${FREEBUFF_API_BASE}/api/v1/freebuff/session`])
+  } finally {
+    cleanup()
+  }
+})
+
+test('freebuff CLI: a second profile is imported as `default` alone, and says so', async () => {
+  const { home, cleanup } = tempHome(JSON.stringify({
+    default: { email: 'person@example.com', authToken: 'cli-token-value-123456' },
+    work: { email: 'other@example.com', authToken: 'other-token-value-123456' },
+  }))
+  try {
+    const warnings: string[] = []
+    const session = await importFreebuffCliCredential(
+      async () => new Response(JSON.stringify({ accessTier: 'limited' }), { status: 200 }),
+      undefined,
+      { homeDir: home, env: {}, onWarn: message => warnings.push(message) },
+    )
+    assert.equal(session.account, 'person@example.com', 'the default entry is the one imported')
+    assert.equal(warnings.length, 1)
+    assert.match(warnings[0] ?? '', /2 profiles \(default, work\)/)
+    assert.match(warnings[0] ?? '', /imported `default` only/)
+  } finally {
+    cleanup()
+  }
+})
+
+test('freebuff CLI: a missing or unusable file names every probed path', async () => {
+  const { home, cleanup } = tempHome(undefined)
+  try {
+    const probed = freebuffCliCredentialPaths(home, {})
+    await assert.rejects(
+      async () => await importFreebuffCliCredential(async () => new Response('{}', { status: 200 }), undefined, { homeDir: home, env: {} }),
+      (error: unknown) => error instanceof LlmError
+        && error.code === 'MISSING_CREDENTIAL'
+        && error.message.includes(probed[0] ?? '')
+        && /Run `freebuff` and log in/.test(error.message),
+    )
+  } finally {
+    cleanup()
+  }
+  // A file that exists but holds no usable entry reports that too.
+  const broken = tempHome('{}')
+  try {
+    await assert.rejects(
+      async () => await importFreebuffCliCredential(async () => new Response('{}', { status: 200 }), undefined, { homeDir: broken.home, env: {} }),
+      (error: unknown) => error instanceof LlmError
+        && error.code === 'MISSING_CREDENTIAL'
+        && /no usable `default` entry/.test(error.message),
+    )
+  } finally {
+    broken.cleanup()
+  }
+  // And the refusal names the ways to get one instead.
+  const message = freebuffCliFailureMessage(['C:\\a\\credentials.json'])
+  assert.match(message, /C:\\a\\credentials\.json/)
+  assert.match(message, /`freebuff` and log in/)
+  assert.match(message, /Sign in/)
+})
+
+test('freebuff CLI: the login code/status flow is the CLI\'s polling one', async () => {
+  const calls: { url: string, method: string, body: string }[] = []
+  let polls = 0
+  const login = await startFreebuffCliLogin({
+    fingerprintId: 'codebuff-cli-abcdefgh',
+    pollMs: 0,
+    timeoutMs: 5_000,
+    fetchFn: async (input, init) => {
+      const url = String(input)
+      calls.push({ url, method: init?.method ?? 'GET', body: String(init?.body ?? '') })
+      if (url === freebuffCliCodeUrl()) {
+        return new Response(JSON.stringify({
+          loginUrl: 'https://freebuff.com/cli/login?code=abc',
+          fingerprintHash: 'hash-1',
+          expiresAt: '2026-09-28T12:00:00.000Z',
+        }), { status: 200 })
+      }
+      if (url.includes('/api/auth/cli/status')) {
+        polls += 1
+        // The first poll is "not finished yet": a 200 whose body carries no `user`.
+        if (polls === 1) return new Response('{}', { status: 200 })
+        // The second carries the credential, exactly as the CLI reads it.
+        return new Response(JSON.stringify({
+          user: { id: 'u-1', email: 'person@example.com', authToken: 'cli-token-value-123456' },
+        }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ accessTier: 'limited' }), { status: 200 })
+    },
+  })
+  assert.equal(login.authorizeUrl, 'https://freebuff.com/cli/login?code=abc')
+  assert.equal(login.probe.fingerprintHash, 'hash-1')
+  const session = await login.session
+  assert.equal(session.accessToken, 'cli-token-value-123456')
+  assert.equal(session.account, 'person@example.com')
+  assert.equal(calls[0]?.url, freebuffCliCodeUrl())
+  assert.equal(calls[0]?.method, 'POST')
+  assert.deepEqual(JSON.parse(calls[0]?.body ?? '{}'), { fingerprintId: 'codebuff-cli-abcdefgh' })
+  // The status poll carries the CLI's own query set, and the credential read
+  // follows it.
+  assert.equal(calls[1]?.url, freebuffCliStatusUrl(login.probe))
+  assert.match(calls[1]?.url ?? '', /fingerprintId=codebuff-cli-abcdefgh/)
+  assert.match(calls[1]?.url ?? '', /fingerprintHash=hash-1/)
+  assert.match(calls[1]?.url ?? '', /expiresAt=2026-09-28T12%3A00%3A00.000Z/)
+  assert.equal(calls[2]?.url, freebuffCliStatusUrl(login.probe))
+  assert.equal(calls[3]?.url, `${FREEBUFF_API_BASE}/api/v1/freebuff/session`)
+})
+
+test('freebuff CLI: a login URL request that is refused does not start a poll', async () => {
+  let calls = 0
+  await assert.rejects(
+    async () => await startFreebuffCliLogin({
+      fingerprintId: 'codebuff-cli-abcdefgh',
+      fetchFn: async () => { calls += 1; return new Response('nope', { status: 500 }) },
+    }),
+    (error: unknown) => error instanceof LlmError && error.code === 'SERVER'
+      && /the CLI login URL request failed/.test(error.message),
+  )
+  assert.equal(calls, 1)
+})
+
+test('freebuff CLI: the fingerprint is the CLI fallback shape, not a fabricated device id', () => {
+  const fingerprint = freebuffCliFingerprintId(() => Buffer.from('0123456789ab', 'hex'))
+  assert.match(fingerprint, /^codebuff-cli-[A-Za-z0-9_-]{8}$/)
+  // Deterministic for a fixed draw, which is what makes it testable; the real
+  // call draws fresh randomness each time.
+  assert.equal(fingerprint, freebuffCliFingerprintId(() => Buffer.from('0123456789ab', 'hex')))
+  assert.notEqual(fingerprint, freebuffCliFingerprintId(() => Buffer.from('ba9876543210', 'hex')))
+})
+
+test('freebuff CLI: a login the user cancels rejects instead of hanging', async () => {
+  const login = await startFreebuffCliLogin({
+    fingerprintId: 'codebuff-cli-abcdefgh',
+    pollMs: 5_000,
+    fetchFn: async (input) => String(input) === freebuffCliCodeUrl()
+      ? new Response(JSON.stringify({ loginUrl: 'https://freebuff.com/x', fingerprintHash: 'h' }), { status: 200 })
+      : new Response('{}', { status: 200 }),
+  })
+  login.close()
+  await assert.rejects(async () => await login.session, (error: unknown) =>
+    error instanceof Error && error.message === 'login cancelled')
 })

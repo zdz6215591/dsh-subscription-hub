@@ -1700,10 +1700,12 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const login = useCallback(async (provider: SubscriptionProvider, method?: 'oauth' | 'keychain' | 'import'): Promise<void> => {
     if (rpc === undefined) return
     setProviderError(provider, undefined)
-    // Cline, Qoder and Freebuff have no OAuth or device flow: the credential IS
-    // something the user pastes, so the paste field is the sign-in and there is
-    // nothing to call on the host yet.
-    if (provider === 'cline' || provider === 'qoder' || provider === 'freebuff') {
+    // Cline and Qoder have no OAuth or device flow: the credential IS something
+    // the user pastes, so the paste field is the sign-in and there is nothing to
+    // call on the host yet. Freebuff is NOT in this list any more: it has both a
+    // CLI credential import and the CLI's own browser login, and each is a real
+    // host call.
+    if (provider === 'cline' || provider === 'qoder') {
       setManualOpen(prev => ({ ...prev, [provider]: true }))
       return
     }
@@ -3016,13 +3018,21 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                         </>
                       )}
                       {id === 'freebuff' && (
-                        <button
-                          type="button"
-                          style={styles.buttonSmall}
-                          onClick={() => { setManualOpen(prev => ({ ...prev, [id]: !prev[id] })) }}
-                        >
-                          {manualOpen[id] ? t('cancel') : t('loginAccount')}
-                        </button>
+                        <>
+                          <button type="button" style={styles.buttonSmall} onClick={() => { void login(id, 'oauth') }}>
+                            {t('loginAccount')}
+                          </button>
+                          <button type="button" style={styles.buttonSmall} onClick={() => { void login(id, 'import') }}>
+                            {t('importFreebuffCli')}
+                          </button>
+                          <button
+                            type="button"
+                            style={styles.buttonSmall}
+                            onClick={() => { setManualOpen(prev => ({ ...prev, [id]: !prev[id] })) }}
+                          >
+                            {manualOpen[id] ? t('cancel') : t('manualInput')}
+                          </button>
+                        </>
                       )}
 
                       {id === 'cline' && (
@@ -3143,9 +3153,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 </div>
               )}
 
-              {/* Cline's only login is a pasted API key              {/* Freebuff's only login is a pasted browser session (a Bearer token
-                  or the site's Cookie string): no OAuth client exists, so the
-                  paste field IS the sign-in, exactly as for Cline. */}
+              {/* Freebuff's manual path is a BEARER TOKEN only. The browser
+                  session cookie this field used to accept is refused now: its
+                  wire can only carry a tool-less chat, so pasting one used to
+                  silently cost the session every local tool. */}
               {!busy && id === 'freebuff' && manualOpen[id] && (
                 <div style={styles.manualBox}>
                   <p style={styles.statusLine}>{t('freebuffPasteHint')}</p>
