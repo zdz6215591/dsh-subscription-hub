@@ -4,7 +4,7 @@ Unified subscription plugin for [DeepSeek Harness](https://github.com/deepseek-a
 
 English | [中文](README.zh.md)
 
-One Settings → **Subscriptions** page for eleven subscription routes:
+One Settings → **Subscriptions** page for twelve subscription routes:
 
 | Route | Subscription | Notes |
 | --- | --- | --- |
@@ -14,6 +14,7 @@ One Settings → **Subscriptions** page for eleven subscription routes:
 | `agy` | Google Antigravity | **HTTP OAuth only** — no `agy` CLI, no flashing `cmd.exe` windows |
 | `commandcode` | Command Code Go | Import `~/.commandcode/auth.json` or paste API key (Studio optional) |
 | `cline` | Cline (ClinePass) | paste a `sk_…` key; live quota windows, **per-model upstream channel pinning** |
+| `freebuff` | Freebuff | CLI-style browser login, import from the Freebuff CLI, or paste a Bearer; live freebucks quota — **the free tier is CLI-channel-gated** |
 | `codebuddy` | Tencent CodeBuddy | browser OAuth, daily auto check-in |
 | `trae` | Trae (CN) | imports the local sign-in from **TRAE SOLO CN** and the **Trae CN IDE**; live catalog, credits, daily auto check-in |
 | `joycode` | JD JoyCode | imports the local JoyCode IDE credential, or paste ptKey + userId; live catalog, **three wire paths chosen per model** |
@@ -133,6 +134,65 @@ fail identically, so rotating channels would only hide the real problem.
 
 Channel discovery is **in-memory** (it is derived data any probe can rebuild),
 while pins are **persisted** to `~/.dsh/plugins/subscriptions/cline-pins.json`.
+
+## Freebuff
+
+Freebuff (codebuff.com) speaks its own Bearer/OpenAI-shaped wire
+(`POST {www.codebuff.com}/api/v1/chat/completions`). The card has **exactly three
+buttons**, and the first two are the official CLI's own credential paths:
+
+| Button | What it does |
+| --- | --- |
+| **Login** | A replica of the CLI's browser login — no local callback port, no PKCE. `POST https://freebuff.com/api/auth/cli/code {fingerprintId}` answers `{loginUrl, fingerprintHash, expiresAt}`; you authorize on that page and the card polls `GET https://freebuff.com/api/auth/cli/status?fingerprintId&fingerprintHash&expiresAt` **every 5 s for up to 300 s**, stopping as soon as `data.user` is an object. The browser never has to reach this machine. |
+| **Import from Freebuff CLI** | Reads what the official CLI already stored — `~/.config/manicode/credentials.json`, `default.authToken` — and validates it against the session endpoint **before** storing anything; other profiles in that file are left alone. `~/.config/manicode` is the CLI launcher's own convention, the same under the home directory on every platform, Windows included. |
+| **Manual input** | **Bearer only.** |
+
+**No cookie login at all.** A freebuff.com session cookie is not a channel this
+route supports, and no fallback stands behind it: the web/cookie wire was deleted
+outright, because it takes one flat prompt string with no `tools` field, so a turn
+through it would lose every harness tool without saying so. The only
+cookie-related code left exists to RECOGNISE a cookie and refuse it by name — the
+other wrong turn a cookie invites is replaying its session-token value as a
+Bearer, which draws the upstream's ban-shaped `403`.
+
+**The quota read is real, and it needs no cookie.**
+`GET https://www.codebuff.com/api/v1/freebuff/session` with the CLI's own header
+set answers `200` and the daily freebucks block — `balance`,
+`daily.{limit, spent, remaining, resetAt, resetTimeZone}`, `wallet`, `planId` and a
+per-model price map — so the credits window the card shows is the upstream's own
+number.
+
+**The hard finding: a FREE account cannot chat through the API at all, so it
+cannot use tools either.** Verified live with the official CLI's own `authToken`,
+an ACTIVE admitted session bound to this hub's own `cli:` instance, the
+model-specific free agent, and a run id issued by `POST /api/v1/agent-runs`, the
+chat call still answers:
+
+```json
+{"error":"free_mode_cli_required","message":"Free mode is only available through the freebuff CLI. Install it with `npm i -g freebuff`, then run `freebuff`. Calling the API directly is not supported and may get your account banned."}
+```
+
+That is HTTP `403` on a plain turn — no tools involved — which proves the gate is
+the **channel**, not session state. So on a free account this route can
+authenticate and read the quota, and then the first turn fails with the upstream's
+own words: nothing is silently downgraded, the refusal is shown as it is, and
+free-tier text and tools are CLI-only. **A paid credential is untested.**
+
+What a turn encodes, for anyone comparing notes: session admission
+(`POST /api/v1/freebuff/session/admission`) →
+`POST https://www.codebuff.com/api/v1/agent-runs {action:"START", agentId, ancestorRunIds}`
+for the **model-specific** free agent (`base2-free-space-bunny-alpha`) → the chat
+call carrying
+`codebuff_metadata{run_id, client_id, cost_mode:"free", freebuff_instance_id:"cli:<uuid>", freebuff_multi_session:"1", surface:"cli"}`
+plus the CLI's `x-freebuff-*` headers. The agent step matters: free mode validates
+the run's agent against the requested model, so a run started for the generic
+`base2-free` is refused for every model but one.
+
+The wire shape and the pinned roster come from the reference project
+[`lza6/Freebuff-2API`](https://github.com/lza6/Freebuff-2API); the login flow, the
+credential path and the quota endpoint's header set were read from the official
+CLI binary itself, and the `403` above is a live observation. The source cites all
+of it by file and symbol.
 
 ## Trae model list
 
@@ -422,6 +482,7 @@ work on top. Credit and thanks to every project below.
 | [masknull/dsh-qoder-connect](https://github.com/masknull/dsh-qoder-connect) | Primary reference for the Qoder route: the PAT → job-token exchange and its cache/single-flight, the two-region endpoint table (`api3.qoder.sh` / `gateway.qoder.com.cn`), the `Encode=1` WAF body codec (custom alphabet plus the three-chunk Base64 rotation), the COSY RSA+AES+MD5 signature header set, the `agent_chat_generation` request envelope and its encoded SSE, the `model/list` catalog with its per-model `context_config` (default vs largest window), and the `quota/usage` + `user/plan` + `user/status` credit views. |
 | [Variyaone/JoyCode2api-VABoost](https://github.com/Variyaone/JoyCode2api-VABoost) | Primary reference for the JoyCode route: a Go proxy that reverse-engineers JD's private JoyCode protocol into OpenAI/Anthropic shapes. Adopted its **three wire paths** (`chat/completions`, `responses`, native `anthropic/messages`), the gateway HMAC signature and `functionId` routing, the request envelope with its per-path `loginType`/`tenant` defaults, the `-hq` internal Claude model ids, the `ChatToResponses` request translation, the **double-wrapped SSE** (`data: data: {…}`) shape, the per-family thinking mapping (GPT `reasoning.effort`, chat `reasoning_effort` + the `thinking` switch, Claude `output_config.effort`), the capability table with its context/output budgets, and the `userInfo` keepalive that **rotates the ptKey**. |
 | [rosanruan/switch-dev](https://github.com/rosanruan/switch-dev) | Secondary reference for JoyCode's credential layer: the cross-platform discovery and read-only open of the `JoyCoder.IDE` state database (`state.vscdb`), its `userName`/`loginType` default handling, and the **extension-version** read — the gateway's gray-release gate trusts the joycoder-editor extension's version rather than the app shell's — plus recognition of the `AI_GRAY_ACCESS_DENIED` / `COLOR_FORWARD_EXCEPTION` gray refusals. |
+| [lza6/Freebuff-2API](https://github.com/lza6/Freebuff-2API) | Primary reference for the Freebuff route: the Bearer/OpenAI-shaped wire and the CLI-shaped `x-freebuff-*` header set, the `codebuff_metadata` body fields, the `run_id` bootstrap (`/api/v1/agent-runs`), the pinned authoritative model roster with its paused-id exclusion, and the upstream error-code mapping. Everything CLI-side — the login flow, the credential path (`~/.config/manicode/credentials.json`) and the quota endpoint's header set — was read from the official CLI binary instead, which is also where the `403 free_mode_cli_required` channel gate was found. |
 
 ### Keeping in sync with the reference projects
 

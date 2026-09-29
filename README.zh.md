@@ -4,7 +4,7 @@
 
 [English](README.md) | 中文
 
-一个 **设置 → 订阅** 页面覆盖十一个订阅路由：
+一个 **设置 → 订阅** 页面覆盖十二个订阅路由：
 
 | 路由 | 订阅 | 说明 |
 | --- | --- | --- |
@@ -14,6 +14,7 @@
 | `agy` | Google Antigravity | **纯 HTTP OAuth**，不调用 `agy` CLI，不闪 `cmd.exe` |
 | `commandcode` | Command Code Go | 导入 `~/.commandcode/auth.json` 或粘贴 key（Studio 可选） |
 | `cline` | Cline（ClinePass） | 粘贴 `sk_…` Key；实时额度窗口，**分模型钉住上游渠道** |
+| `freebuff` | Freebuff | CLI 式浏览器登录、从 Freebuff CLI 导入、或粘贴 Bearer；实时 freebucks 使用额度 —— **免费档被上游按「只走 CLI 通道」门控** |
 | `codebuddy` | 腾讯 CodeBuddy | 浏览器 OAuth，每日自动签到 |
 | `trae` | Trae（国内版） | 导入本机已登录的 **TRAE SOLO CN** 与 **Trae CN IDE**；实时目录、积分、每日自动签到 |
 | `joycode` | 京东 JoyCode | 读取本机 JoyCode IDE 凭据，或粘贴 ptKey + userId；实时目录，**按模型自动分流三条线上路径** |
@@ -108,6 +109,53 @@ Cline 的网关在同一个地址后面藏着两套不同的后端 —— 一套
 
 渠道发现是**内存态**（属于任何一次探测都能重建的派生数据），而钉住配置会**持久化**到
 `~/.dsh/plugins/subscriptions/cline-pins.json`。
+
+## Freebuff
+
+Freebuff（codebuff.com）走它自己的 Bearer / OpenAI 形状线协议
+（`POST {www.codebuff.com}/api/v1/chat/completions`）。卡片上**只有三个按钮**，其中前两个就是
+官方 CLI 自己的取凭据方式：
+
+| 按钮 | 作用 |
+| --- | --- |
+| **登录账号** | 复刻 CLI 的浏览器登录 —— 不起本机回调端口，也不用 PKCE。`POST https://freebuff.com/api/auth/cli/code {fingerprintId}` 返回 `{loginUrl, fingerprintHash, expiresAt}`；你在该页授权，卡片则**每 5 秒轮询一次、最长 300 秒** `GET https://freebuff.com/api/auth/cli/status?fingerprintId&fingerprintHash&expiresAt`，直到 `data.user` 变成一个对象为止。所以浏览器不必能访问本机。 |
+| **从 Freebuff CLI 导入** | 读取官方 CLI 已经存好的凭据 —— `~/.config/manicode/credentials.json` 里的 `default.authToken` —— 并**先**拿去会话端点校验，通过才落盘；文件里的其他 profile 不导入。`~/.config/manicode` 是 CLI 启动器自己的约定，包括 Windows 在内所有平台都放在用户主目录下。 |
+| **手动输入** | **只收 Bearer。** |
+
+**完全不支持 Cookie 登录。** freebuff.com 的会话 Cookie 不是本路由的登录通道，背后也没有
+任何回退：那条 web/cookie 线已被整段删除 —— 它只接受一个扁平 prompt 字符串、**没有 `tools`
+字段**，走它的一轮会静默丢掉全部本地工具。留下来的 Cookie 相关代码只有一个作用：**认出**
+Cookie 并点名拒收 —— 因为 Cookie 还会引向另一个错误做法：把它的 session-token 值当 Bearer
+重放，那会招来上游形同封号警告的 `403`。
+
+**使用额度是真的能读到的，而且不需要 Cookie。** 带上 CLI 自己那套请求头
+`GET https://www.codebuff.com/api/v1/freebuff/session` 会返回 `200` 与每日 freebucks 数据块
+—— `balance`、`daily.{limit, spent, remaining, resetAt, resetTimeZone}`、`wallet`、`planId`，
+以及一张逐模型价格表 —— 所以卡片显示的积分窗口就是上游自己的数字。
+
+**最硬的结论：免费账号根本无法通过 API 对话，因此也用不了工具。** 这是在「用官方 CLI 自己存的
+`authToken`、一个已 ACTIVE 且绑定到本插件自己的 `cli:` 实例的会话、模型专属的免费 agent，以及
+由 `POST /api/v1/agent-runs` 签发的 run id」的条件下实测的，对话调用仍然回答：
+
+```json
+{"error":"free_mode_cli_required","message":"Free mode is only available through the freebuff CLI. Install it with `npm i -g freebuff`, then run `freebuff`. Calling the API directly is not supported and may get your account banned."}
+```
+
+这条 `403` 出现在一轮**不含任何工具**的普通对话上，说明这道门看的是**通道**，不是会话状态。
+所以在免费账号上，本路由可以登录、可以读出使用额度，但从第一轮起就会以上游自己的原话失败：
+它**不会**被静默降级，拒绝原样显示；免费档的文本与工具只存在于 CLI。**付费凭据未测试。**
+
+一轮对话编码了什么，留个记录：会话准入（`POST /api/v1/freebuff/session/admission`）→
+`POST https://www.codebuff.com/api/v1/agent-runs {action:"START", agentId, ancestorRunIds}`，
+agent 必须是**模型专属**的免费 agent（`base2-free-space-bunny-alpha`）→ 对话请求携带
+`codebuff_metadata{run_id, client_id, cost_mode:"free", freebuff_instance_id:"cli:<uuid>", freebuff_multi_session:"1", surface:"cli"}`
+与 CLI 的 `x-freebuff-*` 请求头。agent 这一步很关键：free 模式会把 run 的 agent 和请求的模型
+做校验，因此用通用 `base2-free` 起的 run 除一个模型外都会被拒。
+
+线协议形状与钉住的模型清单来自参考项目
+[`lza6/Freebuff-2API`](https://github.com/lza6/Freebuff-2API)；登录流程、凭据路径与额度端点的
+请求头集合则读取自官方 CLI 二进制本身，上面那条 `403` 是实测结果 —— 源码里都按文件与符号
+标注了出处。
 
 ## Trae 模型清单
 
@@ -323,6 +371,7 @@ bundle，并在其上继续自研。以下项目均已致谢。
 | [GooDAnDReaDY/dsh-clinebot](https://github.com/GooDAnDReaDY/dsh-clinebot) | Cline 次参考：`apiKeyEnv` 凭据引用模式、`disabledModels` 白名单思路、`/users/me/plan/usage-limits` 额度窗口（5 小时 / 每周 / 每月，80% 与 95% 阈值）—— 本仓库 Cline 用量条的来源，以及套餐标签解析。 |
 | [Variyaone/JoyCode2api-VABoost](https://github.com/Variyaone/JoyCode2api-VABoost) | JoyCode 路由的主参考：把京东 JoyCode 的私有协议反向工程成 OpenAI/Anthropic 兼容面。采纳其**三条线上路径**（`chat/completions`、`responses`、原生 `anthropic/messages`）、网关 HMAC 签名与 `functionId` 路由、请求信封与逐路径 `loginType`/`tenant` 默认值、Claude 系必须的 `-hq` 内部模型 id、`ChatToResponses` 的请求转换、**双层包裹的 SSE**（`data: data: {…}`）解析方式、逐族思考映射（GPT 用 `reasoning.effort`、chat 系用 `reasoning_effort` + `thinking` 开关、Claude 用 `output_config.effort`）、能力表与上下文/输出预算，以及 `userInfo` 会**轮换 ptKey** 的保活方式。 |
 | [rosanruan/switch-dev](https://github.com/rosanruan/switch-dev) | JoyCode 凭据层的次参考：`JoyCoder.IDE` 状态库（`state.vscdb`）的跨平台发现路径与只读打开方式、`userName`/`loginType` 默认值处理，以及**扩展版本**读取（网关灰度过期门看的是 joycoder-editor 扩展版本，而不是 App 外壳版本）与灰色拒绝（`AI_GRAY_ACCESS_DENIED` / `COLOR_FORWARD_EXCEPTION`）的识别。 |
+| [lza6/Freebuff-2API](https://github.com/lza6/Freebuff-2API) | Freebuff 路由的主参考：Bearer / OpenAI 形状的线协议与 CLI 那套 `x-freebuff-*` 请求头、`codebuff_metadata` 正文字段、`run_id` 引导（`/api/v1/agent-runs`）、钉住的权威模型清单及其 paused id 排除规则，以及上游错误码映射。CLI 那一侧 —— 登录流程、凭据路径（`~/.config/manicode/credentials.json`）与额度端点的请求头集合 —— 则读取自官方 CLI 二进制本身；`403 free_mode_cli_required` 这道通道门也是在那里发现的。 |
 
 ### 与参考项目保持同步
 
