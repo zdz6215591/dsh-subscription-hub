@@ -128,7 +128,6 @@ const PROVIDER_NAMES: Record<SubscriptionProvider, string> = {
   agy: 'Antigravity',
   commandcode: 'Command Code',
   cline: 'Cline',
-  freebuff: 'Freebuff',
   codebuddy: 'CodeBuddy',
   qoder: 'Qoder',
   trae: 'Trae',

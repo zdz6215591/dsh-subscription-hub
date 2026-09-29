@@ -60,7 +60,6 @@ import type {
   AgySession,
   ClaudeSession,
   ClineSession,
-  FreebuffSession,
   CodexSession,
   CodeBuddySession,
   QoderSession,
@@ -202,17 +201,6 @@ import {
   joyCodeSessionFromPaste,
   refreshJoyCodeSession,
 } from './providers/joycode-session.js'
-import { FreebuffAdapter } from './providers/freebuff.js'
-import {
-  FREEBUFF_VALIDATION_TTL_MS,
-  freebuffCredentialOf,
-  freebuffSessionFromPaste,
-  isFreebuffPermanentRefreshError,
-  refreshFreebuffSession,
-} from './providers/freebuff-session.js'
-import { fetchFreebuffUsage } from './providers/freebuff/usage.js'
-import type { FreebuffCliLogin } from './providers/freebuff-cli.js'
-import { importFreebuffCliCredential, startFreebuffCliLogin } from './providers/freebuff-cli.js'
 import {
   ZedAdapter,
   ZED_PREEMPT_MS,
@@ -288,7 +276,6 @@ export interface Config {
     agy?: ModelEntry[]
     commandcode?: ModelEntry[]
     cline?: ModelEntry[]
-    freebuff?: ModelEntry[]
     codebuddy?: ModelEntry[]
     qoder?: ModelEntry[]
     trae?: ModelEntry[]
@@ -314,7 +301,7 @@ export interface Config {
   }
 }
 
-const providerIdSchema = z.union(['codex', 'claude', 'grok', 'copilot', 'agy', 'commandcode', 'cline', 'codebuddy','cline', 'freebuff', 'freebuff',  'qoder', 'trae', 'joycode', 'zed'])
+const providerIdSchema = z.union(['codex', 'claude', 'grok', 'copilot', 'agy', 'commandcode', 'cline', 'codebuddy','cline',  'qoder', 'trae', 'joycode', 'zed'])
 const modelEntrySchema: z<ModelEntry> = z.object({
   id: z.string().required(),
   name: z.string(),
@@ -406,7 +393,6 @@ function resolveCatalog(models: Config['models']): Record<ProviderId, ModelEntry
     agy: resolve('agy'),
     commandcode: resolve('commandcode'),
     cline: resolve('cline'),
-    freebuff: resolve('freebuff'),
     codebuddy: resolve('codebuddy'),
     qoder: resolve('qoder'),
     trae: resolve('trae'),
@@ -431,7 +417,6 @@ function accountOf(provider: ProviderId, session: StoredSession | undefined): st
     case 'agy': return (session as AgySession).account
     case 'commandcode': return (session as CommandCodeSession).account
     case 'cline': return (session as ClineSession).account
-    case 'freebuff': return (session as FreebuffSession).account
     case 'codebuddy': return (session as CodeBuddySession).account
     // ccount is the upstream display name (iqoog), which is what a reader
     // recognizes; falling back to the id keeps an account row labeled anyway.
@@ -452,7 +437,6 @@ function planOf(provider: ProviderId, session: StoredSession): string | undefine
     case 'agy': return undefined
     case 'commandcode': return undefined
     case 'cline': return undefined
-    case 'freebuff': return undefined
     case 'codebuddy': return undefined
     // The upstream reports the plan (Pro Trial), and it is a real signal: it is
     // what tells a reader whether the daily credits are on trial or paid.
@@ -515,16 +499,6 @@ export class SubscriptionsAuthController implements AuthController {
    */
   private readonly joyCodeLogins = new Map<ProviderId, JoyCodeBrowserLogin>()
 
-  /**
-   * Freebuff's browser-login attempts, keyed by provider.
-   *
-   * The CLI's own login is a POLLING flow (`freebuff-cli.ts`), so the attempt is
-   * an object holding the poll loop rather than a URL alone: cancelling, logging
-   * out, or starting a second attempt has to abort the loop that is still asking
-   * the upstream for a credential.
-   */
-  private readonly freebuffLogins = new Map<ProviderId, FreebuffCliLogin>()
-
   constructor(
     private readonly flows: OAuthFlowManager,
     /** Device-flow attempts (copilot); polled in the background like the loopback flows. */
@@ -549,12 +523,6 @@ export class SubscriptionsAuthController implements AuthController {
      * a 429.
      */
     private readonly poolUsage: PoolUsageTracker | undefined = undefined,
-    /**
-     * Advisory sink for a login path that succeeded but should say something
-     * anyway (Freebuff's credential file holding more than one profile, say).
-     * Separate from `lastError`, which the card renders as a failure.
-     */
-    private readonly warn: (message: string) => void = () => {},
   ) {}
 
   usage(provider: ProviderId, account: string, signal: AbortSignal, force = false): Promise<ProviderUsage> {
@@ -721,36 +689,6 @@ export class SubscriptionsAuthController implements AuthController {
       this.completions.set(provider, this.completeJoyCode(login, this.claim(provider)))
       return { authorizeUrl: login.authorizeUrl }
     }
-    if (provider === 'freebuff') {
-      // Two ways in, and the method decides which.
-      //
-      // `import` reads the credential the OFFICIAL CLI already stored
-      // (`~/.config/manicode/credentials.json` → `default.authToken`). That is
-      // the preferred path: the CLI's token is the credential class this route
-      // accepts, and the file is exactly what `freebuff login` writes.
-      if (method === 'import') {
-        const session = await importFreebuffCliCredential(proxiedFetch, undefined, { onWarn: this.warn })
-        await this.persist(provider, session)
-        this.lastError.delete(provider)
-        this.onAuthChanged(provider, accountKeyOf(provider, session))
-        return { authorizeUrl: '' }
-      }
-      // Everything else is the CLI's own browser login, replicated: the plugin
-      // asks for a login URL for a locally generated fingerprint, hands that URL
-      // to the user, and POLLS the status endpoint until the credential arrives
-      // (see `freebuff-cli.ts` for the CLI's own flow, verbatim). One attempt per
-      // provider: a second click closes the first, whose poll would otherwise
-      // race this one to the store.
-      //
-      // A cookie is not a credential this route accepts, so there is no
-      // "capture the browser session" variant to fall back to.
-      this.freebuffLogins.get(provider)?.close()
-      const login = await startFreebuffCliLogin({ fetchFn: proxiedFetch })
-      this.finalizing.add(provider)
-      this.freebuffLogins.set(provider, login)
-      this.completions.set(provider, this.completeFreebuffLogin(login, this.claim(provider)))
-      return { authorizeUrl: login.authorizeUrl }
-    }
     if (provider === 'cline') {
       // Cline has no OAuth grant and no device flow: its only login is a pasted
       // API key, which the panel collects through the manual-input field. This
@@ -849,35 +787,6 @@ export class SubscriptionsAuthController implements AuthController {
     }
   }
 
-  /**
-   * Drive Freebuff's CLI-style browser login to a stored session.
-   *
-   * The poll loop and the validation both live in `freebuff-cli.ts`; what this
-   * adds is the claim check (a second click or a logout supersedes this attempt)
-   * and the busy window, which lasts until the store write has happened so the
-   * card cannot show "not signed in" while the credential is still arriving.
-   * @param login - the attempt to settle.
-   * @param claim - the ownership number it was started under.
-   */
-  private async completeFreebuffLogin(login: FreebuffCliLogin, claim: number): Promise<void> {
-    try {
-      const session = await login.session
-      if (this.claims.get('freebuff') !== claim) return
-      await this.persist('freebuff', session)
-      this.lastError.delete('freebuff')
-      this.onAuthChanged('freebuff', accountKeyOf('freebuff', session))
-    } catch (error) {
-      if (this.claims.get('freebuff') !== claim) return
-      if (!(error instanceof Error && error.message === 'login cancelled')) {
-        this.lastError.set('freebuff', errorChain(error))
-      }
-    } finally {
-      this.freebuffLogins.delete('freebuff')
-      login.close()
-      this.finalizing.delete('freebuff')
-    }
-  }
-
   private async completeCodeBuddy(state: string, claim: number): Promise<void> {
     try {
       const session = await completeCodeBuddyLogin(state)
@@ -927,7 +836,6 @@ export class SubscriptionsAuthController implements AuthController {
         return exchangeAgyCode(code, attempt.pkce.verifier, attempt.redirectUri)
       case 'commandcode':
       case 'cline':
-      case 'freebuff':
       case 'codebuddy':
       case 'qoder':
       case 'trae':
@@ -995,16 +903,6 @@ export class SubscriptionsAuthController implements AuthController {
       this.onAuthChanged('joycode', accountKeyOf('joycode', session))
       return
     }
-    if (provider === 'freebuff') {
-      // A pasted browser session IS the login: there is no OAuth grant, no device
-      // flow, and no local credential store this plugin can read (the reference's
-      // own capture paths are a browser extension and a Windows-only WebView).
-      const session = await freebuffSessionFromPaste(input, proxiedFetch)
-      await this.persist('freebuff', session)
-      this.lastError.delete('freebuff')
-      this.onAuthChanged('freebuff', accountKeyOf('freebuff', session))
-      return
-    }
 
     const attempt = this.flows.pending(provider)
     if (attempt === undefined) {
@@ -1020,7 +918,6 @@ export class SubscriptionsAuthController implements AuthController {
     this.flows.pending(provider)?.cancel()
     this.deviceFlows.pending(provider)?.cancel()
     this.joyCodeLogins.get(provider)?.close()
-    this.freebuffLogins.get(provider)?.close()
     return Promise.resolve()
   }
 
@@ -1029,7 +926,6 @@ export class SubscriptionsAuthController implements AuthController {
     this.flows.pending(provider)?.cancel()
     this.deviceFlows.pending(provider)?.cancel()
     this.joyCodeLogins.get(provider)?.close()
-    this.freebuffLogins.get(provider)?.close()
     await deleteAccountSession(provider, account)
     this.lastError.delete(provider)
     this.onAuthChanged(provider, account)
@@ -1361,45 +1257,6 @@ export function apply(ctx: Context, config: Config): void {
           pool: () => poolAdapter,
         })
         registerTrackedAdapter('cline', adapter)
-        break
-      }
-      case 'freebuff': {
-        // Freebuff has no OAuth client this plugin can drive: the credential is a
-        // browser session — a Bearer token or the site's Cookie string — that the
-        // user pastes, so the route's login button opens the paste field.
-        const tokens = new AccountTokenManager<FreebuffSession>({
-          provider: 'freebuff',
-          displayName: 'Freebuff',
-          makeOptions: () => ({
-            // The reference keeps a web session alive with a 45s heartbeat;
-            // riding the token manager's refresh gives the same cadence with no
-            // timer of our own (and refreshes one account at a time, on demand).
-            preemptMs: FREEBUFF_VALIDATION_TTL_MS - 5_000,
-            refresh: session => refreshFreebuffSession(session, proxiedFetch),
-            isPermanent: isFreebuffPermanentRefreshError,
-          }),
-          onAccountRemoved: account => { authChanged('freebuff', account) },
-        })
-        accountTokens.set('freebuff', tokens as unknown as AccountTokenManager<StoredSession>)
-        usageFetchers.freebuff = async (account, signal) => {
-          const session = await tokens.session(account) as FreebuffSession
-          // The vendor's own daily credits: one window, unit `credits`, reset
-          // from `daily.resetAt`. The per-model figures stay out of it — they are
-          // the reference's own division, not a disclosed field.
-          return fetchFreebuffUsage(freebuffCredentialOf(session), proxiedFetch, signal, { onWarn })
-        }
-        const adapter = new FreebuffAdapter({
-          models: catalog.freebuff,
-          streamIdleTimeoutMs,
-          rateLimit,
-          tokens,
-          discovery: !overridden.has('freebuff'),
-          onWarn,
-          resolveAttachments,
-          defaultEffortOf: (model: string) => defaultEffortOf('freebuff', model),
-          pool: () => poolAdapter,
-        })
-        registerTrackedAdapter('freebuff', adapter)
         break
       }
       case 'codebuddy': {
@@ -1762,7 +1619,7 @@ export function apply(ctx: Context, config: Config): void {
     },
   }
   const authController = new SubscriptionsAuthController(
-    flows, deviceFlows, authChanged, resolveAttachments, usageFetchers, undefined, poolUsage, onWarn,
+    flows, deviceFlows, authChanged, resolveAttachments, usageFetchers, undefined, poolUsage,
   )
   // One store per plugin instance, so the in-memory half (fetched marks, and the
   // labs models.dev has no mark for at all) is shared by every call and the

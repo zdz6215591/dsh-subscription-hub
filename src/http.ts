@@ -160,7 +160,6 @@ export const PROVIDER_PROBE_TARGETS: Readonly<Record<ProviderId, { url: string; 
   agy: { url: 'https://daily-cloudcode-pa.googleapis.com', method: 'GET' },
   commandcode: { url: 'https://api.commandcode.ai', method: 'GET' },
   cline: { url: 'https://api.cline.bot', method: 'GET' },
-  freebuff: { url: 'https://freebuff.com', method: 'GET' },
   codebuddy: { url: 'https://copilot.tencent.com', method: 'GET' },
   // The GLOBAL deployment's gateway. Qoder's two deployments are separate
   // services, but the probe exists to test the machine's routing, and this is the

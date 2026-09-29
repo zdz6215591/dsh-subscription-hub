@@ -46,9 +46,6 @@ import './cline.spec.js'
 // JoyCode: its own protocol module (three wire paths behind one route), so its
 // coverage lives in one file rather than folded into the shared specs.
 import './joycode.spec.js'
-// Freebuff: two credential shapes behind one route, and a non-OpenAI SSE to
-// translate — same reason for a dedicated file.
-import './freebuff.spec.js'
 // Registered late: this file existed but was never listed here, so its four
 // agy thoughtSignature tests silently never ran in the directory run.
 import './agy-signature.spec.js'
