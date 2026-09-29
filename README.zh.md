@@ -4,7 +4,7 @@
 
 [English](README.md) | 中文
 
-一个 **设置 → 订阅** 页面覆盖十二个订阅路由：
+一个 **设置 → 订阅** 页面覆盖十三个订阅路由：
 
 | 路由 | 订阅 | 说明 |
 | --- | --- | --- |
@@ -16,6 +16,7 @@
 | `cline` | Cline（ClinePass） | 粘贴 `sk_…` Key；实时额度窗口，**分模型钉住上游渠道** |
 | `freebuff` | Freebuff | CLI 式浏览器登录、从 Freebuff CLI 导入、或粘贴 Bearer；实时 freebucks 使用额度 —— **免费档被上游按「只走 CLI 通道」门控** |
 | `codebuddy` | 腾讯 CodeBuddy | 浏览器 OAuth，每日自动签到 |
+| `qoder` | Qoder | 粘贴「个人访问令牌」；自动识别 **qoder.com** / **qoder.com.cn** 部署（不必手选）；实时目录、积分包、每日自动签到 |
 | `trae` | Trae（国内版） | 导入本机已登录的 **TRAE SOLO CN** 与 **Trae CN IDE**；实时目录、积分、每日自动签到 |
 | `joycode` | 京东 JoyCode | 读取本机 JoyCode IDE 凭据，或粘贴 ptKey + userId；实时目录，**按模型自动分流三条线上路径** |
 | `copilot` | GitHub Copilot | 设备码登录 |

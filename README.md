@@ -4,7 +4,7 @@ Unified subscription plugin for [DeepSeek Harness](https://github.com/deepseek-a
 
 English | [中文](README.zh.md)
 
-One Settings → **Subscriptions** page for twelve subscription routes:
+One Settings → **Subscriptions** page for thirteen subscription routes:
 
 | Route | Subscription | Notes |
 | --- | --- | --- |
@@ -16,6 +16,7 @@ One Settings → **Subscriptions** page for twelve subscription routes:
 | `cline` | Cline (ClinePass) | paste a `sk_…` key; live quota windows, **per-model upstream channel pinning** |
 | `freebuff` | Freebuff | CLI-style browser login, import from the Freebuff CLI, or paste a Bearer; live freebucks quota — **the free tier is CLI-channel-gated** |
 | `codebuddy` | Tencent CodeBuddy | browser OAuth, daily auto check-in |
+| `qoder` | Qoder | paste a Personal Access Token; the deployment (**qoder.com** vs **qoder.com.cn**) is discovered, not picked; live catalog, credit packages, daily auto check-in |
 | `trae` | Trae (CN) | imports the local sign-in from **TRAE SOLO CN** and the **Trae CN IDE**; live catalog, credits, daily auto check-in |
 | `joycode` | JD JoyCode | imports the local JoyCode IDE credential, or paste ptKey + userId; live catalog, **three wire paths chosen per model** |
 | `copilot` | GitHub Copilot | device-code login |

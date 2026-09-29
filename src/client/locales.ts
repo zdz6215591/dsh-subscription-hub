@@ -212,7 +212,7 @@ export const en = {
   clinePinReset: 'Back to auto',
   clinePasteHint: 'Paste a Cline Pass API key (sk_…) from app.cline.bot. Cline has no browser sign-in, so the key itself is the login.',
   clineKeyPlaceholder: 'sk_…',
-  freebuffPasteHint: 'Paste an `authorization: Bearer …` value from a Freebuff CLI request, or the bare token. Cookie strings are not accepted here: that wire has no `tools` field, so a turn through it cannot carry your tools — use “Import from Freebuff CLI” or “Sign in” instead.',
+  freebuffPasteHint: 'Paste an `authorization: Bearer …` value from a Freebuff CLI request, or the bare token. Cookies are not supported: this route only speaks the CLI wire, and replaying a cookie’s session-token value as a Bearer draws the upstream’s ban-warning `403 free_mode_cli_required` — use “Import from Freebuff CLI” or “Sign in” instead.',
   freebuffPastePlaceholder: 'Bearer token',
   qoderPasteHint:
     'Qoder signs in with a Personal Access Token: mint one on your Qoder account page (qoder.com, or qoder.com.cn for the China deployment), then paste it here. '
@@ -437,7 +437,7 @@ export const zh = {
   clinePinReset: '恢复自动',
   clinePasteHint: '粘贴 app.cline.bot 控制台里的 Cline Pass API Key（sk_…）。Cline 没有浏览器登录，Key 本身就是登录凭据。',
   clineKeyPlaceholder: 'sk_…',
-  freebuffPasteHint: '粘贴 Freebuff CLI 请求里的 `authorization: Bearer …`，或直接粘贴 token。这里不再接受 Cookie 串：那条通道没有 `tools` 字段，会话会静默丢掉全部本地工具——请改用「从 Freebuff CLI 导入」或「登录账号」。',
+  freebuffPasteHint: '粘贴 Freebuff CLI 请求里的 `authorization: Bearer …`，或直接粘贴 token。这里不支持 Cookie：本路由只走 CLI 通道，把 cookie 里的 session-token 当 Bearer 重放会被上游以带封号警告的 `403 free_mode_cli_required` 拒绝——请改用「从 Freebuff CLI 导入」或「登录账号」。',
   freebuffPastePlaceholder: 'Bearer token',
   qoderPasteHint:
     'Qoder 使用「个人访问令牌」(Personal Access Token) 登录：在 Qoder 账号页面（国内版 qoder.com.cn，国际版 qoder.com）生成后粘贴到这里。'
