@@ -36,7 +36,7 @@
  * and 20 of them resolved to no row, which the settings list renders as an empty
  * price cell. The vendor names no rate anywhere in that catalog response — its
  * records carry exactly `id, object, created, owned_by, name, context_length,
- * supported_endpoints` — so the page above is the ONLY price source, and 13 of
+ * supported_endpoints` — so the page above is the ONLY price source, and 14 of
  * the 20 misses were rows the page publishes today and this snapshot predated
  * (`claude-opus-5-5`, `claude-sonnet-5-5`, `deepseek-v4.1-flash-fast`,
  * `glm-5.3-flashx`, `gpt-6-luna`, `gpt-6-sol`, `gpt-6.1-sol`, `grok-4.7`,
