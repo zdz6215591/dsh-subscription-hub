@@ -101,12 +101,16 @@ test('an unpriced model contributes no cost rather than a guessed one', () => {
 })
 
 test('a vendor-name substring no longer prices a model', () => {
-  // This is the exact shape of the removed guess: `z-ai/glm-5.3-flashx` contains
-  // `glm`, so the family rule charged GLM's own rates for a resold model.
-  assert.equal(resolveModelPrice('z-ai/glm-5.3-flashx').source, 'unpriced')
-  assert.equal(resolveModelPrice('z-ai/glm-5.3-flashx').rates, undefined)
+  // This is the exact shape of the removed guess: Antigravity serves
+  // `gemini-3-flash`, whose id contains a vendor this table prices row by row, so
+  // the family rule charged Gemini's own rates for a model Antigravity publishes
+  // no rate for. (`z-ai/glm-5.3-flashx` used to be the example here; the
+  // 2026-09-29 coverage audit added the row the vendor's page publishes for it, so
+  // it now prices from its OWN row rather than from the `glm` substring.)
+  assert.equal(resolveModelPrice('gemini-3-flash').source, 'unpriced')
+  assert.equal(resolveModelPrice('gemini-3-flash').rates, undefined)
   // And no half-price suffix is rendered for it either.
-  assert.equal(priceLabel(resolveModelPrice('z-ai/glm-5.3-flashx').rates), '')
+  assert.equal(priceLabel(resolveModelPrice('gemini-3-flash').rates), '')
 })
 
 // ---------------------------------------------------------------------------

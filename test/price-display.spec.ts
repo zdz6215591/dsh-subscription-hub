@@ -67,10 +67,14 @@ test('a served CommandCode id never renders half a price', () => {
     assert.ok(rates !== undefined, `${id} has no vendored price`)
     assert.ok(priceLabel({ input: rates.input, output: rates.output }).startsWith('$'), id)
   }
-  // An id the table does not carry renders NOTHING rather than a half or guessed
-  // figure. This id used to be priced by the `claude-opus` vendor-SUBSTRING rule,
-  // i.e. it showed Claude Opus's own rates as if they were this model's.
-  const unlisted = resolveModelPrice('claude-opus-5-5')
+  // An id nobody publishes a rate for renders NOTHING rather than a half or a
+  // guessed figure. This used to be `claude-opus-5-5`, which the `claude-opus`
+  // vendor-SUBSTRING rule priced as Claude Opus's own model: the 2026-09-29
+  // coverage audit gave it a row of its own (the vendor's page publishes $4/$20),
+  // so the example moved to a served id whose only price statement is a
+  // time-limited free `deal` — a promotion, not a rate.
+  assert.deepEqual(resolveModelPrice('claude-opus-5-5').rates, { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 })
+  const unlisted = resolveModelPrice('stealth/space-bunny-alpha')
   assert.equal(unlisted.source, 'unpriced')
   assert.equal(unlisted.rates, undefined)
   assert.equal(priceLabel(unlisted.rates), '', 'no rate means no suffix at all')

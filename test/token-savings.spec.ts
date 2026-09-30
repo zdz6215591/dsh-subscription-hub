@@ -96,22 +96,34 @@ test('a published row wins over a vendor-family substring', () => {
   assert.deepEqual(luna.rates, { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 })
   // A resold model resolves by its own id rather than by the vendor name inside it.
   assert.equal(resolveModelPrice('cline-pass/deepseek-v4.1-flash').price?.id, 'deepseek-v4.1-flash')
-  // A model the published table does not carry is UNPRICED, and contributes no
-  // cost. It used to take a generic $2/$8 rate (and, before the table existed, a
-  // vendor-substring family rate) — so an invented figure entered a savings total
-  // that a reader takes as measured.
+  // A resold model the vendor's page DOES price resolves to its own row, never to
+  // the vendor name inside its id. `cline-pass/mimo-v2.6-pro` is the id this test
+  // used to cite as UNPRICED; the 2026-09-29 coverage audit added the row the
+  // page publishes for it, so it prices now and the example moved below.
   const mimo = resolveModelPrice('cline-pass/mimo-v2.6-pro')
-  assert.equal(mimo.source, 'unpriced')
-  assert.equal(mimo.rates, undefined)
+  assert.equal(mimo.source, 'catalog')
+  assert.equal(mimo.price?.id, 'mimo-v2.6-pro')
+  assert.deepEqual(mimo.rates, { input: 0.435, output: 0.87, cacheRead: 0.0036 })
   const mimoUsage = priceUsage('cline-pass/mimo-v2.6-pro', undefined, { inputTokens: 1_000_000 })
-  assert.equal(mimoUsage.priced, false)
-  assert.equal(mimoUsage.unpriced, true)
-  assert.equal(mimoUsage.usd, 0, 'no published rate means no cost, not a guessed one')
-  // A vendor-name substring no longer prices anything: this id used to match the
-  // `glm` family rule and be charged GLM's own rates.
-  const family = resolveModelPrice('z-ai/glm-5.3-flashx')
-  assert.equal(family.source, 'unpriced')
-  assert.equal(priceUsage('z-ai/glm-5.3-flashx', undefined, { inputTokens: 1_000_000 }).usd, 0)
+  assert.equal(mimoUsage.priced, true)
+  assert.equal(mimoUsage.usd, 0.435)
+  // A SERVED model nobody publishes a rate for is UNPRICED, and contributes no
+  // cost: an invented figure would enter a savings total a reader takes as
+  // measured. Command Code's stealth previews are the live example — the vendor's
+  // only statement about them is a time-limited `deal` block, which is a
+  // promotion rather than a rate (see the module docstring in model-prices.ts).
+  const promo = resolveModelPrice('stealth/pixel-canary')
+  assert.equal(promo.source, 'unpriced')
+  assert.equal(promo.rates, undefined)
+  const promoUsage = priceUsage('stealth/pixel-canary', undefined, { inputTokens: 1_000_000 })
+  assert.equal(promoUsage.priced, false)
+  assert.equal(promoUsage.unpriced, true)
+  assert.equal(promoUsage.usd, 0, 'no published rate means no cost, not a guessed one')
+  // A vendor-name substring no longer prices anything: Antigravity serves
+  // `gemini-3-flash`, whose id contains a vendor this table prices row by row,
+  // and the removed family rule charged Gemini's own rates for it.
+  assert.equal(resolveModelPrice('gemini-3-flash').source, 'unpriced')
+  assert.equal(priceUsage('gemini-3-flash', undefined, { inputTokens: 1_000_000 }).usd, 0)
   // The page keeps the vendor segment on one row: the bare catalog id must still find it.
   assert.equal(resolveModelPrice('hy4-preview').price?.id, 'tencent/hy4-preview')
   // A decorating suffix the page does not carry is trimmed only after the exact miss.
@@ -126,6 +138,60 @@ test('a published row wins over a vendor-family substring', () => {
   // Candidates are most-specific-first and de-duplicated.
   assert.deepEqual(priceSlugCandidates('z-ai/GLM-5.3'), ['z-ai/glm-5.3', 'glm-5.3'])
   assert.deepEqual(priceSlugCandidates('glm5.3-flash'), ['glm5.3-flash', 'glm-5.3-flash'])
+})
+
+test('a catalog id whose slug no rule can derive resolves through the explicit alias', () => {
+  // The two sides of the miss, as observed live (2026-09-29 catalog / page):
+  // the catalog serves `nvidia/nemotron-3-ultra-550b-a55b` (the vendor keeps the
+  // model's parameter count in the id) while the pricing page publishes the row
+  // as `nemotron-3-ultra`. No derived candidate bridges them — the generated list
+  // is spelled out here so a change to the rules cannot silently stop reaching it.
+  assert.deepEqual(priceSlugCandidates('nvidia/nemotron-3-ultra-550b-a55b'), [
+    'nvidia/nemotron-3-ultra-550b-a55b',
+    'nemotron-3-ultra-550b-a55b',
+    'nemotron-3-ultra',
+  ], 'the derived candidates, then the alias last')
+  const resolved = resolveModelPrice('nvidia/nemotron-3-ultra-550b-a55b')
+  assert.equal(resolved.source, 'catalog')
+  assert.equal(resolved.price?.id, 'nemotron-3-ultra')
+  assert.deepEqual(resolved.rates, { input: 0.6, output: 2.4, cacheRead: 0.12 })
+  // The alias is keyed on THIS id, so it cannot sweep in a neighbour: the two
+  // Sol rows are different models at different rates and must stay distinct.
+  assert.equal(resolveModelPrice('gpt-6-sol').price?.id, 'gpt-6-sol')
+  assert.equal(resolveModelPrice('gpt-6.1-sol').price?.id, 'gpt-6.1-sol')
+})
+
+test('the rows the 2026-09-29 coverage audit added carry the page\'s own rates', () => {
+  // Catalog ids that showed no price at all before the audit, with the rates the
+  // vendor's pricing page publishes for them (USD per 1M tokens; the page's
+  // `inputCost` / `outputCost` / `cacheReadCost` / `cacheWriteCost` fields).
+  const rates = (id: string): unknown => resolveModelPrice(id).rates
+  assert.deepEqual(rates('claude-opus-5-5'), { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 })
+  assert.deepEqual(rates('claude-sonnet-5-5'), { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 })
+  assert.deepEqual(rates('z-ai/glm-5.3-flashx'), { input: 0.37, output: 1.25, cacheRead: 0.075 })
+  assert.deepEqual(rates('xiaomi/mimo-v2.6-flash'), { input: 0.14, output: 0.28, cacheRead: 0.0028 })
+  assert.deepEqual(rates('xiaomi/mimo-v2.6-pro-ultraspeed'), { input: 4.35, output: 8.7, cacheRead: 0.036 })
+  assert.deepEqual(rates('Qwen/Qwen3.8-Omni-Flash'), { input: 0.15, output: 0.47, cacheRead: 0.016 })
+  assert.deepEqual(rates('meituan/LongCat-2.0'), { input: 0.3, output: 1.2, cacheRead: 0.006 })
+  assert.deepEqual(rates('stepfun/Step-5-Preview'), { input: 1, output: 2.7, cacheRead: 0.05 })
+  // A rate the snapshot had DRIFTED on: the page publishes $0.09 in, not $0.10.
+  assert.deepEqual(rates('stepfun/Step-3.5-Flash'), { input: 0.09, output: 0.3, cacheRead: 0.02 })
+
+  // The page's own `contextTiers` blocks come across as bands, ascending with an
+  // unbounded last one — so a long prompt is charged at the higher band.
+  close(priceUsage('gpt-6-luna', MONDAY_OFF_PEAK, { inputTokens: 200_000 }).usd, 0.1 * 0.2)
+  const lunaLarge = priceUsage('gpt-6-luna', MONDAY_OFF_PEAK, { inputTokens: 300_000 })
+  assert.equal(lunaLarge.tierMaxContext, undefined)
+  close(lunaLarge.usd, 0.3 * 0.2)
+  assert.equal(priceUsage('grok-4.7', MONDAY_OFF_PEAK, { inputTokens: 100_000 }).usd, 0.2)
+  close(priceUsage('grok-4.7', MONDAY_OFF_PEAK, { inputTokens: 300_000 }).usd, 300_000 * 4 / 1_000_000)
+  // A cache-write rate travels with the band it belongs to.
+  assert.equal(priceUsage('gpt-6-sol', MONDAY_OFF_PEAK, { inputTokens: 1_000, cacheWriteTokens: 1_000_000 }).pricedCacheWrite, true)
+
+  // The page's `timeOfDay` block keeps only the peak override, as the docstring
+  // says: `deepseek-v4.1-flash-fast` doubles inside a weekday peak window.
+  close(priceUsage('deepseek/deepseek-v4.1-flash-fast', MONDAY_OFF_PEAK, { inputTokens: 1_000_000 }).usd, 0.16)
+  close(priceUsage('deepseek/deepseek-v4.1-flash-fast', MONDAY_PEAK, { inputTokens: 1_000_000 }).usd, 0.32)
 })
 
 test('rates follow the context band, then the peak window', () => {

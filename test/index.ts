@@ -53,6 +53,10 @@ import './image-request.spec.js'
 import './agy-efforts.spec.js'
 import './zed-allowance.spec.js'
 import './price-display.spec.js'
+// The coverage guard: every model the Command Code vendor's own table lists must
+// have a price row, so a model shipped after a snapshot fails the suite instead of
+// rendering an empty price cell (the reported symptom this file exists for).
+import './price-coverage.spec.js'
 import './rate-display.spec.js'
 import './config-providers.spec.js'
 import './commandcode-catalog-cache.spec.js'

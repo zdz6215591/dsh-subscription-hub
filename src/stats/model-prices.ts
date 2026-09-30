@@ -31,6 +31,36 @@
  * its own `offPeak` block, so the top-level rates ARE the off-peak rates and only
  * the peak override is stored.
  *
+ * COVERAGE AUDIT, 2026-09-29. The vendored snapshot had drifted: the live
+ * catalog `GET https://api.commandcode.ai/provider/v1/models` served 86 models
+ * and 20 of them resolved to no row, which the settings list renders as an empty
+ * price cell. The vendor names no rate anywhere in that catalog response — its
+ * records carry exactly `id, object, created, owned_by, name, context_length,
+ * supported_endpoints` — so the page above is the ONLY price source, and 13 of
+ * the 20 misses were rows the page publishes today and this snapshot predated
+ * (`claude-opus-5-5`, `claude-sonnet-5-5`, `deepseek-v4.1-flash-fast`,
+ * `glm-5.3-flashx`, `gpt-6-luna`, `gpt-6-sol`, `gpt-6.1-sol`, `grok-4.7`,
+ * `longcat-2.0`, `mimo-v2.6-flash`, `mimo-v2.6-pro`,
+ * `mimo-v2.6-pro-ultraspeed`, `qwen-3.8-omni-flash`, `step-5-preview`) plus one
+ * drifted rate (`step-3.5-flash` is $0.09, not $0.10). Those rows were read from
+ * the page's embedded model array (`inputCost`, `outputCost`, `cacheReadCost`,
+ * `cacheWriteCost`, `timeOfDay.peak`, `contextTiers[].*`; USD per 1,000,000
+ * tokens, the page's own unit — its Go-plan estimate only resolves to the
+ * request count it prints at that unit) and each was cross-checked against the
+ * page's RENDERED per-model grid, which agreed on every figure. One further miss
+ * was pure ID shape and is handled by {@link PRICE_SLUG_ALIASES}.
+ *
+ * Two classes deliberately stay UNPRICED, because a wrong zero is worse than an
+ * absent price: the page's time-limited free deals and its stealth previews.
+ * `poolside/laguna-s-2.1-free`, `inclusionai/ling-3.0-flash-sante:free`,
+ * `inclusionai/ling-3.1-flash:free`, `stealth/space-bunny-alpha` and
+ * `stealth/pixel-canary` appear on the page only through a `deal` block
+ * (`{"deal":{"discountPercent":100,"free":true,...},"tiers":[{"rates":{"input":0,
+ * "output":0,"cacheRead":0}}]}`) that expires — `ling-3.0-flash-free` still
+ * carries zeros while its own `expires` date (2026-08-02) is in the past — so
+ * those zeros describe a promotion, not a rate. A savings figure built on them
+ * would report real spend as free the day the deal ends.
+ *
  * @module dsh-subscription-hub/model-prices
  */
 
@@ -120,13 +150,16 @@ const PRICE_ROWS: readonly PriceRow[] = [
   { id: 'claude-opus-4-7', rates: [5, 25, 0.5, 6.25] },
   { id: 'claude-opus-4-8', rates: [5, 25, 0.5, 6.25] },
   { id: 'claude-opus-5', rates: [5, 25, 0.5, 6.25] },
+  { id: 'claude-opus-5-5', rates: [4, 20, 0.2, 5] },
   { id: 'claude-sonnet-4-6', rates: [3, 15, 0.3, 3.75] },
   { id: 'claude-sonnet-5', rates: [2, 10, 0.2, 2.5] },
+  { id: 'claude-sonnet-5-5', rates: [2, 10, 0.2, 2.5] },
   { id: 'deepseek-v4-flash', rates: [0.15, 0.6, 0.003], peak: [0.3, 1.2, 0.006] },
   { id: 'deepseek-v4-flash-fast', rates: [0.28, 0.56, 0.07] },
   { id: 'deepseek-v4-flash-vision-exp', rates: [0.15, 0.6, 0.003], peak: [0.3, 1.2, 0.006] },
   { id: 'deepseek-v4-pro', rates: [0.66, 1.98, 0.022], peak: [1.32, 3.96, 0.044] },
   { id: 'deepseek-v4.1-flash', rates: [0.15, 0.6, 0.003], peak: [0.3, 1.2, 0.006] },
+  { id: 'deepseek-v4.1-flash-fast', rates: [0.16, 0.58, 0.016], peak: [0.32, 1.16, 0.032] },
   // Doubao-Seed-2.0-pro: the JoyCode reference's published table (see the block
   // comment below) prices it from 火山方舟's list price, taking the
   // input-length (32 128] band — its own note records that its logs carry no
@@ -150,6 +183,7 @@ const PRICE_ROWS: readonly PriceRow[] = [
   { id: 'glm-5.2-fast', rates: [3, 10.25, 0.5] },
   { id: 'glm-5.3', rates: [1.4, 4.4, 0.26] },
   { id: 'glm-5.3-flash', rates: [0.15, 0.5, 0.03] },
+  { id: 'glm-5.3-flashx', rates: [0.37, 1.25, 0.075] },
   { id: 'gpt-5.3-codex', rates: [2, 8, 0.5, 0] },
   { id: 'gpt-5.4', rates: [2.5, 15, 0.25, 0] },
   { id: 'gpt-5.4-mini', rates: [0.75, 4.5, 0.075, 0] },
@@ -158,8 +192,12 @@ const PRICE_ROWS: readonly PriceRow[] = [
   { id: 'gpt-5.6-sol', rates: [5, 30, 0.5, 6.25], tiers: [{ maxContext: 272000, rates: [5, 30, 0.5, 6.25] }, { rates: [10, 45, 1, 12.5] }] },
   { id: 'gpt-5.6-terra', rates: [2, 12, 0.2, 2.5], tiers: [{ maxContext: 272000, rates: [2, 12, 0.2, 2.5] }, { rates: [4, 18, 0.4, 5] }] },
   { id: 'gpt-6-astra', rates: [10, 50, 1, 12.5], tiers: [{ maxContext: 272000, rates: [10, 50, 1, 12.5] }, { rates: [20, 75, 2, 25] }] },
+  { id: 'gpt-6-luna', rates: [0.1, 0.5, 0.01, 0.125], tiers: [{ maxContext: 272000, rates: [0.1, 0.5, 0.01, 0.125] }, { rates: [0.2, 0.75, 0.02, 0.25] }] },
+  { id: 'gpt-6-sol', rates: [2, 10, 0.2, 2.5], tiers: [{ maxContext: 272000, rates: [2, 10, 0.2, 2.5] }, { rates: [4, 15, 0.4, 5] }] },
+  { id: 'gpt-6.1-sol', rates: [2, 10, 0.1, 2.5], tiers: [{ maxContext: 272000, rates: [2, 10, 0.1, 2.5] }, { rates: [4, 15, 0.2, 5] }] },
   { id: 'grok-4.5', rates: [2, 6, 0.5] },
   { id: 'grok-4.6', rates: [2, 6, 0.5], tiers: [{ maxContext: 200000, rates: [2, 6, 0.5] }, { rates: [4, 12, 1] }] },
+  { id: 'grok-4.7', rates: [2, 6, 0.5], tiers: [{ maxContext: 200000, rates: [2, 6, 0.5] }, { rates: [4, 12, 1] }] },
   { id: 'inkling', rates: [1, 4.05, 0.17] },
   { id: 'inkling-small', rates: [0.5, 1.2, 0.1] },
   { id: 'kimi-k2.5', rates: [0.6, 3, 0.1] },
@@ -168,8 +206,12 @@ const PRICE_ROWS: readonly PriceRow[] = [
   { id: 'kimi-k2.7-code-highspeed', rates: [1.9, 8, 0.38] },
   { id: 'kimi-k3', rates: [3, 15, 0.3] },
   { id: 'kimi-k3-jcloud', rates: [3, 15, 0.3] },
+  { id: 'longcat-2.0', rates: [0.3, 1.2, 0.006] },
   { id: 'mimo-v2.5', rates: [0.14, 0.28, 0.0028] },
   { id: 'mimo-v2.5-pro', rates: [0.435, 0.87, 0.0036] },
+  { id: 'mimo-v2.6-flash', rates: [0.14, 0.28, 0.0028] },
+  { id: 'mimo-v2.6-pro', rates: [0.435, 0.87, 0.0036] },
+  { id: 'mimo-v2.6-pro-ultraspeed', rates: [4.35, 8.7, 0.036] },
   { id: 'minimax-m2.5', rates: [0.3, 1.2, 0.03] },
   { id: 'minimax-m2.7', rates: [0.3, 1.2, 0.06] },
   { id: 'minimax-m3', rates: [0.3, 1.2, 0.06] },
@@ -188,8 +230,12 @@ const PRICE_ROWS: readonly PriceRow[] = [
   { id: 'qwen-3.8-flash', rates: [0.16, 0.47, 0.016] },
   { id: 'qwen-3.8-max', rates: [2, 6, 0.25, 2.5] },
   { id: 'qwen-3.8-max-0902', rates: [2, 6, 0.25] },
-  { id: 'step-3.5-flash', rates: [0.1, 0.3, 0.02] },
+  { id: 'qwen-3.8-omni-flash', rates: [0.15, 0.47, 0.016] },
+  // Corrected in the 2026-09-29 audit: the snapshot said $0.10 in, the page
+  // publishes $0.09 in (its JSON and its rendered grid agree).
+  { id: 'step-3.5-flash', rates: [0.09, 0.3, 0.02] },
   { id: 'step-3.7-flash', rates: [0.2, 1.15, 0.04] },
+  { id: 'step-5-preview', rates: [1, 2.7, 0.05] },
   { id: 'tencent/hy3-paid', rates: [0.14, 0.58, 0.035] },
   { id: 'tencent/hy4-preview', rates: [0.834, 2.501, 0.042] },
 ]
@@ -230,6 +276,27 @@ for (const price of MODEL_PRICES) {
 }
 
 /**
+ * Catalog ids whose price slug no rule can derive, spelled out.
+ *
+ * One entry, and the reason it is a table rather than a rule: the catalog id
+ * carries the model's PARAMETER COUNT and the page does not. The catalog serves
+ * `nvidia/nemotron-3-ultra-550b-a55b` (550B total / A55B active) while the page
+ * publishes the row as `nemotron-3-ultra` / "Nemotron 3 Ultra" / provider NVIDIA,
+ * so the id and the row are the same model under two names with nothing
+ * mechanical in common. Trimming trailing segments generically would be a guess
+ * with a real failure mode — `gpt-6-sol` and `gpt-6.1-sol` are DIFFERENT models
+ * at different rates, and a rule that dropped trailing segments would happily
+ * price one as the other. The reference provider (`ref-commandcode-provider`)
+ * carries the same exact entry (`PRICE_SLUG_OVERRIDES`) for the same id.
+ *
+ * An id nobody can map stays out of here: absence must stay absence.
+ */
+const PRICE_SLUG_ALIASES: Readonly<Record<string, string>> = Object.freeze({
+  'nvidia/nemotron-3-ultra-550b-a55b': 'nemotron-3-ultra',
+  'nemotron-3-ultra-550b-a55b': 'nemotron-3-ultra',
+})
+
+/**
  * Plausible page slugs for one catalog id, most specific first.
  *
  * The page lowercases, usually drops the vendor segment, and sometimes inserts a
@@ -242,6 +309,11 @@ for (const price of MODEL_PRICES) {
  * (`GPT-6 Astra`, `GPT-5.6 Sol` on the JoyCode route) where the page uses a slug.
  * Without this the id simply fails to price, which reads as "this model costs
  * nothing" — the one outcome a savings estimate must never produce by accident.
+ *
+ * An explicit {@link PRICE_SLUG_ALIASES} entry is tried LAST, after every derived
+ * spelling: it is the deliberate answer for an id the rules cannot reach, and
+ * every rule above is derived from the id itself, so a table row that happens to
+ * match one of those spellings still wins.
  * @param model - the catalog model id.
  * @returns candidate slugs in lookup order.
  */
@@ -258,6 +330,9 @@ export function priceSlugCandidates(model: string): string[] {
   for (const base of [lower, bare]) {
     out.push(base, hyphenated(base), spaced(base), hyphenated(spaced(base)), ...trimmed(base), ...trimmed(hyphenated(base)))
   }
+  // The explicit mapping, last: see {@link PRICE_SLUG_ALIASES}.
+  const alias = PRICE_SLUG_ALIASES[lower] ?? PRICE_SLUG_ALIASES[bare]
+  if (alias !== undefined) out.push(alias)
   return [...new Set(out.filter(slug => slug !== ''))]
 }
 
