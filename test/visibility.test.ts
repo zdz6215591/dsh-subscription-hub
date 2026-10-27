@@ -695,7 +695,7 @@ describe('commandcode OpenAI transport', () => {
 describe('commandcode reasoning efforts', () => {
   it('covers the models the vendor publishes with selectable levels', () => {
     assert.deepEqual(commandCodePublishedEfforts('z-ai/glm-5.3-flash'), ['low', 'high', 'max'])
-    assert.deepEqual(commandCodePublishedEfforts('deepseek/deepseek-v4.1-flash'), ['low', 'high', 'max'])
+    assert.deepEqual(commandCodePublishedEfforts('deepseek/deepseek-v4.1-flash'), ['off', 'low', 'high', 'max'])
     assert.deepEqual(commandCodePublishedEfforts('google/gemini-3.8-flash'), ['low', 'medium', 'high'])
     assert.deepEqual(commandCodePublishedEfforts('claude-sonnet-5'), ['low', 'medium', 'high', 'xhigh', 'max'])
   })

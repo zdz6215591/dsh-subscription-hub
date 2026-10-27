@@ -55,6 +55,66 @@ export const CLINE_EFFORTS: readonly string[] = Object.freeze([
   'none', 'low', 'medium', 'high', 'xhigh', 'max',
 ])
 
+/**
+ * Per-request output BUDGET for a model the caller configured none for.
+ *
+ * A budget, not a ceiling: `defaultMaxTokens` is what a request asks for, and
+ * the harness spends it twice — it fills the request's `max_tokens` from it and
+ * reserves the same number as completion room before deciding to compact — so
+ * this is the figure that decides how much of the window stays available to the
+ * conversation. The model's published output capacity clamps it per model (see
+ * {@link resolveOutputBudget}).
+ *
+ * The figure is the reference's shipped default (`DEFAULT_MAX_TOKENS`, raised
+ * 32k -> 64k by the same commit that moved sizing off the ceiling): far past any
+ * single response a tool-calling agent emits, while keeping the reserve under the
+ * point where it starts displacing the compaction ratio. Ported from
+ * yhshzh/dsh-cline-pass (MIT) `lib/adapter.js:66` at commit `3bf1d1b`.
+ */
+export const CLINE_OUTPUT_BUDGET = 64_000
+
+/**
+ * The output size to advertise for one model: a BUDGET bounded by the ceiling.
+ *
+ * Ported verbatim from yhshzh/dsh-cline-pass (MIT) `lib/catalog.js:190-197` at
+ * commit `3bf1d1b` (`fix(catalog): size a request's output from a budget, not
+ * the model ceiling`). The published output figure is a CEILING and used to
+ * become the ask, which reserved that much of every window: at the reference's
+ * 384k ceiling compaction moved from 80% of a 1M window down to 55%, and a
+ * ceiling equal to the window (`kimi-k2.6`, `kimi-k2.7-code` publish
+ * 262144/262144) left the compaction policy no message budget at all, which it
+ * answers with an error instead of a reading.
+ *
+ * Two rules, both from the reference:
+ *   1. the ceiling CLAMPS the budget instead of becoming it, so the ask stays
+ *      whatever the caller asked for whenever that is already below the ceiling;
+ *   2. a budget is never taken past half the window, which is what leaves a
+ *      request less room for the conversation than for its own response. That
+ *      guard only ever catches a hand-set value.
+ *
+ * The type-guard form differs from the reference only because these parameters
+ * are already typed as numbers, so `Number.isFinite` needs the undefined check
+ * first.
+ * @param budget - the per-request budget, when one is set.
+ * @param ceiling - the model's published output ceiling, when one is known.
+ * @param contextWindow - the resolved window, when one is known.
+ * @returns the tokens to advertise, or undefined when nothing constrains it.
+ */
+export function resolveOutputBudget(
+  budget: number | undefined,
+  ceiling: number | undefined,
+  contextWindow: number | undefined,
+): number | undefined {
+  const wanted = budget !== undefined && Number.isFinite(budget) && budget > 0 ? budget : undefined
+  const most = ceiling !== undefined && Number.isFinite(ceiling) && ceiling > 0 ? ceiling : undefined
+  const chosen = wanted === undefined ? most : most === undefined ? wanted : Math.min(wanted, most)
+  if (chosen === undefined) return undefined
+  const half = contextWindow !== undefined && Number.isFinite(contextWindow) && contextWindow > 0
+    ? Math.floor(contextWindow / 2)
+    : undefined
+  return half === undefined ? chosen : Math.min(chosen, half)
+}
+
 /** Where one catalog row's metadata came from. */
 export type ClineCatalogSource = 'cline' | 'models.dev' | 'static'
 

@@ -30,6 +30,7 @@ import {
 } from '../src/providers/cline/pins.js'
 import {
   CLINE_MODEL_PREFIX,
+  CLINE_OUTPUT_BUDGET,
   clineModel,
   discoverClineModels,
   mergeClineModel,
@@ -883,4 +884,104 @@ test('a mid-stream failure after delivered content is reported, not swallowed', 
   } else {
     assert.ok(threw instanceof Error)
   }
+})
+
+// ---------------------------------------------------------------------------
+// The output budget, as distinct from the model's output ceiling
+// ---------------------------------------------------------------------------
+
+test('the output size is a budget the published ceiling clamps, not the ceiling itself', async () => {
+  // `defaultMaxTokens` is what a request ASKS for, and the harness spends it
+  // twice: it fills the request's `max_tokens` from it and reserves the same
+  // number as completion room before deciding to compact. Publishing the model's
+  // published output CEILING into it therefore reserved that much of every
+  // window — at the reference's 384k ceiling compaction moved from 80% of a 1M
+  // window down to 55% — and a ceiling equal to the window left the policy no
+  // message budget at all, which it answers with an error rather than a reading.
+  //
+  // Reference: yhshzh/dsh-cline-pass (MIT) `lib/catalog.js:190-197` at commit
+  // `3bf1d1b` (`resolveOutputBudget`), with the shipped budget from
+  // `lib/adapter.js:66` (`DEFAULT_MAX_TOKENS = 64000`). The repository at that
+  // commit ships built JS only, so those are the files the fix landed in.
+  const responses: Record<string, unknown> = {
+    'recommended-models': {
+      clinePass: [
+        { id: 'cline-pass/unconfigured' },
+        { id: 'cline-pass/wide' },
+        { id: 'cline-pass/narrow' },
+        { id: 'cline-pass/small-ask' },
+      ],
+    },
+    '/ai/cline/models': {
+      data: [
+        { id: 'deepseek/unconfigured', context_length: 1_000_000, top_provider: { max_completion_tokens: 384_000 } },
+        { id: 'deepseek/wide', context_length: 1_000_000, top_provider: { max_completion_tokens: 384_000 } },
+        // A ceiling equal to the whole window: the reference's kimi-k2.6 /
+        // kimi-k2.7-code case (262144/262144) that used to make the compaction
+        // policy answer an error.
+        { id: 'deepseek/narrow', context_length: 262_144, top_provider: { max_completion_tokens: 262_144 } },
+        { id: 'deepseek/small-ask', context_length: 400_000, top_provider: { max_completion_tokens: 200_000 } },
+      ],
+    },
+  }
+  const fetchFn = (async (input: string | URL | Request) => {
+    const url = String(input)
+    const key = Object.keys(responses).find(candidate => url.includes(candidate))
+    const body = key === undefined ? {} : responses[key]
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+  }) as unknown as FetchFn
+
+  const session: ClineSession = {
+    accessToken: 'sk_test12345678',
+    refreshToken: 'sk_test12345678',
+    expiresAt: Date.now() + 100000,
+    account: 'test-user',
+  }
+  const tokens = new AccountTokenManager<ClineSession>({
+    provider: 'cline',
+    displayName: 'Cline',
+    makeOptions: () => ({ preemptMs: 0, refresh: async s => s, isPermanent: () => false }),
+    io: {
+      list: async () => [{ key: 'default', session }],
+      get: async () => session,
+      save: async () => {},
+      remove: async () => {},
+    },
+  })
+  const adapter = new ClineAdapter({
+    // A hand-set ask ABOVE the published ceiling, and one above HALF the window.
+    models: [
+      { id: 'cline-pass/wide', maxTokens: 900_000 },
+      { id: 'cline-pass/narrow', maxTokens: 900_000 },
+      // A budget already below the ceiling: the ceiling must leave it alone.
+      { id: 'cline-pass/small-ask', maxTokens: 30_000 },
+    ],
+    streamIdleTimeoutMs: 10000,
+    tokens,
+    pins: new ClinePinStore(),
+    discovery: true,
+    fetchFn,
+  })
+
+  // Warm the discovered catalog the way the provider entry does.
+  await adapter.listOwnModels('cline')
+
+  // No configured ask: the shipped budget is advertised, NOT the 384k ceiling.
+  const unconfigured = await adapter.resolveModel('cline', 'cline-pass/unconfigured')
+  assert.equal(unconfigured.defaultMaxTokens, CLINE_OUTPUT_BUDGET)
+  assert.notEqual(unconfigured.defaultMaxTokens, 384_000, 'the published ceiling must not become the ask')
+  assert.equal(unconfigured.context?.contextWindow, 1_000_000)
+
+  // An ask above the ceiling is clamped to it (rule 1 of `resolveOutputBudget`).
+  const wide = await adapter.resolveModel('cline', 'cline-pass/wide')
+  assert.equal(wide.defaultMaxTokens, 384_000)
+
+  // An ask past half the window is pulled back to half of it (rule 2), so the
+  // reserve always leaves the conversation its own room.
+  const narrow = await adapter.resolveModel('cline', 'cline-pass/narrow')
+  assert.equal(narrow.defaultMaxTokens, Math.floor(262_144 / 2))
+
+  // An ask already below the ceiling is left exactly as the caller set it.
+  const smallAsk = await adapter.resolveModel('cline', 'cline-pass/small-ask')
+  assert.equal(smallAsk.defaultMaxTokens, 30_000)
 })

@@ -23,7 +23,7 @@
 
 import { EMPTY_RESPONSE_CODE, LlmError } from '@deepseek-ai/dsh-llm'
 import { proxiedFetch } from '../../http.js'
-import { buildAuthHeaders } from './cosy.js'
+import { buildAuthHeaders, defaultUserAgent } from './cosy.js'
 import type { CosyCredentials } from './cosy.js'
 import {
   qoderError,
@@ -367,7 +367,15 @@ export async function fetchQoderModels(
   try {
     const response = await fetchImpl(url, {
       method: 'GET',
-      headers: { accept: 'application/json', ...buildAuthHeaders(null, url, credentials) },
+      headers: {
+        accept: 'application/json',
+        // Without this the catalog left Node's default user agent on the wire,
+        // so one subscriber arrived as two clients: the COSY-signed catalog
+        // carried no Qoder identity at all (`qoder/transport/catalog-reader.ts:46`
+        // in commit c97f69c, which names every outbound channel with the one UA).
+        'user-agent': defaultUserAgent,
+        ...buildAuthHeaders(null, url, credentials),
+      },
       signal: deadline.signal,
     })
     options.logger?.debug?.('[Qoder Models] Catalog request completed', {

@@ -26,7 +26,7 @@ import {
   getToolSignature,
   recordToolSignature,
 } from '../src/providers/agy/signature-cache.js'
-import { toAgyRequestBody } from '../src/providers/agy/translate.js'
+import { requiresThoughtSignatures, toAgyRequestBody } from '../src/providers/agy/translate.js'
 
 /** Encode one SSE `data:` line as a ReadableStream<Uint8Array>. */
 function sseBody(lines: string[]): ReadableStream<Uint8Array> {
@@ -157,4 +157,41 @@ test('agy: a tool-call with no cached signature degrades to an unsigned function
   const fc = model.parts.find((p) => 'functionCall' in p) as { thoughtSignature?: string; functionCall: unknown }
   assert.ok(fc, 'the functionCall part must survive translation without a cached signature')
   assert.equal(fc.thoughtSignature, undefined, 'no cached signature → the replay is unsigned, not fabricated/aborted')
+})
+
+/**
+ * Gemini 4 validates replayed tool-call signatures exactly like Gemini 3
+ * (upstream 0b8631a, issue #148): the API answers HTTP 400 "Function call is
+ * missing a thought_signature in functionCall parts" unless the step's first
+ * call carries the placeholder, reproduced on `gemini-4-argon-low` with a
+ * direct v1internal call (omitted → 400, placeholder → 200).
+ *
+ * The pinned catalog (agy/catalog.ts) has no Gemini 4 row and the replay path
+ * degrades to unsigned rather than emitting the placeholder, so the predicate is
+ * the only place the old `/^gemini-3(?:[.-]|$)/i` bound could regress silently:
+ * with that regex every gemini-4+ id below reports false.
+ */
+test('agy: Gemini 4 and later require thought signatures; Gemini 2 and unversioned names do not', () => {
+  for (const model of [
+    'gemini-4-argon-low',
+    'gemini-4-argon-high',
+    'gemini-4.5-pro',
+    'gemini-4',
+    'gemini-10-pro',
+    'gemini-3-pro-preview',
+    'gemini-3.7-flash-tiered',
+  ]) {
+    assert.equal(requiresThoughtSignatures(model), true, `${model} validates replayed function calls`)
+  }
+  for (const model of [
+    'gemini-2.5-flash',
+    'gemini-2.5-pro',
+    'gemini-1.5-pro',
+    'gemini-pro',
+    'gemini-pro-agent',
+    'claude-sonnet-4-5',
+  ]) {
+    assert.equal(requiresThoughtSignatures(model), false, `${model} never asked for a signature`)
+  }
+  assert.equal(requiresThoughtSignatures(undefined), false, 'an unknown model is not treated as a Gemini 3+')
 })

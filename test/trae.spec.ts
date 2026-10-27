@@ -29,6 +29,7 @@ import {
   buildTraeChatBody,
   decodeTraeEvent,
   normalizeTraeToolCalls,
+  traeEffortLevel,
   traeEndpoint,
   traeHeaders,
 } from '../src/providers/trae/protocol.js'
@@ -681,4 +682,83 @@ test('fetchTraeCheckinStatus reads today state off the status endpoint', async (
   assert.equal(status.checkedIn, true)
   assert.equal(status.credits, 150)
   assert.equal(status.enabled, true)
+})
+
+// ---------------------------------------------------------------------------
+// The thinking ladder: only levels Trae binds, and no verbatim fallback
+// ---------------------------------------------------------------------------
+
+test('the thinking ladder names only the levels Trae binds and OMITS an unmapped one', async () => {
+  // Reference: LaoDing/dsh-connect-trae (MIT) commit `d0ea14c`
+  // (`fix(reasoning): 思考档位词表配平，未知档位不再静默降档成 high`, issue #60).
+  // Its `WIRE_EFFORT_MAP` (src/catalog.ts, the commit's 344-350 region) maps
+  // low->light, medium->medium, high->high, xhigh->extra_high, max->max, and a
+  // level the table cannot name produces NO entry at all — the old ternary chain
+  // ended in a bare 'high', so every unnamed level was silently downgraded.
+  //
+  // This plugin's ladder knew only light/high/extra_high and, at
+  // `protocol.ts:173`, forwarded an unmapped id VERBATIM — so `minimal` (a DSH
+  // level Trae never advertises) went to the wire as `reasoning_effort:
+  // "minimal"`. Both halves must name the same levels, so the forward parse side
+  // (`catalog.ts`) is asserted here too.
+  const body = (level: string): Record<string, unknown> => buildTraeChatBody({
+    model: 'glm-5.2',
+    functionName: 'solo_work_remote',
+    messages: [{ role: 'user', text: 'hi' }],
+    reasoningEffort: level,
+  })
+
+  const ladder: readonly (readonly [string, string])[] = [
+    ['low', 'light'],
+    ['medium', 'medium'],
+    ['high', 'high'],
+    ['xhigh', 'extra_high'],
+    ['max', 'max'],
+  ]
+  for (const [level, wire] of ladder) {
+    assert.equal(body(level).reasoning_effort, wire, `${level} must be sent as ${wire}`)
+    // The advertised name maps back to the same level: a ladder that survives
+    // only one direction would show a level it cannot send, or send one it never
+    // shows.
+    assert.equal(traeEffortLevel(wire), level, `${wire} must read back as ${level}`)
+  }
+
+  // A level with no wire spelling is OMITTED, not shipped verbatim (the bug),
+  // and not downgraded to another level (the reference's earlier bug).
+  assert.equal('reasoning_effort' in body('minimal'), false, 'an unmappable level must not reach the wire')
+  assert.equal('reasoning_effort' in body('off'), false)
+  assert.equal('reasoning_effort' in body('none'), false)
+
+  // The parse half, over a real directory answer: every level Trae names is kept
+  // and a name this plugin cannot carry is dropped instead of passed through.
+  const payload = {
+    data: {
+      list: [
+        {
+          function: 'solo_agent',
+          models: [
+            {
+              name: 'glm-5.3',
+              display_name: 'GLM-5.3',
+              reasoning_effort_config: {
+                support_thinking: true,
+                options: ['light', 'medium', 'high', 'extra_high', 'max', 'ultra'],
+                default_level: 'max',
+              },
+            },
+          ],
+        },
+      ],
+    },
+  }
+  const fetchFn = (async () => new Response(JSON.stringify(payload), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })) as unknown as FetchFn
+  const models = await fetchRemoteModels('token', undefined, fetchFn)
+  const glm53 = models?.find(model => model.id === 'glm-5.3')
+  // `ultra` is not in Trae's vocabulary, so it has no wire name here and is
+  // DROPPED rather than forwarded to the request builder (where it would now be
+  // omitted anyway — but a picker entry no request can honour is a lie).
+  assert.deepEqual(glm53?.efforts, ['none', 'low', 'medium', 'high', 'xhigh', 'max'])
 })

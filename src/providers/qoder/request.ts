@@ -22,7 +22,7 @@ import { qoderError, qoderHttpError, qoderRequestId, QODER_ABORTED_CODE, QODER_P
 import type { QoderErrorResponse } from './errors.js'
 import { logParsedResponse, redactLogPayload } from './logging.js'
 import type { QoderLogger } from './logging.js'
-import { defaultUserAgent, qoderClientType } from './cosy.js'
+import { defaultUserAgent, qoderClientType, qoderIdeVersion } from './cosy.js'
 import { proxiedFetch } from '../../http.js'
 
 /** Default deadline for one metadata (non-streaming) request. */
@@ -247,8 +247,9 @@ export interface OpenApiJsonRequestOptions {
 /**
  * Perform one unsigned OpenAPI request and parse its JSON body.
  *
- * These routes authenticate with a plain `Bearer <job token>` and the two plain
- * `cosy-version` / `cosy-clienttype` headers — no COSY signature, no `/algo`.
+ * These routes authenticate with a plain `Bearer <job token>` and carry the
+ * client identity as `Cosy-Version` / `cosy-clienttype` — no COSY signature, no
+ * `/algo`.
  * @param fetchFn - the fetcher to use (defaults to the hub's proxy-aware fetch).
  * @param options - the request.
  * @returns the parsed body.
@@ -274,9 +275,17 @@ export async function openApiJsonRequest<T>(
     const headers: Record<string, string> = {
       accept: 'application/json',
       'user-agent': options.userAgent ?? defaultUserAgent,
-      'cosy-version': '1.0.1',
       'cosy-clienttype': qoderClientType,
-      ...options.headers,
+      // The stale lower-case `cosy-version: 1.0.1` this route used to send named
+      // a client build from a year before the one the same plugin signs its COSY
+      // requests with (`qoder/transport/request.ts:277`, commit c97f69c: the
+      // plugin made one subscriber look like two unrelated clients). HTTP header
+      // names are case-insensitive, so exactly one version header is emitted:
+      // a caller duplicate is filtered out and the real identity is set here.
+      ...Object.fromEntries(Object.entries(options.headers ?? {}).filter(
+        ([name]) => name.toLowerCase() !== 'cosy-version',
+      )),
+      'Cosy-Version': qoderIdeVersion,
     }
     if (options.token) {
       headers.authorization = `Bearer ${options.token}`

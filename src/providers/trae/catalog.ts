@@ -24,6 +24,7 @@ import {
   TRAE_IDE_DIRECTORY_FUNCTIONS,
   TRAE_MODELS_PATH,
   TRAE_SOLO_DIRECTORY_FUNCTIONS,
+  traeEffortLevel,
   traeEndpoint,
   traeHeaders,
 } from './protocol.js'
@@ -203,9 +204,16 @@ function effortsOf(config: Record<string, unknown>): string[] | undefined {
         ? (option as Record<string, unknown>).level ?? (option as Record<string, unknown>).value
         : undefined
     if (typeof raw !== 'string' || raw === '') continue
-    // Trae's wire vocabulary is light/high/extra_high; expose the client-facing
-    // names so the picker reads like every other provider's.
-    const normalized = raw === 'light' ? 'low' : raw === 'extra_high' ? 'xhigh' : raw
+    // Trae's wire vocabulary is light/medium/high/extra_high/max; expose the
+    // client-facing names so the picker reads like every other provider's. The
+    // table is shared with the request builder (`TRAE_EFFORT_LEVELS` is the
+    // inverse of `TRAE_WIRE_EFFORTS`), and a wire name it does not carry has no
+    // level this plugin can offer, so it is DROPPED instead of passed through —
+    // a passthrough level could only ever be shipped back under a name the
+    // vocabulary never bound. Ported from the reference's `EFFORT_MAP` at
+    // `ref-trae-primary` commit `d0ea14c`.
+    const normalized = traeEffortLevel(raw)
+    if (normalized === undefined) continue
     if (!efforts.includes(normalized)) efforts.push(normalized)
   }
   return efforts.length > 0 ? efforts : undefined
@@ -315,7 +323,6 @@ export async function fetchRemoteModels(
     const json = await response.json() as { data?: { list?: { function?: string; models?: Record<string, unknown>[] }[] } }
     const groups = json.data?.list ?? []
     const byId = new Map<string, TraeModel>()
-    const effortMap: Record<string, string> = { light: 'low', high: 'high', extra_high: 'xhigh' }
 
     /** Read the advertised effort levels out of one directory row. */
     const effortsOf = (raw: Record<string, unknown>): string[] | undefined => {
@@ -325,8 +332,10 @@ export async function fetchRemoteModels(
       const rawOptions = Array.isArray(reasoningConfig?.options) ? reasoningConfig.options : []
       const mapped = rawOptions.flatMap((opt): string[] => {
         if (typeof opt !== 'string') return []
-        const m = effortMap[opt] ?? opt
-        return m ? [m] : []
+        // Same shared table and same rule as the wire-roster reader above: a
+        // name this plugin cannot carry is dropped, never forwarded.
+        const m = traeEffortLevel(opt)
+        return m === undefined ? [] : [m]
       })
       return mapped.length > 0 ? ['none', ...mapped] : undefined
     }

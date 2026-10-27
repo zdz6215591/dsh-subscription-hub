@@ -23,6 +23,7 @@ import { attributionHeaders, EMPTY_RESPONSE_CODE, LlmError } from '@deepseek-ai/
 import type { GenerateOptions, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { QoderCatalogModel } from './catalog.js'
 import { qoderError, qoderHttpError, qoderRequestId, QODER_ABORTED_CODE, QODER_TRANSPORT_CODE } from './errors.js'
+import { defaultMaxErrorBytes, readLimitedText } from './request.js'
 import type { QoderRegion } from './region.js'
 import { getQoderChatUrl } from './region.js'
 import { redactLogValue } from './logging.js'
@@ -125,9 +126,22 @@ export async function* streamQoderChat(
     })
     resetIdleTimer()
     if (!response.ok) {
+      // Read the bounded error body BEFORE failing: only the body separates a
+      // queue throttle (10605) from a real authorization rejection, and the HTTP
+      // status they arrive on is the same 401/403 (reference
+      // `qoder/transport/chat.ts:395-401`, commit 631be5c: "the error body now
+      // reaches the classifier on the HTTP-level … paths").
+      let errorBody: string | undefined
+      try {
+        errorBody = await readLimitedText(response, defaultMaxErrorBytes, 'Qoder chat error response')
+      } catch {
+        // An unreadable body still fails the request, classified from status alone.
+        errorBody = undefined
+      }
       throw qoderHttpError(`Qoder upstream service returned HTTP ${response.status}.`, {
         status: response.status,
         headers: response.headers,
+        ...errorBody === undefined || errorBody.length === 0 ? {} : { body: errorBody },
       })
     }
     if (!response.body) {

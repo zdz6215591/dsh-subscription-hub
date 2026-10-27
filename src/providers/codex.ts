@@ -632,6 +632,30 @@ export function reconcileResponsesToolCalls(input: ResponsesRequestInput['input'
 }
 
 /**
+ * The `reasoning.effort` wire value for one selected effort.
+ *
+ * Codex's model list advertises `ultra` as a supported reasoning level, but it
+ * is a CLIENT-ONLY mode (max reasoning plus proactive sub-agent delegation):
+ * the Codex CLI itself lowers it to `max` at the Responses API boundary, and the
+ * backend answers HTTP 400 to a literal `ultra`. The advertised level therefore
+ * stays in the picker and protocol surface (it is a real, selectable Codex
+ * mode — `fetchCodexModels` keeps it), while the wire never sees it verbatim.
+ * Every other effort passes through unchanged.
+ *
+ * Upstream evidence (ref-dsh-plugin-subscriptions, 090d964..7639ed9):
+ *   527f4d9 "fix(codex): lower a saved 'ultra' reasoning effort to 'max' on the
+ *   wire" — src/providers/codex.ts `codexWireEffort`, applied to
+ *   `reasoning.effort` in `codexRequestBody`; and 0c65c7d "Drop Codex 'ultra'
+ *   from discovered reasoning efforts", which records that "the Responses API
+ *   rejects reasoning.effort 'ultra' with HTTP 400".
+ * @param effort - the effort id selected in the picker.
+ * @returns the effort value to send on the wire.
+ */
+export function codexWireEffort(effort: string): string {
+  return effort === 'ultra' ? 'max' : effort
+}
+
+/**
  * The Responses request body for one generation. A fast-tier request (the
  * composer Speed toggle, the codex CLI's fast mode) carries
  * `service_tier: priority`; the tier field is omitted entirely otherwise,
@@ -650,7 +674,7 @@ export function codexRequestBody(
       ? { tools: toResponsesTools(options.tools, { strict: false }), tool_choice: 'auto', parallel_tool_calls: true }
       : {},
     ...options.reasoningEffort !== undefined
-      ? { reasoning: { effort: String(options.reasoningEffort), summary: 'auto' } }
+      ? { reasoning: { effort: codexWireEffort(String(options.reasoningEffort)), summary: 'auto' } }
       : {},
     store: false,
     stream: true,

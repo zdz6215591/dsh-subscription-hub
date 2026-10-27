@@ -12,7 +12,14 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { CommandCodeAdapter, COMMANDCODE_MESSAGES_ONLY_MODELS, requiresMessagesEndpoint } from '../src/providers/commandcode.js'
+import {
+  CommandCodeAdapter,
+  COMMANDCODE_MESSAGES_ONLY_MODELS,
+  COMMAND_CODE_CLI_VERSION,
+  commandCodePublishedEfforts,
+  isUnpublishedModel,
+  requiresMessagesEndpoint,
+} from '../src/providers/commandcode.js'
 import type { CommandCodeSession } from '../src/auth/store.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
 import { writeCommandCodeCatalog } from '../src/providers/commandcode-catalog-cache.js'
@@ -383,4 +390,222 @@ test('a Messages-only model discovered from the live catalog skips the doomed re
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+// ---------------------------------------------------------------------------
+// Reference alignment (Mars-Sea/dsh-commandcode-provider @ 2e4d35d)
+//
+// Every citation in this block is a GIT OBJECT of the reference clone, not a
+// path in its worktree: that checkout sits on the v0.11.14 tag, 13 releases
+// behind its own `origin/main`, and the values below only exist on origin/main.
+// ---------------------------------------------------------------------------
+
+/** One recorded request: URL, the headers it carried and its parsed JSON body. */
+interface RecordedRequest {
+  url: string
+  headers: Record<string, string>
+  body: Record<string, any>
+}
+
+/** A fetcher that records every request's URL, headers and parsed body. */
+function recordingRequests(handler: (url: string) => Response): { fetchFn: FetchFn; requests: RecordedRequest[] } {
+  const requests: RecordedRequest[] = []
+  const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input)
+    requests.push({
+      url,
+      headers: (init?.headers ?? {}) as Record<string, string>,
+      body: typeof init?.body === 'string' ? JSON.parse(init.body) as Record<string, any> : {},
+    })
+    return handler(url)
+  }) as unknown as FetchFn
+  return { fetchFn, requests }
+}
+
+/** A fetcher that answers `/provider/v1/models` with `rows` and every chat call with a stream. */
+function catalogAndStream(rows: readonly Record<string, unknown>[]): { fetchFn: FetchFn; requests: RecordedRequest[] } {
+  return recordingRequests(url => url.includes('/provider/v1/models')
+    ? new Response(JSON.stringify({ object: 'list', data: rows }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+    : okStream())
+}
+
+/** `drain`, but with extra `GenerateOptions` a call needs (e.g. a chosen effort). */
+async function drainWith(adapter: CommandCodeAdapter, model: string, extra: Record<string, unknown> = {}): Promise<void> {
+  const options = {
+    provider: 'commandcode',
+    model,
+    messages: [{ id: 'm1' as never, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }],
+    ...extra,
+  }
+  for await (const _ of adapter.stream(options as never)) { void _ }
+}
+
+test('every request claims CLI 1.88.0 — the release the reference sends', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cc-ver-'))
+  try {
+    const { fetchFn, requests } = recordingRequests(() => okStream())
+    const adapter = harness(join(dir, 'absent.json'), fetchFn)
+    await drain(adapter, 'deepseek/deepseek-v4-pro')
+    assert.equal(requests.length, 1)
+    // Reference `src/adapter.ts:103` @ 2e4d35d: `COMMAND_CODE_CLI_VERSION = '1.88.0'`,
+    // 40 releases past the 1.47.0 this route used to claim.
+    assert.equal(requests[0]!.headers['x-command-code-version'], '1.88.0')
+    // The header must ride the constant, not a second literal that could drift.
+    assert.equal(COMMAND_CODE_CLI_VERSION, '1.88.0')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('max_tokens is capped at the MEASURED 200 000 ceiling, not the old 64 000', async () => {
+  // Reference `src/output-budget.ts:16-23` @ 2e4d35d probed `/alpha/generate`
+  // directly: 200 000 answered HTTP 200 and 200 704 answered HTTP 400, so the
+  // server's cap is 200 000. A row declaring a larger per-model max_tokens is
+  // therefore still cut at 200 000.
+  const dir = mkdtempSync(join(tmpdir(), 'cc-cap-'))
+  try {
+    const { fetchFn, requests } = catalogAndStream([
+      {
+        id: 'deepseek/deepseek-v4-pro',
+        object: 'model',
+        name: 'DeepSeek V4 Pro',
+        context_length: 1_000_000,
+        max_tokens: 262_144,
+        supported_endpoints: ['/chat/completions'],
+      },
+    ])
+    const adapter = harness(join(dir, 'absent.json'), fetchFn)
+    // Prime the live catalog, or the row below is never read and the request
+    // falls back to the default budget instead of exercising the ceiling.
+    await adapter.listModels('commandcode')
+    await drainWith(adapter, 'deepseek/deepseek-v4-pro')
+    const generate = requests.find(request => request.url.includes('/provider/v1/chat/completions'))
+    assert.ok(generate !== undefined, JSON.stringify(requests.map(request => request.url)))
+    assert.equal(generate.body.max_tokens, 200_000)
+    // The old 64 000 cap would have answered 64 000 here for every request.
+    assert.notEqual(generate.body.max_tokens, 64_000)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a model with no published max_tokens asks for the reference default, 131 072', async () => {
+  // Reference `src/output-budget.ts:47` @ 2e4d35d: MAX_OUTPUT_TOKEN_LIMIT is
+  // 131 072 — a 35 % margin under the measured ceiling, chosen to cover the real
+  // output ceiling of the models that have one.
+  const dir = mkdtempSync(join(tmpdir(), 'cc-cap-'))
+  try {
+    const { fetchFn, requests } = catalogAndStream([
+      {
+        id: 'z-ai/glm-5.3-flash',
+        object: 'model',
+        name: 'GLM 5.3 Flash',
+        context_length: 1_000_000,
+        supported_endpoints: ['/chat/completions'],
+      },
+    ])
+    const adapter = harness(join(dir, 'absent.json'), fetchFn)
+    await adapter.listModels('commandcode')
+    await drainWith(adapter, 'z-ai/glm-5.3-flash')
+    const generate = requests.find(request => request.url.includes('/provider/v1/chat/completions'))
+    assert.ok(generate !== undefined)
+    assert.equal(generate.body.max_tokens, 131_072)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('the DeepSeek V4 ladders carry the `off` level the reference publishes', () => {
+  // Reference `src/capabilities.ts:90-92` and `:83` @ 2e4d35d. `off` is the
+  // family's "do not think" level, added by command-code@1.73.3 — exactly to the
+  // DeepSeek V4 line, which is why this must NOT be generalised by family name.
+  for (const id of [
+    'deepseek/deepseek-v4-pro',
+    'deepseek/deepseek-v4-flash',
+    'deepseek/deepseek-v4-flash-vision-exp',
+  ]) {
+    assert.deepEqual(commandCodePublishedEfforts(id), ['off', 'high', 'max'], id)
+  }
+  assert.deepEqual(commandCodePublishedEfforts('deepseek/deepseek-v4.1-flash'), ['off', 'low', 'high', 'max'])
+  // THE OVER-GENERALISATION GUARD: its sibling never gained `off` upstream and
+  // the reference still ships it at three levels (`src/capabilities.ts:81`).
+  assert.deepEqual(commandCodePublishedEfforts('deepseek/deepseek-v4-flash-fast'), ['low', 'high', 'max'])
+  // And no other family was touched by the change.
+  assert.deepEqual(commandCodePublishedEfforts('z-ai/glm-5.3-flash'), ['low', 'high', 'max'])
+  assert.deepEqual(commandCodePublishedEfforts('google/gemini-3.8-flash'), ['low', 'medium', 'high'])
+  assert.deepEqual(commandCodePublishedEfforts('claude-sonnet-5'), ['low', 'medium', 'high', 'xhigh', 'max'])
+})
+
+test('the picker offers `off` on the models that publish it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cc-off-'))
+  try {
+    const adapter = harness(join(dir, 'absent.json'), failingFetch)
+    const resolved = await adapter.resolveModel('commandcode', 'deepseek/deepseek-v4-pro')
+    assert.deepEqual(resolved.reasoning?.efforts.map(effort => String(effort.id)), ['off', 'high', 'max'])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('selecting `off` really disables thinking — but only where the model lists it', async () => {
+  // Reference `src/adapter.ts:3427-3438` @ 2e4d35d: `off` carries two meanings.
+  // A model that LISTS it gets `reasoning_effort: "off"` on the wire (the
+  // official CLI spreads the value rather than dropping the field); every other
+  // model keeps dropping it, which is what "no strength requested" relies on.
+  const dir = mkdtempSync(join(tmpdir(), 'cc-off-'))
+  try {
+    const listed = recordingRequests(() => okStream())
+    await drainWith(harness(join(dir, 'a.json'), listed.fetchFn), 'deepseek/deepseek-v4-pro', { reasoningEffort: 'off' })
+    const sent = listed.requests.find(request => request.url.includes('/provider/v1/chat/completions'))
+    assert.ok(sent !== undefined)
+    assert.equal(sent.body.reasoning_effort, 'off')
+
+    const unlisted = recordingRequests(() => okStream())
+    await drainWith(harness(join(dir, 'b.json'), unlisted.fetchFn), 'z-ai/glm-5.3-flash', { reasoningEffort: 'off' })
+    const dropped = unlisted.requests.find(request => request.url.includes('/provider/v1/chat/completions'))
+    assert.ok(dropped !== undefined)
+    // Absent, not `null` and not the string: the field must not be invented for a
+    // model whose ladder does not list the level.
+    assert.equal('reasoning_effort' in dropped.body, false, JSON.stringify(dropped.body))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('the CLI transport sends the real client\'s permissionMode and taste flag', async () => {
+  // Reference `src/adapter.ts:2063-2072` @ 2e4d35d sends `permissionMode:
+  // 'standard'` (the CLI's `toWirePermissionMode()` normalization of its internal
+  // `default`), and `:2340` sends `'x-taste-learning': 'false'` on every request.
+  // A Claude id is used because it is the transport the CLI body belongs to.
+  const dir = mkdtempSync(join(tmpdir(), 'cc-wire-'))
+  try {
+    const { fetchFn, requests } = recordingRequests(() => okStream())
+    await drainWith(harness(join(dir, 'absent.json'), fetchFn), 'claude-opus-5')
+    const cli = requests.find(request => request.url.includes('/alpha/generate'))
+    assert.ok(cli !== undefined, JSON.stringify(requests.map(request => request.url)))
+    assert.equal(cli.body.permissionMode, 'standard')
+    assert.equal(cli.headers['x-taste-learning'], 'false')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('the roster carries the reference rows this route can also price', () => {
+  // Reference `src/capabilities.ts:77` (levels) + `:1002` (GOAT tier) and
+  // `:193` (levels) + `:1059` (the only Max-only row) @ 2e4d35d. Both are priced
+  // by `src/stats/model-prices.ts`, so adding them costs nothing elsewhere.
+  assert.deepEqual(commandCodePublishedEfforts('claude-sonnet-5-5'), ['low', 'medium', 'high', 'xhigh', 'max'])
+  assert.deepEqual(commandCodePublishedEfforts('gpt-6.1-sol'), ['low', 'medium', 'high', 'xhigh', 'max'])
+  // Published, so resolving them must not report a stale snapshot.
+  assert.equal(isUnpublishedModel('claude-sonnet-5-5'), false)
+  assert.equal(isUnpublishedModel('gpt-6.1-sol'), false)
+  // The lapsed free twin is NOT carried as a live fact any more: the reference
+  // records it leaving the catalog, the pricing page and the CLI artifact on
+  // 2026-10-16 (`src/capabilities.ts:849-851`, `:1258-1261`).
+  assert.equal(isUnpublishedModel('inclusionai/ling-3.0-flash-sante:free'), true)
+  // Its still-live neighbour must stay: a free row the reference DOES serve.
+  assert.equal(isUnpublishedModel('poolside/laguna-s-2.1-free'), false)
 })

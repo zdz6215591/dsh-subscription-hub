@@ -27,8 +27,41 @@ function generateAntigravityRequestId(): string {
 
 const SKIP_THOUGHT_SIGNATURE_VALIDATOR = 'skip_thought_signature_validator'
 
-function requiresThoughtSignatures(model?: string): boolean {
-  return model !== undefined && /^gemini-3(?:[.-]|$)/i.test(model)
+/**
+ * Whether this model validates thought signatures on replayed function calls.
+ *
+ * Gemini 3 introduced the requirement and Gemini 4 enforces it identically: a
+ * session that replays tool calls made by ANOTHER model (so there is no
+ * provider signature to reuse) is rejected with
+ *
+ *   HTTP 400 "Function call is missing a thought_signature in functionCall
+ *   parts" … function call `default_api:bash`, position 186
+ *
+ * unless the first call of the step carries the placeholder
+ * ({@link SKIP_THOUGHT_SIGNATURE_VALIDATOR}). The upstream reproduced this on
+ * `gemini-4-argon-low` with a direct v1internal call: `thoughtSignature` omitted
+ * → HTTP 400, placeholder → HTTP 200, i.e. Gemini 4 runs the same validation as
+ * Gemini 3. Widening is the safe direction — an unnecessary placeholder is
+ * accepted, a missing signature is not — so this matches Gemini 3 and every
+ * later major version. Gemini 1.x/2.x and unversioned `gemini-<name>` never
+ * asked for one and must not match.
+ *
+ * Upstream evidence (ref-dsh-plugin-subscriptions, 090d964..7639ed9): 0b8631a
+ * "fix(antigravity): Gemini 4 也要 thought_signature, 重放外部工具调用不再 400
+ * （issue #148）" widened src/translate/antigravity.ts `requiresThoughtSignatures`
+ * from `/^gemini-3(?:[.-]|$)/i` to the pattern below.
+ *
+ * Latent in this plugin for two reasons, both recorded here rather than hidden:
+ * the pinned catalog (agy/catalog.ts) has no Gemini 4 row, and the replay path
+ * ({@link blockToParts}) currently degrades an uncached signature to an unsigned
+ * functionCall instead of emitting the placeholder. This predicate is the seam a
+ * placeholder emission would use; it is exported so the widened boundary is
+ * pinned by a test instead of drifting back.
+ * @param model - the request's model id, when known.
+ * @returns whether the model validates replayed function calls.
+ */
+export function requiresThoughtSignatures(model?: string): boolean {
+  return model !== undefined && /^gemini-(?:[3-9]|[1-9]\d+)(?:[.-]|$)/i.test(model)
 }
 
 function toolResultValue(result: ToolResultView): Record<string, unknown> {

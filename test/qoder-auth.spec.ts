@@ -12,6 +12,9 @@ import './keep-alive.js'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { QoderAuthService } from '../src/providers/qoder/auth.js'
+import { qoderClientType, qoderIdeVersion } from '../src/providers/qoder/cosy.js'
+import { openApiJsonRequest } from '../src/providers/qoder/request.js'
+import { getQoderUsageUrl } from '../src/providers/qoder/region.js'
 import { LlmError } from '@deepseek-ai/dsh-llm'
 
 test('QoderAuthService exchanges once, resolves identity, and caches credentials', async () => {
@@ -48,10 +51,10 @@ test('QoderAuthService exchanges once, resolves identity, and caches credentials
   assert.equal(exchangeCalls, 1)
   assert.equal(userInfoCalls, 1)
   // The unsigned OpenAPI routes carry the plain identity headers, not the COSY set.
-  assert.equal(exchangeHeaders?.['user-agent'], 'qoder/1.1.47')
+  assert.equal(exchangeHeaders?.['user-agent'], 'qoder/1.1.76')
   assert.equal(exchangeHeaders?.['cosy-clienttype'], '5')
-  assert.equal(exchangeHeaders?.['cosy-version'], '1.0.1')
-  assert.equal(userInfoHeaders?.['user-agent'], 'qoder/1.1.47')
+  assert.equal(exchangeHeaders?.['Cosy-Version'], '1.1.76')
+  assert.equal(userInfoHeaders?.['user-agent'], 'qoder/1.1.76')
   assert.equal(userInfoHeaders?.['cosy-clienttype'], '5')
   assert.equal(userInfoHeaders?.authorization, 'Bearer jt-token')
 })
@@ -301,4 +304,38 @@ test('clear drops one account, or all of them', async () => {
   service.clear()
   await service.getCredentials('pt-b')
   assert.equal(calls, 4)
+})
+
+test('metadata calls present one Qoder identity and never the stale cosy-version 1.0.1', async () => {
+  // Before commit c97f69c the plugin sent three identities to one upstream: the
+  // host UA on the chat SSE, `qoder/1.1.47` on the Bearer metadata calls, and
+  // Node's default on the catalog and image upload. The metadata route also kept
+  // a lower-case `cosy-version: 1.0.1` of its own, so the very same subscriber
+  // looked like a client from a year earlier. HTTP field names are
+  // case-insensitive, so the route now emits exactly ONE version header, derived
+  // from `qoderIdeVersion`, with any caller duplicate filtered out
+  // (`qoder/transport/request.ts:212-225` in that commit).
+  let seenHeaders: Record<string, string> | undefined
+  const fetchMock = (async (_input: URL | Request, init?: RequestInit): Promise<Response> => {
+    seenHeaders = init?.headers as Record<string, string>
+    return new Response(JSON.stringify({ userQuota: { total: 1, used: 0, remaining: 1 } }))
+  }) as typeof fetch
+
+  await openApiJsonRequest(fetchMock, {
+    url: getQoderUsageUrl('global'),
+    token: 'jt-identity',
+    operation: 'Usage',
+    // A caller still passing the old lower-case header must not resurrect it.
+    headers: { 'cosy-version': '1.0.1' },
+  })
+
+  assert.ok(seenHeaders !== undefined)
+  assert.equal(seenHeaders['Cosy-Version'], qoderIdeVersion)
+  assert.equal(seenHeaders['user-agent'], `qoder/${qoderIdeVersion}`)
+  assert.equal(seenHeaders['cosy-clienttype'], qoderClientType)
+  // Exactly one spelling of the version header, and it is not 1.0.1.
+  const versionHeaders = Object.keys(seenHeaders).filter(name => name.toLowerCase() === 'cosy-version')
+  assert.deepEqual(versionHeaders, ['Cosy-Version'])
+  assert.ok(!Object.values(seenHeaders).includes('1.0.1'))
+  assert.ok(!Object.keys(seenHeaders).some(name => name.toLowerCase() === 'user-agent' && seenHeaders?.[name] !== `qoder/${qoderIdeVersion}`))
 })

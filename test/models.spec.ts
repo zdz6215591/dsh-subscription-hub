@@ -9,10 +9,11 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import './keep-alive.js'
 import { MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { Message } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
 import { CodexAdapter, codexRequestBody, fetchCodexModels } from '../src/providers/codex.js'
 import { GrokAdapter } from '../src/providers/grok.js'
-import { ClaudeAdapter, claudeRequestBody } from '../src/providers/claude.js'
+import { CLAUDE_IMAGE_LIMITS, ClaudeAdapter, assertClaudeImageLimits, claudeRequestBody } from '../src/providers/claude.js'
+import type { TranslatableMessage } from '../src/translate/resolved.js'
 import { CopilotAdapter, fetchCopilotModels } from '../src/providers/copilot.js'
 import { ModelCatalogCache } from '../src/providers/common.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
@@ -1498,4 +1499,138 @@ test('withTimeout still settles when work ignores the abort signal', async () =>
 test('withTimeout returns the value when work finishes in time', async () => {
   const models = await withTimeout(async () => ['ok'], 50)
   assert.deepEqual(models, ['ok'])
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Wire limits carried over from upstream `ref-dsh-plugin-subscriptions`
+// (090d964..7639ed9). Appended as one self-contained group with its own helpers
+// so the coverage above stays untouched.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The `reasoning` object the codex body sends for one selected effort level.
+ * @param effort - the level the picker selected.
+ * @returns the body's `reasoning` field.
+ */
+function codexReasoning(effort: string): unknown {
+  return codexRequestBody(
+    { provider: 'codex', model: 'gpt-5.2-codex', messages: [], reasoningEffort: ReasoningEffortId(effort) },
+    { input: [] },
+    false,
+  ).reasoning
+}
+
+test('codex wire: the client-only "ultra" effort is sent as "max"', () => {
+  // ref-dsh-plugin-subscriptions 527f4d9 ("lower a saved ultra reasoning effort
+  // to max on the wire") and 0c65c7d ("the Responses API rejects
+  // reasoning.effort ultra with HTTP 400"): "ultra" is a Codex-CLI mode — max
+  // reasoning plus proactive sub-agent delegation — and the CLI itself sends
+  // "max" to the Responses API. The level stays advertised and selectable, so
+  // the lowering has to happen here, not in discovery.
+  assert.deepEqual(codexReasoning('ultra'), { effort: 'max', summary: 'auto' })
+  // Every other advertised level still reaches the wire verbatim.
+  for (const effort of ['minimal', 'low', 'medium', 'high', 'xhigh']) {
+    assert.deepEqual(codexReasoning(effort), { effort, summary: 'auto' }, `${effort} must pass through unchanged`)
+  }
+})
+
+/** A stored image attachment reference with the geometry and size the harness records. */
+function imageRef(attachmentId: string, width: number, height: number, bytes: number): {
+  attachmentId: string
+  mediaType: string
+  bytes: number
+  width: number
+  height: number
+} {
+  return { attachmentId, mediaType: 'image/png', bytes, width, height }
+}
+
+/** One user message carrying the given image references. */
+function imageMessages(...refs: ReturnType<typeof imageRef>[]): Message[] {
+  return [{
+    id: MessageId('image-turn'),
+    role: 'user',
+    source: { kind: 'user' },
+    content: refs.map(attachment => ({ type: 'image', attachment }) as never),
+  }]
+}
+
+test('claude images: an oversized image is refused before it is sent, naming the 2000px limit', async () => {
+  // ref-dsh-plugin-subscriptions f34770c (#110): "Anthropic rejects any image
+  // edge over 2000px once a request carries many images", and every later turn
+  // resends the history, so one oversized screenshot (2560x1215 in the report)
+  // failed that session for good with HTTP 400. This host cannot project request
+  // images, so the stored original is what would be sent — exactly the case the
+  // cap has to catch.
+  const oversized = imageRef('shot-wide', 2560, 1215, 240_000)
+  const messages = imageMessages(oversized)
+  const sentTo: string[] = []
+  const original = globalThis.fetch
+  globalThis.fetch = ((input: RequestInfo | URL) => {
+    sentTo.push(String(input))
+    return Promise.resolve(new Response('{}', { status: 200 }))
+  }) as typeof globalThis.fetch
+  try {
+    const adapter = new ClaudeAdapter({
+      models: STATIC_CLAUDE,
+      streamIdleTimeoutMs: 1_000,
+      tokens: memoryTokens(claudeSession),
+      discovery: false,
+      resolveAttachments: () => ({
+        // No readImageRequest: the store cannot derive a request version, so
+        // readRequestImage falls back to these stored bytes.
+        readImage: () => Promise.resolve({ ref: oversized, data: new Uint8Array(9) }),
+      }) as never,
+    })
+    const options: GenerateOptions = { provider: 'claude', model: 'claude-opus-4-5', messages, maxTokens: 1_000 }
+    await assert.rejects(
+      (async () => { for await (const _chunk of adapter.stream(options)) { /* drain */ } })(),
+      (error: unknown) => error instanceof Error
+        && /2560x1215/.test(error.message)
+        && /2000px/.test(error.message),
+    )
+    assert.deepEqual(sentTo, [], 'the request never reaches the network')
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('claude images: the per-image and per-request budgets fail with the limit named', () => {
+  // f34770c: 3.75MB encoded per image, "under the 5MB base64 per-image limit".
+  // 43f2bbe / eb42966 (#136): the request body limit is 32MB, so the route holds
+  // inline images to a 20MiB base64 budget, leaving room for prompts and tools.
+  assert.equal(CLAUDE_IMAGE_LIMITS.maxEdge, 2000)
+  assert.equal(CLAUDE_IMAGE_LIMITS.maxImageBytes, 3_750_000)
+  assert.equal(CLAUDE_IMAGE_LIMITS.maxRequestBase64Bytes, 20 * 1024 * 1024)
+
+  /** One request whose stored refs fit the 2000px cap and whose payloads are given. */
+  const turnWith = (payloads: string[]): { requested: Message[]; resolved: TranslatableMessage[] } => ({
+    requested: imageMessages(...payloads.map((_payload, index) => imageRef(`shot-${index}`, 800, 600, 1_000))),
+    resolved: [{
+      role: 'user',
+      content: payloads.map(dataBase64 => ({ type: 'image' as const, mediaType: 'image/png', dataBase64 })),
+    }],
+  })
+
+  // A request inside both budgets passes untouched.
+  const fits = turnWith(['A'.repeat(4), 'A'.repeat(4_000)])
+  assert.doesNotThrow(() => assertClaudeImageLimits(fits.requested, fits.resolved, undefined))
+
+  // One image encoding 3,750,003 bytes, over the 3.75MB per-image budget.
+  const tooBig = turnWith(['A'.repeat(5_000_004)])
+  assert.throws(
+    () => assertClaudeImageLimits(tooBig.requested, tooBig.resolved, undefined),
+    (error: unknown) => error instanceof Error
+      && /3750000/.test(error.message)
+      && /per-image limit/.test(error.message),
+  )
+
+  // Six 2.7MB images each fit per image, but 21.6MB of base64 exceeds the 20MiB budget.
+  const overBudget = turnWith(Array.from({ length: 6 }, () => 'A'.repeat(3_600_000)))
+  assert.throws(
+    () => assertClaudeImageLimits(overBudget.requested, overBudget.resolved, undefined),
+    (error: unknown) => error instanceof Error
+      && /20971520/.test(error.message)
+      && /image budget/.test(error.message),
+  )
 })

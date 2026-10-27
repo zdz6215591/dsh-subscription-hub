@@ -8,10 +8,12 @@ import type { InputModality } from './modality.js'
 import { execFileSync } from 'node:child_process'
 import { EMPTY_RESPONSE_CODE, errorChain, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
+  ContentBlock,
   GenerateOptions,
   LlmModelInfo,
   LlmProviderInfo,
   LlmResolvedModelInfo,
+  Message,
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import type { FlowSpec } from '../auth/oauth-flow.js'
@@ -20,7 +22,7 @@ import type { ProviderId } from '../auth/store.js'
 import type { PoolAdapter } from './pool.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { resolveImages } from '../translate/resolved.js'
-import type { TranslatableMessage } from '../translate/resolved.js'
+import type { TranslatableBlock, TranslatableMessage } from '../translate/resolved.js'
 import {
   markMessageCache,
   streamAnthropic,
@@ -514,6 +516,146 @@ export interface ClaudeAdapterOptions {
 const CLAUDE_MODALITIES: readonly InputModality[] = ['text', 'image']
 
 /**
+ * Anthropic's image limits on the Messages route.
+ *
+ * Two independent HTTP 400s, both verified upstream (ref-dsh-plugin-subscriptions,
+ * commits 090d964..7639ed9):
+ *
+ *   - f34770c "fix(claude): send images within the 2000px many-image limit":
+ *     "Anthropic rejects any image edge over 2000px once a request carries many
+ *     images, and every later turn resends the whole history, so one large
+ *     screenshot (2560x1215, 2048x2048, 1800x2329 in the report) failed the
+ *     session for good with HTTP 400 (#110)". That commit caps the route at a
+ *     2000px long edge and 3.75MB encoded per image ("under the 5MB base64
+ *     per-image limit").
+ *   - 43f2bbe / eb42966 "fix(claude): offload the oldest images before a request
+ *     exceeds the 32MB limit (#136)": the request body limit is 32MB and inline
+ *     history images accumulate toward it, so the upstream route holds images to
+ *     a 20MiB base64 budget, leaving ~12MB for prompts and tools.
+ *
+ * This plugin already downscales this route: {@link resolveImages} reads every
+ * image through `readRequestImage` (src/translate/image-request.ts:35,44), whose
+ * policy is a 1568px long edge and 1MiB encoded — strictly inside both Anthropic
+ * limits, so no second downscaler is added here. What that pipeline cannot cover
+ * is its documented fallback: a host whose attachment service cannot project
+ * sends the STORED original (src/translate/image-request.ts:145-153), which is
+ * precisely the oversized image the upstream fix exists for — and no part of the
+ * pipeline caps the total. {@link assertClaudeImageLimits} closes both before
+ * anything is sent.
+ */
+export const CLAUDE_IMAGE_LIMITS = {
+  /** Longest edge Anthropic accepts once a request carries many images (f34770c). */
+  maxEdge: 2000,
+  /** Encoded bytes one image may be sent at; 3.75MB sits under the 5MB base64 per-image limit (f34770c). */
+  maxImageBytes: 3_750_000,
+  /** Inline base64 image data one request may carry, inside the 32MB body limit (eb42966). */
+  maxRequestBase64Bytes: 20 * 1024 * 1024,
+} as const
+
+/** Encoded byte length of a base64 payload, without decoding it. */
+function base64ByteLength(base64: string): number {
+  const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0
+  return Math.floor((base64.length * 3) / 4) - padding
+}
+
+/**
+ * Every inline image payload a resolved request will send, depth-first in
+ * request order (tool-result images included). This is what reaches the wire as
+ * base64, so it is what the byte budgets must be measured against.
+ */
+function sentImagePayloads(messages: readonly TranslatableMessage[]): string[] {
+  const payloads: string[] = []
+  const visit = (blocks: readonly TranslatableBlock[]): void => {
+    for (const block of blocks) {
+      if (block.type === 'image' && 'dataBase64' in block) payloads.push(block.dataBase64)
+      else if (block.type === 'tool-result') visit(block.content)
+    }
+  }
+  for (const message of messages) visit(message.content)
+  return payloads
+}
+
+/** Every image attachment reference a request carries, in the same order. */
+function requestedImageRefs(messages: readonly Message[]): { width: number; height: number }[] {
+  const refs: { width: number; height: number }[] = []
+  const visit = (blocks: readonly ContentBlock[]): void => {
+    for (const block of blocks) {
+      if (block.type === 'image') refs.push(block.attachment)
+      else if (block.type === 'tool-result') visit(block.content)
+    }
+  }
+  for (const message of messages) visit(message.content)
+  return refs
+}
+
+/**
+ * Refuse an oversized image request before it is sent, naming the limit it
+ * breaks and what to change. Anthropic answers these with an opaque HTTP 400 and
+ * every later turn replays the same history, so a request that is already
+ * doomed must fail here instead.
+ *
+ * The geometry check only applies when the host cannot project images: with
+ * projection the sent image is the 1568px request version
+ * (src/translate/image-request.ts:35), well inside the 2000px cap; without it the
+ * stored original is sent, so the stored geometry is what Anthropic measures.
+ * (A host that advertises projection and then rejects it at runtime per call is
+ * the one case this cannot see from here — the shared pipeline treats that as a
+ * supported degradation, and the byte budgets below still apply to it.)
+ * The byte budgets are always measured on the payload actually built.
+ * @param requested - the generate request's messages, carrying attachment refs.
+ * @param resolved - the same messages after {@link resolveImages}.
+ * @param attachments - the mounted attachment service, when one is mounted.
+ */
+export function assertClaudeImageLimits(
+  requested: readonly Message[],
+  resolved: readonly TranslatableMessage[],
+  attachments: AttachmentStore | undefined,
+): void {
+  const payloads = sentImagePayloads(resolved)
+  if (payloads.length === 0) return
+  payloads.forEach((dataBase64, index) => {
+    const bytes = base64ByteLength(dataBase64)
+    if (bytes > CLAUDE_IMAGE_LIMITS.maxImageBytes) {
+      throw new LlmError(
+        `claude request image ${index + 1} of ${payloads.length} is ${bytes} bytes encoded, over the `
+        + `${CLAUDE_IMAGE_LIMITS.maxImageBytes}-byte per-image limit the Messages API enforces `
+        + '(ref f34770c: 3.75MB encoded, under the 5MB base64 per-image cap); '
+        + 'reduce or split that image before sending it on this route',
+        'IMAGE_TOO_LARGE',
+      )
+    }
+  })
+  const projectsImages = typeof (attachments as { readImageRequest?: unknown } | undefined)
+    ?.readImageRequest === 'function'
+  if (!projectsImages) {
+    // No request projection: readRequestImage falls back to the stored bytes, so
+    // the stored geometry is the geometry Anthropic sees (f34770c, #110).
+    requestedImageRefs(requested).forEach((ref, index) => {
+      const longEdge = Math.max(ref.width, ref.height)
+      if (longEdge > CLAUDE_IMAGE_LIMITS.maxEdge) {
+        throw new LlmError(
+          `claude request image ${index + 1} is ${ref.width}x${ref.height}: its ${longEdge}px long edge `
+          + `exceeds the ${CLAUDE_IMAGE_LIMITS.maxEdge}px limit the Messages API enforces once a request `
+          + 'carries many images (ref f34770c, #110), and this host cannot downscale it for the request; '
+          + 'resize the image below 2000px on its long edge before sending it on this route',
+          'IMAGE_TOO_LARGE',
+        )
+      }
+    })
+  }
+  const totalBase64Bytes = payloads.reduce((sum, dataBase64) => sum + dataBase64.length, 0)
+  if (totalBase64Bytes > CLAUDE_IMAGE_LIMITS.maxRequestBase64Bytes) {
+    throw new LlmError(
+      `claude request carries ${totalBase64Bytes} bytes of inline image data, over the `
+      + `${CLAUDE_IMAGE_LIMITS.maxRequestBase64Bytes}-byte image budget kept inside the 32MB body limit `
+      + '(ref 43f2bbe/eb42966, #136); remove the oldest images from the history before sending it '
+      + 'on this route',
+      'IMAGE_TOO_LARGE',
+    )
+  }
+}
+
+/**
  * Assemble the Anthropic request body.
  *
  * Extracted from the adapter so the wire shape — cache breakpoints above all —
@@ -766,7 +908,11 @@ export class ClaudeAdapter extends LlmAdapter {
   }
 
   private async request(options: GenerateOptions, session: ClaudeSession, signal: AbortSignal): Promise<Response> {
-    const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal)
+    const attachments = this.options.resolveAttachments?.()
+    const messages = await resolveImages(options.messages, attachments, signal)
+    // Anthropic rejects oversized images with an opaque HTTP 400 that every later
+    // turn replays, so refuse them here with the limit named instead.
+    assertClaudeImageLimits(options.messages, messages, attachments)
     // The Anthropic Messages API REQUIRES `max_tokens`, so a request cannot be
     // built without a number. This is the harness's own request requirement, not
     // a claim about the model: `resolveOwnModel` reports no `defaultMaxTokens`

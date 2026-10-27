@@ -7,7 +7,10 @@
  *  - `userQuota` — the plan's own credits;
  *  - `orgResourcePackage` — the team pool, present only for organization seats;
  *  - `addOnQuota` — bonus credits granted beside the plan (the daily
- *    campaign's 100, for one).
+ *    campaign's 100, for one);
+ *  - `dedicatedResourcePackages` — campaign grants, each with its OWN expiry and
+ *    its own localized title (the international edition's SOTA exclusive
+ *    credits), which is why they cannot be folded into any bucket above.
  *
  * Each carries its own total, used and remaining, so collapsing them into one
  * number loses the account's real shape: the reference observed a live account
@@ -64,10 +67,43 @@ export interface QoderQuotaUsage {
    * than the account actually holds (two on the web, one here).
    */
   addOnQuota?: QoderQuota | undefined
+  /**
+   * Campaign grants with their own expiry and display title.
+   *
+   * The international upstream stacks them in `dedicatedResourcePackages` — one
+   * entry per campaign package (the 2,000-credit SOTA exclusive credits, for
+   * one) — while the three named buckets above share the single cycle-level
+   * `expiresAt`. Leaving the array unmapped hid a whole package that the account
+   * page listed (reference `src/qoder/account.ts:17-34`, commit 163a889).
+   */
+  dedicatedResourcePackages?: readonly QoderDedicatedResourcePackage[] | undefined
   totalUsagePercentage?: number | undefined
   isQuotaExceeded?: boolean | undefined
   expiresAt?: string | undefined
   raw?: unknown
+}
+
+/**
+ * A named grant of credits that expires on its own schedule.
+ *
+ * Reference `src/qoder/account.ts:17-34`: every other bucket borrows the
+ * account's cycle-level date, whereas a dedicated package carries its OWN
+ * `expiresAt` and its own localized title, so it is its own shape rather than
+ * another {@link QoderQuota}.
+ */
+export interface QoderDedicatedResourcePackage extends QoderQuota {
+  /** Upstream package id (`01a1426f-…`), when reported. */
+  id?: string | undefined
+  /** Raw upstream name — usually an opaque campaign code, not display copy. */
+  name?: string | undefined
+  /** Localized display title from `displayLabels`, when the upstream sends one. */
+  title?: { zh?: string | undefined; en?: string | undefined } | undefined
+  /** This package's own expiry, ISO; never the account's cycle-level date. */
+  expiresAt?: string | undefined
+  /** Whether the upstream says the package is currently usable. */
+  available?: boolean | undefined
+  /** Upstream lifecycle marker (`QUOTA_DETAIL_STATUS_ACTIVE`). */
+  status?: string | undefined
 }
 
 /** The organization a seat belongs to, when the account is not personal. */
@@ -134,6 +170,11 @@ interface RawUsageInfo {
   orgResourcePackage?: RawQuota
   /** Bonus credits granted beside the plan (the daily campaign's 100). */
   addOnQuota?: RawQuota
+  /**
+   * Campaign grants that carry their own total, expiry and localized title (the
+   * international edition's SOTA exclusive credits arrive here).
+   */
+  dedicatedResourcePackages?: RawDedicatedPackage[]
   totalUsagePercentage?: number
   isQuotaExceeded?: boolean
   expiresAt?: number | string
@@ -141,13 +182,56 @@ interface RawUsageInfo {
   upgradeUrl?: string
 }
 
+/** One `dedicatedResourcePackages` entry as the upstream spells it. */
+interface RawDedicatedPackage extends RawQuota {
+  id?: string
+  name?: string
+  description?: string
+  expiresAt?: number | string
+  status?: string
+  displayLabels?: { dimension?: string; value?: string; valueI18n?: Record<string, string> }[]
+}
+
+/**
+ * The consumed share of one pool, as a 0–100 percentage.
+ *
+ * Upstream's `percentage` is ambiguous in the 0–1 band, and the reference's
+ * `raw.percentage <= 1 && total > 1` rule resolved that band in one direction
+ * only (`src/qoder/transport/account-reader.ts:93`): it multiplied EVERY such
+ * value by 100 on the strength of the live endpoint expressing 3% as `0.03`,
+ * which turns a package that is 0.5% used into a bar reporting 50%.
+ *
+ * Nothing has to be guessed to settle it: `used / total` is what the percentage
+ * is a percentage OF, and both numbers arrive in the same payload. So the
+ * reading nearer the pool's own credit arithmetic wins, and the ratio reading
+ * stands wherever the pool cannot decide — a missing/non-finite `used`, a pool
+ * of one credit or less (`total <= 1`, the existing rule), or an exact tie.
+ * That keeps `0.03` of 3000 at 3% AND reads `0.5` of 3000 at 0.5%.
+ * @param value - the wire `percentage` value.
+ * @param total - the pool's total, as already normalized.
+ * @param used - the pool's used amount, or undefined when the wire omitted it.
+ * @returns the percentage consumed, 0–100.
+ */
+function consumedPercentage(value: number, total: number, used: number | undefined): number {
+  // Above 1 there is nothing to disambiguate: it is already a percentage.
+  if (value > 1) return value
+  // A pool of at most one credit cannot discriminate (pre-existing rule).
+  if (total <= 1) return value
+  // No reported `used` means no ground truth; fall back to the ratio reading.
+  if (used === undefined || !Number.isFinite(used)) return value * 100
+  const fromCredits = (used / total) * 100
+  const ratioReading = value * 100
+  return Math.abs(fromCredits - ratioReading) <= Math.abs(fromCredits - value) ? ratioReading : value
+}
+
 /**
  * Normalize one raw credit package.
  *
  * Total is read from `total`, then `cap`, then `used + remaining` — upstream
  * omits it on the organization package, which reports a cap and a remaining but
- * no total. A `percentage` below 1 alongside a total above 1 is read as a 0–1
- * ratio, which is how the live endpoint expresses 3% as `0.03`.
+ * no total. The `percentage` field is resolved by {@link consumedPercentage},
+ * because the same field carries a 0–1 ratio on one response and a plain
+ * percentage on another.
  * @param raw - the raw package, or undefined when the account has none.
  * @returns the normalized package, or undefined when there was nothing to read.
  */
@@ -160,14 +244,15 @@ export function normalizeQoderQuota(raw?: RawQuota): QoderQuota | undefined {
       : (typeof raw.remaining === 'number' && typeof raw.used === 'number'
         ? raw.used + raw.remaining
         : 0))
-  const used = typeof raw.used === 'number' && Number.isFinite(raw.used) ? raw.used : 0
+  const reportedUsed = typeof raw.used === 'number' && Number.isFinite(raw.used) ? raw.used : undefined
+  const used = reportedUsed ?? 0
   const remaining = typeof raw.remaining === 'number' && Number.isFinite(raw.remaining)
     ? raw.remaining
     : Math.max(0, total - used)
 
   let percentage: number
   if (typeof raw.percentage === 'number' && Number.isFinite(raw.percentage)) {
-    percentage = raw.percentage <= 1 && total > 1 ? raw.percentage * 100 : raw.percentage
+    percentage = consumedPercentage(raw.percentage, total, reportedUsed)
   } else {
     percentage = total > 0 ? (used / total) * 100 : 0
   }
@@ -178,18 +263,41 @@ export function normalizeQoderQuota(raw?: RawQuota): QoderQuota | undefined {
 }
 
 /**
+ * The year at which Qoder stops naming a date and means "never".
+ *
+ * The upstream encodes an uncapped allowance as the year-9999 sentinel
+ * `253402214400000`. It is a valid timestamp and a real date to any parser, so
+ * forwarding it printed the year 10000 as the account's reset time (reference
+ * `src/qoder/transport/account-reader.ts:116-125`, commit 163a889).
+ */
+const NEVER_EXPIRY_YEAR = 9999
+
+/**
+ * ISO instant for a parsed expiry, or undefined for the "never" sentinel.
+ * @param atMs - the parsed instant.
+ * @returns the ISO-8601 string, or undefined when the value means "no expiry".
+ */
+function toExpiryIso(atMs: number): string | undefined {
+  return new Date(atMs).getUTCFullYear() >= NEVER_EXPIRY_YEAR ? undefined : new Date(atMs).toISOString()
+}
+
+/**
  * Normalize an expiry, which upstream reports as either epoch milliseconds or a date string.
+ *
+ * The year-9999 sentinel reads as the ABSENCE of an expiry, not as a date: a
+ * genuine far-future date (a subscription ending in 2031) still normalizes, so
+ * the drop keys on the sentinel alone.
  * @param rawExpires - the raw value.
  * @returns the ISO-8601 instant, or undefined when nothing parseable was sent.
  */
 export function normalizeQoderExpiresAt(rawExpires?: number | string): string | undefined {
   if (rawExpires === undefined || rawExpires === null) return undefined
   if (typeof rawExpires === 'number' && rawExpires > 0) {
-    return new Date(rawExpires).toISOString()
+    return toExpiryIso(rawExpires)
   }
   if (typeof rawExpires === 'string' && rawExpires.length > 0) {
     const parsed = Date.parse(rawExpires)
-    if (!Number.isNaN(parsed) && parsed > 0) return new Date(parsed).toISOString()
+    if (!Number.isNaN(parsed) && parsed > 0) return toExpiryIso(parsed)
   }
   return undefined
 }
@@ -296,12 +404,98 @@ export function normalizeQoderStatus(raw: unknown): QoderSubscriberStatus | unde
   }
 }
 
-/** Parse a wire package into a display window. */
-function quotaWindow(kind: string, quota: QoderQuota | undefined, resetsAt: number | undefined): UsageWindow | undefined {
+/** Localized `displayLabels` values, keyed by bare language (`zh` / `en`). */
+function labelI18n(raw: Record<string, string> | undefined): { zh?: string; en?: string } {
+  const out: { zh?: string; en?: string } = {}
+  if (!raw || typeof raw !== 'object') return out
+  for (const [key, value] of Object.entries(raw)) {
+    const text = asString(value)
+    if (text === undefined) continue
+    const language = key.slice(0, 2).toLowerCase()
+    if (language === 'zh') out.zh = text
+    else if (language === 'en') out.en = text
+  }
+  return out
+}
+
+/**
+ * One campaign grant, including the title the upstream localized for it.
+ *
+ * `name` is an opaque code (`act-20261014-129`) — the human copy lives in
+ * `displayLabels` under `dimension: 'title'`, so that is what the row is
+ * labelled with and the code is kept only as provenance (reference
+ * `src/qoder/transport/account-reader.ts:141-175`, commits 163a889/1b992f8).
+ * @param raw - one `dedicatedResourcePackages` entry.
+ * @returns the grant, or undefined when it carries no readable package.
+ */
+function normalizeDedicatedPackage(raw: RawDedicatedPackage): QoderDedicatedResourcePackage | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const quota = normalizeQoderQuota(raw)
+  if (quota === undefined) return undefined
+  const labels = Array.isArray(raw.displayLabels) ? raw.displayLabels : []
+  const title = labels.find(label => label?.dimension === 'title')
+  const id = asString(raw.id)
+  const name = asString(raw.name)
+  const status = asString(raw.status)
+  const expiresAt = normalizeQoderExpiresAt(raw.expiresAt)
+  return {
+    ...quota,
+    ...id === undefined ? {} : { id },
+    ...name === undefined ? {} : { name },
+    ...title === undefined ? {} : (() => {
+      const parsed = labelI18n(title.valueI18n)
+      // A label whose i18n map is empty still has the plain `value` the
+      // upstream sent; fall back to it rather than losing the name entirely.
+      const fallback = asString(title.value)
+      if (parsed.zh === undefined && parsed.en === undefined && fallback === undefined) return {}
+      return {
+        title: {
+          ...parsed.zh !== undefined ? { zh: parsed.zh } : (fallback !== undefined ? { zh: fallback } : {}),
+          ...parsed.en !== undefined ? { en: parsed.en } : (fallback !== undefined ? { en: fallback } : {}),
+        },
+      }
+    })(),
+    ...expiresAt === undefined ? {} : { expiresAt },
+    ...typeof raw.available === 'boolean' ? { available: raw.available } : {},
+    ...status === undefined ? {} : { status },
+  }
+}
+
+/**
+ * Normalize the `dedicatedResourcePackages` array.
+ *
+ * A malformed entry is dropped instead of failing the whole quota read: the
+ * package list is additive to an answer that already carries the plan pools.
+ * @param raw - the raw array, when the response carried one.
+ * @returns the readable grants, or undefined when none could be read.
+ */
+function normalizeDedicatedPackages(
+  raw: RawDedicatedPackage[] | undefined,
+): QoderDedicatedResourcePackage[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const packages = raw
+    .map(entry => normalizeDedicatedPackage(entry))
+    .filter((entry): entry is QoderDedicatedResourcePackage => entry !== undefined)
+  return packages.length > 0 ? packages : undefined
+}
+
+/**
+ * Parse a wire package into a display window.
+ * @param scope - the bucket name, or the grant's own title; omitted when the
+ *   upstream named nothing.
+ * @param quota - the normalized package.
+ * @param resetsAt - the instant this package ends, when it has its own.
+ * @returns the display window, or undefined when there was no package.
+ */
+function quotaWindow(
+  scope: string | undefined,
+  quota: QoderQuota | undefined,
+  resetsAt: number | undefined,
+): UsageWindow | undefined {
   if (quota === undefined) return undefined
   return {
     kind: 'other',
-    scope: kind,
+    ...scope === undefined ? {} : { scope },
     usedPercent: Math.min(100, Math.max(0, quota.percentage)),
     remaining: quota.remaining,
     limit: quota.total,
@@ -346,6 +540,13 @@ function instantOf(...values: readonly (string | number | undefined)[]): number 
  * declares `validity: { mode: RELATIVE_DAYS, days: 30 }`), so no single instant
  * describes it. Stamping the plan's date on it is what made the check-in credits
  * look like they expire with the plan.
+ *
+ * A campaign grant (`dedicatedResourcePackages`) is the exception: it becomes its
+ * own window, labelled with its own upstream title, carrying its OWN `expiresAt`
+ * — never the account's, which is the year-9999 "never" sentinel for a personal
+ * plan (reference `src/upstream.ts:793-806`: "Its own expiry travels with it,
+ * never the account's"). It also joins the `remaining`/`limit` sums, exactly as
+ * the reference counts them in its `totalSize`.
  * @param account - one usage read.
  * @returns the hub-facing usage.
  */
@@ -361,6 +562,14 @@ export function qoderProviderUsage(account: QoderAccountInfo): ProviderUsage {
     ['add-on', usage.addOnQuota],
   ] as const) {
     const window = quotaWindow(scope, quota, scope === 'plan' ? planResetAt : undefined)
+    if (window !== undefined) windows.push(window)
+  }
+  for (const pack of usage.dedicatedResourcePackages ?? []) {
+    const window = quotaWindow(
+      pack.title?.zh ?? pack.title?.en ?? pack.name,
+      pack,
+      instantOf(pack.expiresAt),
+    )
     if (window !== undefined) windows.push(window)
   }
   if (windows.length === 0) return { supported: false }
@@ -540,6 +749,13 @@ export class QoderUsageReader {
       userQuota: normalizeQoderQuota(data.userQuota),
       orgResourcePackage: normalizeQoderQuota(data.orgResourcePackage),
       addOnQuota: normalizeQoderQuota(data.addOnQuota),
+      // Campaign grants: the array the reader never mapped, which is why a real
+      // 2,000-credit package stayed invisible while the account page listed it
+      // (reference `src/qoder/transport/account-reader.ts:408-413`).
+      ...(() => {
+        const packages = normalizeDedicatedPackages(data.dedicatedResourcePackages)
+        return packages === undefined ? {} : { dedicatedResourcePackages: packages }
+      })(),
       totalUsagePercentage: typeof data.totalUsagePercentage === 'number' ? data.totalUsagePercentage : undefined,
       isQuotaExceeded: typeof data.isQuotaExceeded === 'boolean' ? data.isQuotaExceeded : false,
       expiresAt: normalizeQoderExpiresAt(data.expiresAt),

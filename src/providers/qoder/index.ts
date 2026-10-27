@@ -49,6 +49,7 @@ export {
   isQoderPermanentRefreshError,
   qoderError,
   qoderHttpError,
+  qoderQueueSignal,
   qoderRequestId,
   retryAfterMs,
   QODER_ABORTED_CODE,
@@ -58,7 +59,10 @@ export {
   QODER_TRANSPORT_CODE,
   QODER_UNSUPPORTED_CODE,
 } from './errors.js'
-export type { QoderErrorResponse } from './errors.js'
+export type { QoderErrorResponse, QoderQueueSignal } from './errors.js'
+
+export { QODER_RESULT_CODES, qoderResultCode } from './codes.js'
+export type { QoderResultCode, QoderResultCodeFamily } from './codes.js'
 
 export { logParsedResponse, redactLogPayload, redactLogValue } from './logging.js'
 export type { QoderLogger } from './logging.js'
@@ -141,6 +145,7 @@ export {
 } from './usage.js'
 export type {
   QoderAccountInfo,
+  QoderDedicatedResourcePackage,
   QoderQuota,
   QoderQuotaUsage,
   QoderSubscriberFeatureAllowed,

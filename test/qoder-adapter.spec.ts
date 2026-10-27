@@ -758,3 +758,108 @@ test('probeQoderPat does not populate the transport cache with a probe-only cred
   await transport.discoverModels()
   assert.equal(exchanges, 2, 'the adapter does its own exchange')
 })
+
+test('a saturated queue answers 403 and must read as RATE_LIMIT, never as a dead token', async () => {
+  // The 2026-09-26 incident, in one body: Qoder throttles a saturated per-model
+  // queue with HTTP 403 whose body carries code 10605 / isQueued / queueCount /
+  // retryAfterSeconds. Coded AUTH, every such chat spent job-token exchanges a
+  // queue cannot be jumped by (three exchanges and ~4s per chat) and reported
+  // "token revoked" to users whose account was healthy. Reference
+  // `qoder/errors.ts:70-84` (commit 631be5c) reads the body before the status.
+  let exchanges = 0
+  let chatCalls = 0
+  const queueBody = JSON.stringify({
+    code: '403',
+    message: JSON.stringify({
+      code: '10605',
+      message: JSON.stringify({
+        isQueued: true,
+        modelKey: 'qfmodel',
+        queueCount: 8887,
+        queueType: 'p3',
+        retryAfterSeconds: 30,
+        serviceAvailable: true,
+        waitTime: 274,
+      }),
+    }),
+  })
+  const transport = adapter({
+    personalToken: () => Promise.resolve('pt-queued'),
+    fetchFn: (async (input: URL | Request): Promise<Response> => {
+      const url = String(input)
+      if (url.includes('/jobToken/exchange')) {
+        exchanges++
+        return new Response(JSON.stringify({ token: `jt-${exchanges}` }))
+      }
+      if (url.includes('/userinfo')) return new Response(JSON.stringify({ id: `user-${exchanges}` }))
+      if (url.includes('/model/list')) return new Response(catalog)
+      if (url.includes('/agent_chat_generation')) {
+        chatCalls++
+        return new Response(queueBody, { status: 403 })
+      }
+      throw new Error(`unexpected URL: ${url}`)
+    }) as typeof fetch,
+  })
+
+  await assert.rejects(async () => {
+    for await (const _chunk of transport.stream(request)) continue
+  }, (error: Error) => {
+    assert.ok(error instanceof LlmError)
+    assert.equal(error.code, 'RATE_LIMIT')
+    // The upstream's own status survives for diagnostics.
+    assert.equal(error.failure.status, 403)
+    // The wait the upstream asked for, in milliseconds, is what the host retries on.
+    assert.equal(error.failure.providerRetryAfterMs, 30_000)
+    // The digits must not survive in the message: a text classifier that tests
+    // /\b(?:401|403)\b/ ahead of the code would report a revoked credential again.
+    assert.doesNotMatch(error.message, /\b(?:401|403)\b/u)
+    assert.match(error.message, /throttled/u)
+    return true
+  })
+  // No self-heal: one exchange for the chat, and the chat asked exactly once.
+  assert.equal(exchanges, 1)
+  assert.equal(chatCalls, 1)
+})
+
+test("a documented 110 answer is an exhausted allowance, not a dead credential", async () => {
+  // Qoder answers a spent daily billing counter with HTTP 403
+  // {"code":"110","message":"Billing daily count exceeded"}; the counter resets
+  // by itself, so healing it spends an exchange on a window no token can change
+  // and the host never retries the AUTH code it used to get. Reference
+  // `qoder/errors.ts:85-94` plus the documented table in `qoder/codes.ts:29-59`
+  // (commit 01f15b6).
+  let exchanges = 0
+  let chatCalls = 0
+  const quotaBody = '{"code":"110","message":"Billing daily count exceeded"}'
+  const transport = adapter({
+    personalToken: () => Promise.resolve('pt-billing'),
+    fetchFn: (async (input: URL | Request): Promise<Response> => {
+      const url = String(input)
+      if (url.includes('/jobToken/exchange')) {
+        exchanges++
+        return new Response(JSON.stringify({ token: `jt-${exchanges}` }))
+      }
+      if (url.includes('/userinfo')) return new Response(JSON.stringify({ id: `user-${exchanges}` }))
+      if (url.includes('/model/list')) return new Response(catalog)
+      if (url.includes('/agent_chat_generation')) {
+        chatCalls++
+        return new Response(quotaBody, { status: 403 })
+      }
+      throw new Error(`unexpected URL: ${url}`)
+    }) as typeof fetch,
+  })
+
+  await assert.rejects(async () => {
+    for await (const _chunk of transport.stream(request)) continue
+  }, (error: Error) => {
+    assert.ok(error instanceof LlmError)
+    assert.equal(error.code, 'QUOTA')
+    assert.equal(error.failure.status, 403)
+    // A spent daily window is not a "try again in N seconds" answer.
+    assert.equal(error.failure.providerRetryAfterMs, undefined)
+    assert.doesNotMatch(error.message, /\b(?:401|403)\b/u)
+    return true
+  })
+  assert.equal(exchanges, 1)
+  assert.equal(chatCalls, 1)
+})

@@ -42,8 +42,10 @@ import type { TranslatableBlock, TranslatableMessage } from '../../translate/res
 import {
   CLINE_BASE_URL,
   CLINE_EFFORTS,
+  CLINE_OUTPUT_BUDGET,
   clineModel,
   discoverClineModels,
+  resolveOutputBudget,
   toClineModelInfo,
 } from './catalog.js'
 import type { ClineModel } from './catalog.js'
@@ -359,7 +361,18 @@ export class ClineAdapter extends LlmAdapter {
       ? ReasoningEffortId(override)
       : undefined
     const contextWindow = configured?.contextWindow ?? catalog.contextWindow
-    const maxTokens = configured?.maxTokens ?? catalog.maxTokens
+    // What a request ASKS for, not what the model can emit. This used to publish
+    // the catalog's output CEILING as `defaultMaxTokens`, and the harness spends
+    // that number twice (it fills `max_tokens` from it and reserves the same
+    // amount as completion room before compacting), so a 384k ceiling reserved
+    // 384k of every window. `resolveOutputBudget` lets the published ceiling
+    // clamp the budget instead of becoming it — reference `lib/catalog.js:190-197`
+    // at `3bf1d1b`; the budget default is `lib/adapter.js:66`.
+    const maxTokens = resolveOutputBudget(
+      configured?.maxTokens ?? CLINE_OUTPUT_BUDGET,
+      catalog.maxTokens,
+      contextWindow,
+    )
     return {
       provider,
       id: model,

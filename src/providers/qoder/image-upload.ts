@@ -18,7 +18,7 @@
 import crypto from 'node:crypto'
 import type { RequestImageAttachment } from '@deepseek-ai/dsh-attachment'
 import { proxiedFetch } from '../../http.js'
-import { buildAuthHeaders } from './cosy.js'
+import { buildAuthHeaders, defaultUserAgent } from './cosy.js'
 import type { CosyCredentials } from './cosy.js'
 import { qoderError, QODER_ABORTED_CODE } from './errors.js'
 import { getQoderImageUploadUrl } from './region.js'
@@ -365,6 +365,11 @@ export class QoderImageUploader {
         method: 'PUT',
         headers: {
           ...buildAuthHeaders(signedBody, url, credentials),
+          // The publication request is signed like every other Qoder call, but
+          // it used to carry Node's default user agent and so read upstream as a
+          // third, unrelated client (`qoder/transport/image-upload.ts:316` in
+          // commit c97f69c: one client identity on every outbound channel).
+          'user-agent': defaultUserAgent,
           'AI-CLIENT-TIMESTAMP': String(Math.floor(this.now() / 1000)),
           'Content-Type': `multipart/form-data; boundary=${multipart.boundary}`,
           'Content-Length': String(multipart.body.length),

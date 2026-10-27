@@ -59,12 +59,78 @@ export interface TraeDeviceIdentity {
   deviceType?: string
 }
 
-/** The `reasoning_effort` values Trae's client sends on the wire. */
+/**
+ * The `reasoning_effort` values Trae's client sends on the wire.
+ *
+ * Trae's own vocabulary is five levels — `low / medium / high / extra_high /
+ * max`, evidenced in its client bundle's `reasoning_effort` i18n keys and
+ * published per model from a remote config — so all five are named here.
+ * Leaving `medium` and `max` out meant a level upstream could disclose was
+ * either filtered at parse time or, worse, shipped back under a name the
+ * vocabulary never bound.
+ *
+ * A level this table does not name has NO wire spelling and is therefore
+ * dropped rather than guessed: see {@link traeWireEffort}. Ported from
+ * LaoDing/dsh-connect-trae (MIT) `src/catalog.ts` `WIRE_EFFORT_MAP` at commit
+ * `d0ea14c` (`fix(reasoning): 思考档位词表配平，未知档位不再静默降档成 high`).
+ */
 export const TRAE_WIRE_EFFORTS: Readonly<Record<string, string>> = Object.freeze({
   low: 'light',
+  medium: 'medium',
   high: 'high',
   xhigh: 'extra_high',
+  max: 'max',
 })
+
+/**
+ * The wire `reasoning_effort` name -> the level this plugin shows and stores.
+ *
+ * The exact INVERSE of {@link TRAE_WIRE_EFFORTS}, for the same reason the
+ * reference keeps `EFFORT_MAP` beside `WIRE_EFFORT_MAP`: both halves must name
+ * the same levels, or a level survives one direction and vanishes in the other.
+ * An unknown wire name is deliberately ABSENT — the catalog drops it, so a name
+ * the vendor never said can never be shown as a selectable level, and the
+ * reverse map can never have something to mis-send.
+ */
+export const TRAE_EFFORT_LEVELS: Readonly<Record<string, string>> = Object.freeze({
+  light: 'low',
+  medium: 'medium',
+  high: 'high',
+  extra_high: 'xhigh',
+  max: 'max',
+})
+
+/**
+ * Map one DSH thinking level to the `reasoning_effort` name Trae accepts.
+ *
+ * A level this provider cannot name returns `undefined` — it must be OMITTED
+ * from the request body, never passed through verbatim. The reference's
+ * previous reverse map ended in a bare `'high'`, which silently downgraded
+ * every unnamed level; shipping it verbatim instead is not better, because it
+ * asks the upstream for a level by a name the vocabulary never bound (issue #60
+ * in the reference). A dropped field lets the upstream apply its own default,
+ * which is the model's real behaviour rather than a wrong claim about it.
+ *
+ * `none` / `off` are spells for "no reasoning": Trae's wire has no such level,
+ * so they omit the field too rather than naming one.
+ * @param level - the harness thinking level, when the caller selected one.
+ * @returns the wire name, or undefined when the field must be omitted.
+ */
+export function traeWireEffort(level: string | undefined): string | undefined {
+  if (level === undefined || level === 'none' || level === 'off') return undefined
+  const wire: string | undefined = TRAE_WIRE_EFFORTS[level]
+  return wire
+}
+
+/**
+ * Map one advertised wire name to the level shown in the picker.
+ * @param wire - the `reasoning_effort` name an upstream option carried.
+ * @returns the level, or undefined when this provider cannot name it.
+ */
+export function traeEffortLevel(wire: string): string | undefined {
+  const level: string | undefined = TRAE_EFFORT_LEVELS[wire]
+  return level
+}
 
 /**
  * Build the header set every authenticated Trae endpoint shares.
@@ -168,9 +234,10 @@ export function buildTraeChatBody(options: TraeChatBodyOptions): Record<string, 
     return { role: message.role, content: [{ type: 'text', text: message.text }] }
   })
 
-  const wireEffort = (options.reasoningEffort === undefined || options.reasoningEffort === 'none' || options.reasoningEffort === 'off')
-    ? undefined
-    : TRAE_WIRE_EFFORTS[options.reasoningEffort] ?? options.reasoningEffort
+  // A level this provider cannot name is OMITTED, not forwarded: an unmapped id
+  // used to travel to the wire verbatim (so `minimal`, a DSH level Trae never
+  // advertises, became a `reasoning_effort` the upstream had never heard of).
+  const wireEffort = traeWireEffort(options.reasoningEffort)
 
   return {
     messages,

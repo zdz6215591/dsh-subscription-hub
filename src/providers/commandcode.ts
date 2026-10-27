@@ -38,15 +38,48 @@ import type { ToolResultView, TranslatableBlock, TranslatableMessage } from '../
 
 export const COMMANDCODE_PREEMPT_MS = 365 * 24 * 60 * 60 * 1000
 export const COMMANDCODE_API_BASE = 'https://api.commandcode.ai'
-/** CLI version header — keep in lockstep with Mars-Sea/dsh-commandcode-provider. */
-export const COMMAND_CODE_CLI_VERSION = '1.47.0'
+/**
+ * CLI version header — keep in lockstep with Mars-Sea/dsh-commandcode-provider.
+ *
+ * 1.88.0 is what the reference bundle sends on every request
+ * (`src/adapter.ts:103` of Mars-Sea/dsh-commandcode-provider @ 2e4d35d, the
+ * `origin/main` head; its committed worktree sits on the older v0.11.14 tag, so
+ * read that value from origin/main, not from the checkout) — the release this
+ * route pinned was 1.47.0. The reference calls the 1.87.3 -> 1.88.0 bump a
+ * pure header sync — no runtime contract of theirs changed (same endpoint set,
+ * same custom headers, same `/alpha/generate` call site, same `promptCache` /
+ * `reasoning_effort` / `max_tokens` literals, same model-table fields) — so the
+ * only thing to mirror here is the version a current client claims.
+ */
+export const COMMAND_CODE_CLI_VERSION = '1.88.0'
 const STUDIO_BASE = 'https://commandcode.ai'
 const LOGIN_ORIGINS = new Set(['https://commandcode.ai', 'https://staging.commandcode.ai', 'http://localhost:3000'])
 
-/** Output-token floor for code models when the catalog omits a max (matched to dsh-commandcode-provider). */
-const DEFAULT_MAX_OUTPUT_TOKENS = 65_536
-/** Hard ceiling for `max_tokens` sent to `/alpha/generate`, matching the reference adapter. */
-const DEFAULT_GENERATE_MAX_TOKENS = 64_000
+/**
+ * Output-token budget for code models when the catalog omits a max.
+ *
+ * 131 072 is the reference's own default, not a round guess: it is
+ * `MAX_OUTPUT_TOKEN_LIMIT` in `src/output-budget.ts:47` of
+ * Mars-Sea/dsh-commandcode-provider @ 2e4d35d, chosen there as a 35 % margin
+ * under the measured gateway ceiling while still covering the real output
+ * ceiling of the models that have one (Claude 64 K, Gemini 64 K, several at
+ * 128 K) — see the probe evidence on the ceiling constant below.
+ */
+const DEFAULT_MAX_OUTPUT_TOKENS = 131_072
+/**
+ * Hard ceiling for `max_tokens` sent to `/alpha/generate`.
+ *
+ * 200 000 is the MEASURED ceiling of the endpoint, not a preference:
+ * `src/output-budget.ts:12-23` of Mars-Sea/dsh-commandcode-provider @ 2e4d35d
+ * records a direct probe of `/alpha/generate` on 2026-09-28 —
+ * 64 000 -> 200, 131 072 -> 200, 196 608 -> 200, **200 000 -> 200,
+ * 200 704 -> 400**, 1 000 000 -> 400 — so the server caps `max_tokens` at
+ * 200 000. The reference also measured that the cap is GLOBAL rather than per
+ * model (identical answers for a 262 144-window model and a 1 000 000-window
+ * one). The 64 000 this used to pin was never a provider requirement; it only
+ * capped what a model could ever say in one turn.
+ */
+const DEFAULT_GENERATE_MAX_TOKENS = 200_000
 
 /**
  * Command Code's persistent retry shape (mirrors `Mars-Sea/dsh-commandcode-provider`):
@@ -1494,7 +1527,17 @@ export class CommandCodeAdapter extends LlmAdapter {
         modelMax,
         DEFAULT_GENERATE_MAX_TOKENS,
       )
-      const effort = options.reasoningEffort !== undefined && options.reasoningEffort !== 'off'
+      // `off` carries two meanings and only the model's own ladder tells them
+      // apart. The harness passes it as "no reasoning strength requested", which
+      // must stay off the wire. But DeepSeek V4 publishes `off` as a REAL level
+      // (command-code@1.73.3), and the official CLI sends it verbatim as
+      // `reasoning_effort: "off"` instead of dropping the field — so a model
+      // that LISTS `off` gets it on the wire, and every other model keeps
+      // dropping it (reference `src/adapter.ts:3427-3438` @ 2e4d35d). Without
+      // this, adopting the reference's ladders would offer a level that does
+      // nothing: picking "off" would fall back to the default depth.
+      const effort = options.reasoningEffort !== undefined
+        && (options.reasoningEffort !== 'off' || commandCodePublishedEfforts(options.model).includes('off'))
         ? options.reasoningEffort
         : undefined
 
@@ -1516,6 +1559,15 @@ export class CommandCodeAdapter extends LlmAdapter {
         memory: null,
         taste: null,
         skills: null,
+        // The real client never sends the CLI's INTERNAL default: its
+        // `toWirePermissionMode()` normalizes an absent/default permission mode
+        // to "standard" before serialization (reference `src/adapter.ts:2063-2072`
+        // @ 2e4d35d). The server validates the field against a fixed enum
+        // (`default | standard | auto-accept | plan | bypass`) and accepts it as
+        // absent, but "standard" is what a default session puts on the wire — see
+        // `.agents/skills/dsh-commandcode-upstream/references/protocol.md` in the
+        // reference, which pins exactly that normalization.
+        permissionMode: 'standard',
         params: {
           model: options.model,
           messages: messagesToCommandCode(resolvedMessages),
@@ -1561,7 +1613,11 @@ export class CommandCodeAdapter extends LlmAdapter {
         'x-command-code-version': COMMAND_CODE_CLI_VERSION,
         'x-cli-environment': 'production',
         'x-project-slug': projectSlugFromPath(workingDir),
-        'x-taste-learning': 'true',
+        // The reference client reports taste learning as OFF on every request
+        // (reference `src/adapter.ts:2340` @ 2e4d35d: `'x-taste-learning':
+        // 'false'`). Sending 'true' claimed an active learning channel this
+        // route does not have.
+        'x-taste-learning': 'false',
         'x-co-flag': 'false',
         ...attributionHeaders(),
       }

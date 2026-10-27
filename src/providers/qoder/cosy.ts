@@ -27,8 +27,17 @@ MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDA8iMH5c02LilrsERw9t6Pv5Nc
 XcW+ML9FoCI6AOvOzwIDAQAB
 -----END PUBLIC KEY-----`
 
-/** The IDE version the gateway gates behavior on; the reference hard-codes it. */
-export const qoderIdeVersion = '1.1.47'
+/**
+ * The IDE version the gateway gates behavior on; the reference hard-codes it.
+ *
+ * 1.1.47 (the value the plugin shipped first) named an IDE build the upstream no
+ * longer sees: the reference tracks the official qodercli build, which is 1.1.76
+ * (`qoder/transport/wire/cosy.ts:20`, commit c97f69c, which sets both this
+ * constant and the `Cosy-Version` header from it). The user agent, the COSY
+ * payload's `cosyVersion` and every `Cosy-Version` header are derived from here,
+ * so one number decides the whole identity.
+ */
+export const qoderIdeVersion = '1.1.76'
 /** The generic client identifier every non-campaign route sends. */
 export const qoderClientType = '5'
 /**

@@ -367,9 +367,9 @@ test('QoderUsageReader reads subscriber plan and user status with machine finger
   assert.equal(statusHeaders?.authorization, 'Bearer jt-plan-test')
   assert.equal(statusHeaders?.['Cosy-MachineToken'], 'umid-fingerprint-test')
   assert.equal(statusHeaders?.['Cosy-MachineType'], 'host')
-  assert.equal(planHeaders?.['user-agent'], 'qoder/1.1.47')
-  assert.equal(statusHeaders?.['user-agent'], 'qoder/1.1.47')
-  assert.equal(quotaHeaders?.['user-agent'], 'qoder/1.1.47')
+  assert.equal(planHeaders?.['user-agent'], 'qoder/1.1.76')
+  assert.equal(statusHeaders?.['user-agent'], 'qoder/1.1.76')
+  assert.equal(quotaHeaders?.['user-agent'], 'qoder/1.1.76')
   assert.equal(planHeaders?.['cosy-clienttype'], '5')
   assert.equal(statusHeaders?.['cosy-clienttype'], '5')
   assert.equal(quotaHeaders?.['cosy-clienttype'], '5')
@@ -450,4 +450,111 @@ test('the expiry normalizer accepts epoch milliseconds and date strings only', (
   assert.equal(normalizeQoderExpiresAt(0), undefined)
   assert.equal(normalizeQoderExpiresAt('not a date'), undefined)
   assert.equal(normalizeQoderExpiresAt(undefined), undefined)
+})
+
+test('a campaign grant keeps its own expiry and the year-9999 sentinel is not a date', async () => {
+  // The two facts the international account answers with, as observed live: the
+  // account-level `expiresAt` is 253402214400000 — a valid timestamp whose year is
+  // 9999, i.e. "no expiry" — and the SOTA grant sits in `dedicatedResourcePackages`
+  // with its OWN epoch and its OWN localized `displayLabels`. Forwarding the
+  // sentinel printed the year 10000 as the reset time, and leaving the array
+  // unmapped hid 2,000 real credits (reference `src/qoder/transport/account-reader.ts:104-183`
+  // and `src/upstream.ts:793-806`, commits 163a889 / 1b992f8).
+  const fetchMock = usageFetch({
+    '/jobToken/exchange': () => tokenExchange(),
+    '/userinfo': () => userInfo('user-ded', 'Ded Case'),
+    // Plan and status are additive: a refusal there must not fail the read.
+    '/user/plan': () => Promise.resolve(new Response('{"error":"not needed"}', { status: 503 })),
+    '/user/status': () => Promise.resolve(new Response('{"error":"not needed"}', { status: 503 })),
+    '/quota/usage': () => Promise.resolve(new Response(JSON.stringify({
+      userId: 'user-ded',
+      userType: 'personal_standard',
+      usageType: 'credits',
+      totalUsagePercentage: 0.01,
+      isQuotaExceeded: false,
+      expiresAt: 253402214400000,
+      userQuota: { total: 0, used: 0, remaining: 0, percentage: 0, unit: 'credits' },
+      addOnQuota: { total: 100, used: 5, remaining: 95, percentage: 0.06, unit: 'credits' },
+      dedicatedResourcePackages: [
+        {
+          id: '01a1426f',
+          name: 'act-20261014-129',
+          description: 'growth-campaign:act-20261014-129:grant:01a1426f',
+          total: 2000,
+          used: 0,
+          remaining: 2000,
+          percentage: 0,
+          unit: 'credits',
+          expiresAt: 1792375197331,
+          available: true,
+          status: 'QUOTA_DETAIL_STATUS_ACTIVE',
+          displayLabels: [
+            {
+              dimension: 'description',
+              value: 'sota model series description',
+              valueI18n: { 'en-US': 'SOTA Exclusive Credits: used first.', 'zh-CN': 'SOTA 专属积分：优先抵扣。' },
+            },
+            {
+              dimension: 'title',
+              value: 'sota model series',
+              valueI18n: { 'en-US': 'SOTA Exclusive Credits', 'zh-CN': 'SOTA 专属积分' },
+            },
+          ],
+        },
+        // A malformed entry must be skipped, not fail the whole quota answer.
+        null,
+      ],
+    }), { status: 200 })),
+  })
+  const authService = new QoderAuthService({ fetchFn: fetchMock, resolveMachineId: () => 'machine-ded' })
+  const reader = new QoderUsageReader({ authService, fetchFn: fetchMock })
+
+  const account = await reader.readAccount('pt-ded')
+  // The sentinel is the ABSENCE of an expiry, not a date in the year 10000.
+  assert.equal(account.usage?.expiresAt, undefined)
+  const packs = account.usage?.dedicatedResourcePackages
+  assert.equal(packs?.length, 1)
+  assert.equal(packs?.[0]?.total, 2000)
+  assert.equal(packs?.[0]?.remaining, 2000)
+  assert.equal(packs?.[0]?.id, '01a1426f')
+  assert.equal(packs?.[0]?.name, 'act-20261014-129')
+  assert.equal(packs?.[0]?.status, 'QUOTA_DETAIL_STATUS_ACTIVE')
+  assert.equal(packs?.[0]?.available, true)
+  // The grant keeps its OWN expiry, never the account's.
+  assert.equal(packs?.[0]?.expiresAt, new Date(1792375197331).toISOString())
+  // The title comes from `displayLabels` at dimension `title`, keyed by bare
+  // language — never the `act-…` code and never the description label.
+  assert.deepEqual(packs?.[0]?.title, { zh: 'SOTA 专属积分', en: 'SOTA Exclusive Credits' })
+
+  // The grant is a real surface, not just a decoded field: it renders as its own
+  // window labelled with that title, and it joins the credit totals.
+  const usage = qoderProviderUsage(account)
+  const grantWindow = usage.windows?.find(window => window.scope === 'SOTA 专属积分')
+  assert.ok(grantWindow !== undefined, 'the grant must render as its own window')
+  assert.equal(grantWindow.limit, 2000)
+  assert.equal(grantWindow.remaining, 2000)
+  assert.equal(grantWindow.resetsAt, 1792375197331)
+  // The plan window carries no reset: its only source said "never".
+  assert.equal(usage.windows?.find(window => window.scope === 'plan')?.resetsAt, undefined)
+  assert.equal(usage.limit, 2100)
+  assert.equal(usage.remaining, 2095)
+})
+
+test('the quota normalizer tells a 0-1 ratio from a real percentage in the same band', () => {
+  // The live endpoint expresses 3% as the ratio `0.03`, which is why the
+  // reference multiplied every value under 1 by 100
+  // (`src/qoder/transport/account-reader.ts:93`). That rule also turned a pool
+  // that is 0.5% used into a bar reporting 50%. The pool's own credits settle the
+  // ambiguity, because `used / total` is what the percentage is a percentage OF.
+  // 0.03 of 3000 credits: the reference's reading, still 3%.
+  assert.equal(normalizeQoderQuota({ total: 3000, used: 90, remaining: 2910, percentage: 0.03 })?.percentage, 3)
+  // 0.5 of 3000 credits is HALF A PERCENT (15 of 3000), not 50%.
+  assert.equal(normalizeQoderQuota({ total: 3000, used: 15, remaining: 2985, percentage: 0.5 })?.percentage, 0.5)
+  // 0.5 as a RATIO means half the pool, and the credits agree.
+  assert.equal(normalizeQoderQuota({ total: 3000, used: 1500, remaining: 1500, percentage: 0.5 })?.percentage, 50)
+  // Above the band there is nothing to disambiguate: 50 means 50%.
+  assert.equal(normalizeQoderQuota({ total: 3000, used: 1500, remaining: 1500, percentage: 50 })?.percentage, 50)
+  // Without a reported `used` there is no ground truth, so the ratio reading
+  // stands exactly as before.
+  assert.equal(normalizeQoderQuota({ total: 3000, percentage: 0.5 })?.percentage, 50)
 })

@@ -32,8 +32,10 @@ test('computeSigPath strips the /algo prefix', () => {
 test('the hard-coded client identity matches the reference', () => {
   // These are gated on upstream; "modernizing" them changes behavior, not just
   // metadata. `10` is the desktop identifier the campaign endpoints require —
-  // the generic `5` makes them answer 200 with an empty list forever.
-  assert.equal(qoderIdeVersion, '1.1.47')
+  // the generic `5` makes them answer 200 with an empty list forever. The IDE
+  // version tracks the official qodercli build the reference names (1.1.76,
+  // commit c97f69c); it is the single source of the UA and `Cosy-Version`.
+  assert.equal(qoderIdeVersion, '1.1.76')
   assert.equal(qoderClientType, '5')
   assert.equal(qoderDesktopClientType, '10')
 })
@@ -71,7 +73,7 @@ test('buildAuthHeaders creates the required bounded COSY headers', () => {
   assert.equal(headers['Cosy-Machineid'], 'machine-123')
   assert.equal(headers['Cosy-Machinetoken'], 'machine-123')
   assert.equal(headers['Cosy-Clienttype'], '5')
-  assert.equal(headers['Cosy-Version'], '1.1.47')
+  assert.equal(headers['Cosy-Version'], '1.1.76')
   assert.equal(headers['Login-Version'], 'v2')
   assert.equal(headers['Cosy-Clientip'], '127.0.0.1')
   assert.ok(headers['Cosy-Key']!.length > 0)
@@ -88,7 +90,7 @@ test('the signature input covers the wrapped key, the timestamp, the body and th
   assert.equal(parts.length, 3)
   const payload = JSON.parse(Buffer.from(parts[1]!, 'base64').toString('utf8')) as Record<string, unknown>
   assert.equal(payload.version, 'v1')
-  assert.equal(payload.cosyVersion, '1.1.47')
+  assert.equal(payload.cosyVersion, '1.1.76')
   // The AES material is base64 of the RSA-wrapped AES key, and `info` is the
   // identity encrypted under it — neither is the credential in clear text.
   assert.ok(typeof payload.info === 'string' && payload.info.length > 0)
