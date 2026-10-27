@@ -31,7 +31,7 @@ export const SUBSCRIPTIONS_AUTH_PREFIX = 'subscriptions-auth.'
  */
 export const SUBSCRIPTIONS_AUTH_ENDPOINTS = [
   'status', 'login', 'manual', 'cancel', 'logout', 'setDefault', 'usage',
-  'image', 'video',
+  'image', 'video', 'prepareReset', 'consumeReset',
   'speed', 'setSpeed',
   'proxyGet', 'proxySet', 'proxyTest',
   'modelDefaults', 'setModelDefault',
@@ -286,6 +286,8 @@ export interface ModelDefaultsController {
 
 /** Provider-agnostic auth operations the RPC handler delegates to. */
 export interface AuthController {
+  prepareReset?(account: string, signal: AbortSignal): Promise<unknown>
+  consumeReset?(account: string, ticket: string, signal: AbortSignal): Promise<void>
   /** Current status of one provider. */
   status(provider: ProviderId): Promise<ProviderStatus>
   /**
@@ -772,6 +774,13 @@ async function dispatch(
       return ok(await controller.readImage(readImageRef(payload), signal))
     case 'video':
       return ok(await controller.readVideo(readVideoName(payload), signal))
+    case 'prepareReset':
+      if (!controller.prepareReset) throw new BadRequest('Reset redemption unavailable')
+      return ok(await controller.prepareReset(readString(payload, 'account'), signal))
+    case 'consumeReset':
+      if (!controller.consumeReset) throw new BadRequest('Reset redemption unavailable')
+      await controller.consumeReset(readString(payload, 'account'), readString(payload, 'ticket'), signal)
+      return ok({ ok: true })
     case 'speed':
       return ok(await speed.speed(readSessionId(payload)))
     case 'setSpeed':

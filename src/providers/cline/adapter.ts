@@ -54,6 +54,7 @@ import {
   classifyUpstreamError,
   injectPrefs,
   parseRouting,
+  pinAdherence,
 } from './pins.js'
 import type { ClinePinStore } from './pins.js'
 
@@ -597,7 +598,11 @@ export class ClineAdapter extends LlmAdapter {
               throw new LlmError(error, code)
             }
             const routing = parseRouting(payload)
-            this.options.pins.learnRouting(options.model, routing)
+            const adherence = pinAdherence(attempt, routing)
+            this.options.pins.learnRouting(options.model, routing, adherence)
+            if (attempt.upstream !== null && (adherence === 'not-adopted' || adherence === 'violated')) {
+              this.options.onWarn?.(`cline pin "${attempt.upstream}" was ${adherence}: gateway served "${routing.finalProvider}" instead`)
+            }
             const observed = usageOf(payload)
             if (observed !== undefined) usage = observed
             const choices = Array.isArray(payload.choices) ? payload.choices : []

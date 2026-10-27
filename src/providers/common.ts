@@ -457,6 +457,13 @@ export interface UsageWindow {
   unit?: 'currency' | 'credits' | 'percent' | 'tokens'
 }
 
+/** One banked Codex reset credit, returned by the private ChatGPT backend API. */
+export interface ResetCredit {
+  id?: string
+  grantedAt?: number
+  expiresAt?: number
+}
+
 /** Subscription usage of one provider, as served by the `usage` RPC endpoint. */
 export interface ProviderUsage {
   /** False when the provider has no usage endpoint (grok); windows are absent then. */
@@ -482,6 +489,10 @@ export interface ProviderUsage {
    * historical credit wording) instead of inventing a symbol.
    */
   unit?: UsageWindow['unit']
+  /** Available banked Codex full resets, when the backend discloses them. */
+  resetCredits?: ResetCredit[]
+  /** Optional reset lookup failure; ordinary usage remains usable. */
+  resetCreditsError?: string
 }
 
 /** Every input modality this hub can describe. */

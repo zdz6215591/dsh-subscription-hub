@@ -12,6 +12,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import {
+  BUILD_TAG,
   EMPTY_PIN,
   OPENROUTER_SORT,
   ClinePinStore,
@@ -20,11 +21,13 @@ import {
   clinePinPath,
   extractAvailableProviders,
   injectPrefs,
+  isAdherenceOk,
   mergeUpstreams,
   normalizePin,
   normalizeSort,
   parseRouting,
   parseTier0,
+  pinAdherence,
   slugify,
   validateChannelBody,
 } from '../src/providers/cline/pins.js'
@@ -210,6 +213,27 @@ test('parseRouting detects the pipeline and the serving upstream', () => {
   // A response wrapped in `{ data: … }` is unwrapped first.
   const enveloped = parseRouting({ data: { provider: 'baseten', choices: [{ message: {} }] } })
   assert.equal(enveloped.pipeline, 'direct')
+
+  // A streamed answer carries routing on choices[0].delta instead of choices[0].message
+  const streamed = parseRouting({
+    choices: [{ delta: { provider_metadata: { gateway: { routing: { finalProvider: 'together', canonicalSlug: 'meta/llama' } } } } }],
+  })
+  assert.equal(streamed.pipeline, 'planner')
+  assert.equal(streamed.finalProvider, 'together')
+  assert.equal(streamed.canonicalSlug, 'meta/llama')
+})
+
+test('pinAdherence evaluates whether the router honored the attempt', () => {
+  assert.equal(pinAdherence({ upstream: 'together' }, { finalProvider: 'together' }), 'adopted')
+  assert.equal(pinAdherence({ upstream: 'together' }, { finalProvider: 'deepinfra' }), 'not-adopted')
+  assert.equal(pinAdherence({ upstream: 'together', orderRest: ['deepinfra'] }, { finalProvider: 'deepinfra' }), 'fallback')
+  assert.equal(pinAdherence({ upstream: 'together', excludeList: ['badprovider'] }, { finalProvider: 'badprovider' }), 'violated')
+  assert.equal(pinAdherence(undefined, { finalProvider: 'together' }), 'unresolved')
+  assert.equal(isAdherenceOk('adopted'), true)
+  assert.equal(isAdherenceOk('fallback'), true)
+  assert.equal(isAdherenceOk('not-adopted'), false)
+  assert.equal(isAdherenceOk('violated'), false)
+  assert.equal(BUILD_TAG, 'dshfix-4')
 })
 
 test('extractAvailableProviders reads the gateway list out of an error', () => {

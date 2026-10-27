@@ -177,7 +177,16 @@ function recordingFetch(handler: (url: string) => Response): { fetchFn: FetchFn;
 }
 
 /** A minimal SSE body so a successful transport yields at least one chunk. */
-function okStream(): Response {
+function okStream(url?: string): Response {
+  if (url?.includes('/provider/v1/messages')) {
+    const sse = 'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":0}}}\n\n'
+      + 'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
+      + 'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n\n'
+      + 'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n'
+      + 'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}\n\n'
+      + 'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+    return new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  }
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
       controller.enqueue(new TextEncoder().encode('data: {"choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n'))
@@ -214,15 +223,15 @@ test('the Messages-only set covers the live Claude catalog ids', () => {
   }
 })
 
-test('a Claude model goes straight to the CLI transport, without a doomed request', async () => {
+test('a Claude model goes straight to the Messages transport, without a doomed request', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'cc-f2-'))
   try {
-    const { fetchFn, calls } = recordingFetch(() => okStream())
+    const { fetchFn, calls } = recordingFetch(url => okStream(url))
     const adapter = harness(join(dir, 'absent.json'), fetchFn)
     await drain(adapter, 'claude-opus-5')
     assert.equal(calls.length, 1, 'exactly one request')
-    // The CLI transport, first and only — not a chat-completions 400 then a retry.
-    assert.ok(calls[0]!.includes('/alpha/generate'), calls[0])
+    // The Messages transport (/provider/v1/messages) with Anthropic prompt caching
+    assert.ok(calls[0]!.includes('/provider/v1/messages'), calls[0])
     assert.ok(!calls[0]!.includes('/provider/v1/chat/completions'))
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -232,7 +241,7 @@ test('a Claude model goes straight to the CLI transport, without a doomed reques
 test('a non-Claude model still leads with the Provider API transport', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'cc-f2-'))
   try {
-    const { fetchFn, calls } = recordingFetch(() => okStream())
+    const { fetchFn, calls } = recordingFetch(url => okStream(url))
     const adapter = harness(join(dir, 'absent.json'), fetchFn)
     await drain(adapter, 'deepseek/deepseek-v4-pro')
     assert.equal(calls.length, 1)
@@ -244,21 +253,21 @@ test('a non-Claude model still leads with the Provider API transport', async () 
   }
 })
 
-test('an unrecognised model that answers "needs Messages" retries on the CLI transport', async () => {
+test('an unrecognised model that answers "needs Messages" retries on the Messages transport', async () => {
   // The safety net for a Messages-only model the prefix test cannot know about:
-  // the gateway's 400 names the endpoint, so the request is retried once on the
+  // the gateway's 400 names the endpoint, so the request is retried on the
   // transport that can serve it.
   const dir = mkdtempSync(join(tmpdir(), 'cc-f2-'))
   try {
-    const { fetchFn, calls } = recordingFetch((url) =>
+    const { fetchFn, calls } = recordingFetch(url =>
       url.includes('/provider/v1/chat/completions')
         ? new Response(messagesOnlyBody('future-model-9'), { status: 400, headers: { 'content-type': 'application/json' } })
-        : okStream())
+        : okStream(url))
     const adapter = harness(join(dir, 'absent.json'), fetchFn)
     await drain(adapter, 'future-model-9')
-    assert.equal(calls.length, 2, 'one rejected attempt, then the CLI transport')
+    assert.equal(calls.length, 2, 'one rejected attempt, then the Messages transport')
     assert.ok(calls[0]!.includes('/provider/v1/chat/completions'))
-    assert.ok(calls[1]!.includes('/alpha/generate'))
+    assert.ok(calls[1]!.includes('/provider/v1/messages'))
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -379,13 +388,13 @@ test('a Messages-only model discovered from the live catalog skips the doomed re
     ], path)
     const adapter = harness(path, failingFetch)
     assert.equal((await adapter.listModels('commandcode')).length, 1)
-    const { fetchFn, calls } = recordingFetch(() => okStream())
+    const { fetchFn, calls } = recordingFetch(url => okStream(url))
     // Rebuild with the recording fetcher, then confirm the persisted flag alone
     // decides the transport — no request to the Provider API at all.
     const live = harness(path, fetchFn)
     await drain(live, 'brand/messages-only')
     assert.equal(calls.length, 1)
-    assert.ok(calls[0]!.includes('/alpha/generate'), calls[0])
+    assert.ok(calls[0]!.includes('/provider/v1/messages'), calls[0])
     void adapter
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -575,19 +584,94 @@ test('selecting `off` really disables thinking — but only where the model list
   }
 })
 
-test('the CLI transport sends the real client\'s permissionMode and taste flag', async () => {
+test('the CLI transport sends the real client\'s permissionMode and taste flag on fallback', async () => {
   // Reference `src/adapter.ts:2063-2072` @ 2e4d35d sends `permissionMode:
   // 'standard'` (the CLI's `toWirePermissionMode()` normalization of its internal
   // `default`), and `:2340` sends `'x-taste-learning': 'false'` on every request.
-  // A Claude id is used because it is the transport the CLI body belongs to.
+  // When a Messages endpoint answers 403 (e.g. Go plan), it falls back to CLI.
   const dir = mkdtempSync(join(tmpdir(), 'cc-wire-'))
   try {
-    const { fetchFn, requests } = recordingRequests(() => okStream())
+    const { fetchFn, requests } = recordingRequests((url) =>
+      url.includes('/provider/v1/messages')
+        ? new Response('upgrade_required', { status: 403 })
+        : okStream())
     await drainWith(harness(join(dir, 'absent.json'), fetchFn), 'claude-opus-5')
     const cli = requests.find(request => request.url.includes('/alpha/generate'))
     assert.ok(cli !== undefined, JSON.stringify(requests.map(request => request.url)))
     assert.equal(cli.body.permissionMode, 'standard')
     assert.equal(cli.headers['x-taste-learning'], 'false')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('Messages transport formats Anthropic messages with prompt-caching breakpoints', async () => {
+  // Reference `src/adapter.ts:2140-2200`: sets cache_control: { type: 'ephemeral' }
+  // on system, the closing tool definition, and the last user message.
+  const dir = mkdtempSync(join(tmpdir(), 'cc-msgs-'))
+  try {
+    const { fetchFn, requests } = recordingRequests(url => okStream(url))
+    const adapter = harness(join(dir, 'absent.json'), fetchFn)
+    await drainWith(adapter, 'claude-sonnet-5', {
+      system: 'You are a test assistant.',
+      tools: [{
+        name: 'test_tool',
+        description: 'A test tool',
+        parameters: { type: 'object', properties: { q: { type: 'string' } } },
+      }],
+    })
+    const msgReq = requests.find(r => r.url.includes('/provider/v1/messages'))
+    assert.ok(msgReq !== undefined, 'sent to /provider/v1/messages')
+    assert.equal(msgReq.headers['content-type'], 'application/json')
+    assert.equal(msgReq.body.model, 'claude-sonnet-5')
+    // System block carries cache_control
+    const sys = msgReq.body.system as Array<{ cache_control?: { type: string } }>
+    assert.equal(sys[0]?.cache_control?.type, 'ephemeral')
+    // Last tool carries cache_control
+    const tools = msgReq.body.tools as Array<{ cache_control?: { type: string } }>
+    assert.equal(tools[0]?.cache_control?.type, 'ephemeral')
+    // Last user message content block carries cache_control
+    const msgs = msgReq.body.messages as Array<{ content?: Array<{ cache_control?: { type: string } }> }>
+    const lastMsg = msgs[msgs.length - 1]
+    const content = lastMsg?.content
+    assert.equal(content?.[content.length - 1]?.cache_control?.type, 'ephemeral')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('live catalog capabilities from ?view=client enrich reasoning and vision', async () => {
+  // N1: Models fetched with ?view=client dynamically receive their reasoning efforts
+  // and inputModalities without depending on a static table snapshot.
+  const dir = mkdtempSync(join(tmpdir(), 'cc-clientview-'))
+  try {
+    const fetchFn: FetchFn = ((url: string) => {
+      if (url.includes('?view=client')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          data: [{
+            id: 'dynamic-model-1',
+            name: 'Dynamic Model 1',
+            context_length: 500_000,
+            reasoningEfforts: ['low', 'medium', 'high'],
+            inputModalities: ['text', 'image'],
+          }],
+        })))
+      }
+      return Promise.resolve(new Response(JSON.stringify({
+        data: [{
+          id: 'dynamic-model-1',
+          name: 'Dynamic Model 1',
+          context_length: 500_000,
+          supported_endpoints: ['/chat/completions'],
+        }],
+      })))
+    }) as FetchFn
+    const adapter = harness(join(dir, 'cache.json'), fetchFn)
+    const models = await adapter.listOwnModels('commandcode', 'acc1')
+    assert.equal(models.length, 1)
+    assert.deepEqual(models[0]?.inputModalities, ['text', 'image'])
+    const resolved = await adapter.resolveOwnModel('commandcode', 'dynamic-model-1')
+    assert.deepEqual(resolved.reasoning?.efforts.map(e => e.id), ['low', 'medium', 'high'])
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

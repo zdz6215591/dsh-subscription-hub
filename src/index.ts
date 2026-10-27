@@ -93,9 +93,12 @@ import {
   codexProfileClaims,
   exchangeCodexCode,
   fetchCodexUsage,
+  fetchCodexResetCredits,
+  consumeCodexResetCredit,
   isCodexPermanentRefreshError,
   refreshCodex,
 } from './providers/codex.js'
+import { ResetRedemption } from './providers/reset-redemption.js'
 import {
   ClaudeAdapter,
   claudeFlow,
@@ -523,7 +526,18 @@ export class SubscriptionsAuthController implements AuthController {
      * a 429.
      */
     private readonly poolUsage: PoolUsageTracker | undefined = undefined,
+    private readonly resetRedemption?: ResetRedemption,
   ) {}
+
+  prepareReset(account: string, signal: AbortSignal) {
+    if (!this.resetRedemption) throw new BadRequest('Reset redemption unavailable')
+    return this.resetRedemption.prepare(account, AbortSignal.any([signal, AbortSignal.timeout(20_000)]))
+  }
+
+  async consumeReset(account: string, ticket: string, signal: AbortSignal): Promise<void> {
+    if (!this.resetRedemption) throw new BadRequest('Reset redemption unavailable')
+    await this.resetRedemption.redeem(account, ticket, AbortSignal.any([signal, AbortSignal.timeout(20_000)]))
+  }
 
   usage(provider: ProviderId, account: string, signal: AbortSignal, force = false): Promise<ProviderUsage> {
     const fetcher = this.usageFetchers[provider]
@@ -1046,8 +1060,17 @@ export function apply(ctx: Context, config: Config): void {
         })
         codexTokens = tokens
         accountTokens.set('codex', tokens as AccountTokenManager<StoredSession>)
-        usageFetchers.codex = async (account, signal) =>
-          fetchCodexUsage(await tokens.session(account), proxiedFetch, signal)
+        usageFetchers.codex = async (account, signal) => {
+          const session = await tokens.session(account)
+          const usage = await fetchCodexUsage(session, proxiedFetch, signal)
+          try {
+            const resetCredits = await fetchCodexResetCredits(session, proxiedFetch, signal)
+            return { ...usage, resetCredits }
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            return { ...usage, resetCreditsError: message }
+          }
+        }
         let adapter!: CodexAdapter
         adapter = new CodexAdapter({
           models: catalog.codex,
@@ -1618,8 +1641,19 @@ export function apply(ctx: Context, config: Config): void {
       handles.get(provider)?.replace([provider])
     },
   }
+  const resetRedemption = new ResetRedemption(
+    async (account, signal) => {
+      if (!usageFetchers.codex) throw new BadRequest('Codex unavailable')
+      return usageFetchers.codex(account, signal)
+    },
+    async (account, creditId, requestId, signal) => {
+      if (!codexTokens) throw new BadRequest('Codex unavailable')
+      await consumeCodexResetCredit(await codexTokens.session(account), creditId, requestId, proxiedFetch, signal)
+    },
+    account => poolUsage?.invalidate('codex', account),
+  )
   const authController = new SubscriptionsAuthController(
-    flows, deviceFlows, authChanged, resolveAttachments, usageFetchers, undefined, poolUsage,
+    flows, deviceFlows, authChanged, resolveAttachments, usageFetchers, undefined, poolUsage, resetRedemption,
   )
   // One store per plugin instance, so the in-memory half (fetched marks, and the
   // labs models.dev has no mark for at all) is shared by every call and the

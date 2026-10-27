@@ -29,6 +29,12 @@ import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 
+/** Identity of this build / patch layer. */
+export const BUILD_TAG = 'dshfix-4'
+
+/** Whether the gateway honored one attempt's pin. */
+export type PinAdherence = 'adopted' | 'fallback' | 'not-adopted' | 'violated' | 'unresolved'
+
 /** Which gateway pipeline served a request; decides the pin spelling. */
 export type ClinePipeline = 'direct' | 'planner'
 
@@ -105,6 +111,10 @@ export interface ClineModelMeta {
    * saved pin working?". Set by {@link ClinePinStore.learnRouting}.
    */
   lastProvider?: string
+  /**
+   * Whether the gateway honored the pin for the last request.
+   */
+  lastAdherence?: PinAdherence
   /**
    * The gateway's canonical model slug for the last request, when it disclosed
    * one. Useful when a model is reachable under more than one alias.
@@ -288,9 +298,13 @@ export function parseRouting(json: unknown): {
   const message = typeof first.message === 'object' && first.message !== null
     ? first.message as Record<string, unknown>
     : {}
+  const delta = typeof first.delta === 'object' && first.delta !== null
+    ? first.delta as Record<string, unknown>
+    : {}
   const messageRouting = nested(message, ['provider_metadata', 'gateway', 'routing'])
+  const deltaRouting = nested(delta, ['provider_metadata', 'gateway', 'routing'])
   const payloadRouting = nested(payload, ['provider_metadata', 'gateway', 'routing'])
-  const routing = messageRouting ?? payloadRouting ?? {}
+  const routing = messageRouting ?? deltaRouting ?? payloadRouting ?? {}
   const direct = typeof payload.provider === 'string' ? payload.provider : null
   const finalProvider = typeof routing.finalProvider === 'string' ? routing.finalProvider : null
   const slug = typeof payload.model === 'string' && payload.model.includes('/') ? payload.model : null
@@ -316,6 +330,44 @@ function nested(source: Record<string, unknown>, path: readonly string[]): Recor
 /** Lowercase a display name into an upstream slug. */
 export function slugify(value: string): string {
   return value.toLowerCase().replace(/\s+/g, '-')
+}
+
+/** Normalize an upstream slug for comparison (lowercase, strip non-alphanumeric). */
+export function normalizeSlug(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, '')
+}
+
+/**
+ * Read back whether the router honored one attempt's pin.
+ *
+ * A 200 is not evidence that the pin was applied: an unknown or unavailable
+ * `only` value is dropped by the router, which then serves the request from any
+ * channel it likes. The only honest test is the channel the response reports.
+ *
+ * Both sides are compared through {@link normalizeSlug} because the two
+ * pipelines spell one channel differently (`"Together AI"` vs `togetherai`).
+ */
+export function pinAdherence(
+  attempt: { upstream?: string | null; excludeList?: string[]; orderRest?: string[] } | undefined,
+  routing: { finalProvider?: string | null } | undefined,
+): PinAdherence {
+  const expected = attempt?.upstream ?? null
+  const excluded = (attempt?.excludeList ?? [])
+    .filter(name => normalizeSlug(name) !== normalizeSlug(expected ?? ''))
+    .map(normalizeSlug)
+  const raw = routing?.finalProvider ?? null
+  const actual = raw === null || raw === undefined || String(raw).length === 0 ? null : normalizeSlug(raw)
+  if (actual !== null && excluded.includes(actual)) return 'violated'
+  if (expected === null || expected === undefined || String(expected).length === 0) return 'unresolved'
+  if (actual === null) return 'unresolved'
+  if (actual === normalizeSlug(expected)) return 'adopted'
+  if ((attempt?.orderRest ?? []).map(normalizeSlug).includes(actual)) return 'fallback'
+  return 'not-adopted'
+}
+
+/** Whether an adherence reading means the pin was honored, or cannot be judged. */
+export function isAdherenceOk(adherence: PinAdherence): boolean {
+  return adherence === 'adopted' || adherence === 'fallback' || adherence === 'unresolved'
 }
 
 /**
@@ -505,7 +557,11 @@ export class ClinePinStore {
   }
 
   /** Record the pipeline + upstream a request actually used. */
-  learnRouting(model: string, routing: { pipeline: ClinePipeline | null; finalProvider: string | null; fallbacks: string[]; canonicalSlug?: string | null }): void {
+  learnRouting(
+    model: string,
+    routing: { pipeline: ClinePipeline | null; finalProvider: string | null; fallbacks: string[]; canonicalSlug?: string | null },
+    adherence?: PinAdherence,
+  ): void {
     if (routing.pipeline === null && routing.finalProvider === null) return
     const current = this.meta.get(model) ?? {}
     this.meta.set(model, {
@@ -514,6 +570,7 @@ export class ClinePinStore {
       // Recorded separately from the discovered list: this is the channel that
       // REALLY served, and it is what proves a saved pin works.
       ...routing.finalProvider === null ? {} : { lastProvider: routing.finalProvider },
+      ...adherence === undefined ? {} : { lastAdherence: adherence },
       ...routing.canonicalSlug === undefined || routing.canonicalSlug === null
         ? {} : { canonicalSlug: routing.canonicalSlug },
       lastSeenAt: Date.now(),

@@ -69,6 +69,7 @@ import './lab-badges.spec.js'
 import './cline-auto-configure.spec.js'
 import './command.spec.js'
 import './modality.spec.js'
+import './reset-redemption.spec.js'
 // The governing rule ("an absent fact renders as ABSENT, never a plausible
 // default") pinned in one place, including the route-with-no-discovery,
 // unread-capability and unpriced-model cases.

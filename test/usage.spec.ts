@@ -148,6 +148,22 @@ test('fetchCodexUsage: non-2xx response throws', async () => {
   await assert.rejects(fetchCodexUsage(codexSession, fetchFn), /codex usage/)
 })
 
+test('fetchCodexResetCredits maps available credits and ignores others', async () => {
+  const { fetchCodexResetCredits } = await import('../src/providers/codex.js')
+  const { fetchFn } = fakeFetch({
+    credits: [
+      { id: 'c1', reset_type: 'codex_rate_limits', status: 'available', granted_at: '2026-10-01T00:00:00Z', expires_at: '2026-11-01T00:00:00Z' },
+      { id: 'c2', reset_type: 'other', status: 'available' },
+      { id: 'c3', reset_type: 'codex_rate_limits', status: 'consumed' },
+    ],
+  })
+  const credits = await fetchCodexResetCredits(codexSession, fetchFn)
+  assert.equal(credits.length, 1)
+  assert.equal(credits[0]?.id, 'c1')
+  assert.equal(credits[0]?.grantedAt, Date.parse('2026-10-01T00:00:00Z'))
+  assert.equal(credits[0]?.expiresAt, Date.parse('2026-11-01T00:00:00Z'))
+})
+
 test('fetchClaudeUsage maps legacy buckets and skips null ones', async () => {
   const { fetchFn, requests } = fakeFetch({
     five_hour: { utilization: 6, resets_at: '2026-04-08T18:59:59Z' },

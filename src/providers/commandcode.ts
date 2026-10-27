@@ -35,6 +35,12 @@ import { DEFAULT_RATE_LIMIT_WAIT, subscriptionRetryPolicy } from './rate-limit.j
 import type { RateLimitWait, RetryDefaults } from './rate-limit.js'
 import { pairedToolCalls, resolveImages, toolResultOf, withToolResultImages } from '../translate/resolved.js'
 import type { ToolResultView, TranslatableBlock, TranslatableMessage } from '../translate/resolved.js'
+import {
+  markMessageCache,
+  streamAnthropic,
+  toAnthropicMessages,
+  toAnthropicTools,
+} from '../translate/anthropic.js'
 
 export const COMMANDCODE_PREEMPT_MS = 365 * 24 * 60 * 60 * 1000
 export const COMMANDCODE_API_BASE = 'https://api.commandcode.ai'
@@ -1120,12 +1126,26 @@ function parseCatalogModel(row: Record<string, unknown>): CommandCodeCatalogMode
   const messagesOnly = endpoints !== undefined && endpoints.length > 0
     ? endpoints.every(endpoint => endpoint === '/messages')
     : undefined
+  const efforts = Array.isArray(row.reasoningEfforts)
+    ? row.reasoningEfforts.filter((e): e is string => typeof e === 'string')
+    : Array.isArray(row.reasoning_efforts)
+      ? row.reasoning_efforts.filter((e): e is string => typeof e === 'string')
+      : undefined
+  const modalities = Array.isArray(row.inputModalities)
+    ? row.inputModalities.filter((m): m is 'text' | 'image' => m === 'text' || m === 'image')
+    : undefined
+  const minimumPlan = typeof row.minimumPlan === 'string' ? row.minimumPlan : undefined
+  const zdr = typeof row.zdr === 'boolean' ? row.zdr : undefined
   return {
     id,
     name,
     contextWindow: contextLength,
     maxTokens: rawMax !== undefined ? rawMax : Math.min(contextLength, DEFAULT_MAX_OUTPUT_TOKENS),
     ...messagesOnly === undefined ? {} : { messagesOnly },
+    ...efforts === undefined ? {} : { reasoningEfforts: efforts },
+    ...modalities === undefined ? {} : { inputModalities: modalities },
+    ...minimumPlan === undefined ? {} : { minimumPlan },
+    ...zdr === undefined ? {} : { zdr },
   }
 }
 
@@ -1162,8 +1182,8 @@ const COMMANDCODE_EFFORT_NAMES: Readonly<Record<string, string>> = Object.freeze
 })
 
 /** The `reasoning` block for a model, or undefined when it has no selectable levels. */
-function commandCodeReasoning(model: string): LlmResolvedModelInfo['reasoning'] | undefined {
-  const efforts = commandCodePublishedEfforts(model)
+function commandCodeReasoning(model: string, liveEfforts?: readonly string[]): LlmResolvedModelInfo['reasoning'] | undefined {
+  const efforts = liveEfforts ?? commandCodePublishedEfforts(model)
   if (efforts.length === 0) return undefined
   return {
     efforts: efforts.map(effort => ({
@@ -1222,7 +1242,9 @@ function toModelInfo(catalog: CommandCodeCatalogModel, provider: string): LlmMod
     id: catalog.id,
     name: catalog.name,
     ...label === '' ? {} : { rateLabel: label },
-    inputModalities: isCommandCodeVisionModel(catalog.id) ? ['text', 'image'] : ['text'],
+    inputModalities: catalog.inputModalities !== undefined && catalog.inputModalities.length > 0
+      ? [...catalog.inputModalities]
+      : (isCommandCodeVisionModel(catalog.id) ? ['text', 'image'] : ['text']),
   }
 }
 
@@ -1257,6 +1279,10 @@ interface CommandCodeCatalogModel {
    * rejects it with a 400 unless the request goes to the CLI transport.
    */
   messagesOnly?: boolean
+  reasoningEfforts?: readonly string[]
+  inputModalities?: readonly ('text' | 'image')[]
+  minimumPlan?: string
+  zdr?: boolean
 }
 
 /**
@@ -1381,11 +1407,6 @@ export class CommandCodeAdapter extends LlmAdapter {
 
   async resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     const configured = this.options.models.find(entry => entry.id === model)
-    // Selectable reasoning levels come from the pinned CLI-table snapshot: the
-    // Provider API exposes no reasoning metadata, so a model outside the map
-    // either reasons at a fixed depth or takes no reasoning at all, and the
-    // picker must not offer a selector for it.
-    const reasoning = commandCodeReasoning(model)
     let live = await this.catalogEntry(model)
     if (live === undefined) {
       // Prime the live catalog on the resolve path so a caller that resolves a
@@ -1399,6 +1420,9 @@ export class CommandCodeAdapter extends LlmAdapter {
         live = await this.catalogEntry(model)
       } catch { /* best-effort warm */ }
     }
+    // Selectable reasoning levels prefer the live catalog (from ?view=client)
+    // when present, falling back to the pinned CLI-table snapshot.
+    const reasoning = commandCodeReasoning(model, live?.reasoningEfforts)
     // Only a value that was read or configured. The no-live branch used to
     // terminate on `?? 128_000` — an invented window for a model whose live entry
     // was unavailable — and the live branch clamped a GENUINELY READ cap with the
@@ -1409,7 +1433,8 @@ export class CommandCodeAdapter extends LlmAdapter {
       provider,
       id: model,
       name: live?.name ?? configured?.name ?? model,
-      inputModalities: configured?.inputModalities ?? (isCommandCodeVisionModel(model) ? ['text', 'image'] : ['text']),
+      inputModalities: configured?.inputModalities
+        ?? (live?.inputModalities !== undefined && live.inputModalities.length > 0 ? [...live.inputModalities] : (isCommandCodeVisionModel(model) ? ['text', 'image'] : ['text'])),
       ...contextWindow === undefined ? {} : { context: { contextWindow } },
       ...maxTokens === undefined ? {} : { defaultMaxTokens: maxTokens },
       ...reasoning === undefined ? {} : { reasoning },
@@ -1448,19 +1473,50 @@ export class CommandCodeAdapter extends LlmAdapter {
       // `proxiedFetch` directly here made the `fetchFn` option dead for the
       // catalog (and silently bypassed any injected/offline fetcher).
       const fetchFn = this.options.fetchFn ?? proxiedFetch
-      const response = await fetchFn(`${COMMANDCODE_API_BASE}/provider/v1/models`, {
-        headers: { authorization: `Bearer ${session.accessToken}`, accept: 'application/json', ...attributionHeaders() },
-        ...signal === undefined ? {} : { signal },
-      })
-      if (!response.ok) throw await httpLlmError(response, 'commandcode models')
+      const [resDefault, resClient] = await Promise.allSettled([
+        fetchFn(`${COMMANDCODE_API_BASE}/provider/v1/models`, {
+          headers: { authorization: `Bearer ${session.accessToken}`, accept: 'application/json', ...attributionHeaders() },
+          ...signal === undefined ? {} : { signal },
+        }),
+        fetchFn(`${COMMANDCODE_API_BASE}/provider/v1/models?view=client`, {
+          headers: { authorization: `Bearer ${session.accessToken}`, accept: 'application/json', ...attributionHeaders() },
+          ...signal === undefined ? {} : { signal },
+        }),
+      ])
+      const response = resDefault.status === 'fulfilled' ? resDefault.value : undefined
+      if (response === undefined || !response.ok) {
+        if (response !== undefined) throw await httpLlmError(response, 'commandcode models')
+        throw (resDefault as PromiseRejectedResult).reason
+      }
       const payload = await response.json() as unknown
       const rows = Array.isArray(payload) ? payload
         : isRecord(payload) && Array.isArray(payload.data) ? payload.data
         : isRecord(payload) && Array.isArray(payload.models) ? payload.models
         : []
+
+      // Client view enrichment map (from ?view=client)
+      const clientMap = new Map<string, Record<string, unknown>>()
+      if (resClient.status === 'fulfilled' && resClient.value.ok) {
+        try {
+          const clientPayload = await resClient.value.json() as unknown
+          const clientRows = Array.isArray(clientPayload) ? clientPayload
+            : isRecord(clientPayload) && Array.isArray(clientPayload.data) ? clientPayload.data
+            : []
+          for (const row of clientRows) {
+            if (isRecord(row) && typeof row.id === 'string') {
+              clientMap.set(row.id, row as Record<string, unknown>)
+            }
+          }
+        } catch { /* best-effort client view */ }
+      }
+
       const rawModels = rows
         .filter(isRecord)
-        .map(row => parseCatalogModel(row as Record<string, unknown>))
+        .map(row => {
+          const base = row as Record<string, unknown>
+          const enriched = clientMap.get(String(base.id))
+          return parseCatalogModel(enriched !== undefined ? { ...enriched, ...base, reasoningEfforts: enriched.reasoningEfforts, inputModalities: enriched.inputModalities } : base)
+        })
         .filter((entry): entry is CommandCodeCatalogModel => entry !== undefined)
       if (rawModels.length > 0) {
         this.catalogs.set(account, { at: Date.now(), models: rawModels })
@@ -1475,7 +1531,7 @@ export class CommandCodeAdapter extends LlmAdapter {
         // model the table DOES list with no levels is a fact, not a gap — and
         // warned once per model so it is discoverable in the logs.
         for (const model of rawModels) {
-          if (!isUnpublishedModel(model.id)) continue
+          if (model.reasoningEfforts !== undefined || !isUnpublishedModel(model.id)) continue
           const key = `unpublished:${model.id}`
           if (this.warnedEffortGaps.has(key)) continue
           this.warnedEffortGaps.add(key)
@@ -1607,6 +1663,36 @@ export class CommandCodeAdapter extends LlmAdapter {
         ...effort === undefined ? {} : { reasoning_effort: effort },
       }
 
+      // Anthropic Messages transport — the endpoint for Claude models that supports
+      // prompt caching (with 3 breakpoints: system, tools, last user message),
+      // measured at -66.9% session cost in reference `src/adapter.ts:2140-2200`.
+      const anthropicTools = toAnthropicTools(options.tools ?? [])
+      if (anthropicTools.length > 0) {
+        anthropicTools[anthropicTools.length - 1]!.cache_control = { type: 'ephemeral' }
+      }
+      const anthropicMessages = toAnthropicMessages(resolvedMessages as TranslatableMessage[])
+      markMessageCache(anthropicMessages)
+      const messagesBody: Record<string, unknown> = {
+        model: options.model,
+        max_tokens: maxTokens,
+        stream: true,
+        messages: anthropicMessages,
+      }
+      if (systemText.length > 0) {
+        messagesBody.system = [{
+          type: 'text',
+          text: systemText,
+          cache_control: { type: 'ephemeral' },
+        }]
+      }
+      if (anthropicTools.length > 0) {
+        messagesBody.tools = anthropicTools
+      }
+      if (effort !== undefined) {
+        messagesBody.thinking = { type: 'adaptive' }
+        messagesBody.output_config = { effort }
+      }
+
       const headers = {
         'content-type': 'application/json',
         authorization: `Bearer ${session.accessToken}`,
@@ -1627,12 +1713,15 @@ export class CommandCodeAdapter extends LlmAdapter {
       // calling `proxiedFetch` directly here made the `fetchFn` option dead on
       // the streaming path, which is the one path a test most needs to drive.
       const request = this.options.fetchFn ?? proxiedFetch
-      // Which transport leads. The Provider API is the default because it is the
-      // one that replays reasoning. A Messages-only model (the whole Claude
-      // family — the live catalog declares it, and the gateway 400s otherwise)
-      // can only be served by the CLI transport, so leading with the Provider
-      // API there would spend a request that cannot succeed.
-      let usedProviderApi = !(live?.messagesOnly === true || requiresMessagesEndpoint(options.model))
+      const isMessages = live?.messagesOnly === true || requiresMessagesEndpoint(options.model)
+      let usedTransport: 'messages' | 'provider' | 'cli' = isMessages ? 'messages' : 'provider'
+
+      const messagesRequest = (): Promise<Response> => request(`${COMMANDCODE_API_BASE}/provider/v1/messages`, {
+        method: 'POST',
+        headers: { ...headers, accept: 'text/event-stream' },
+        body: JSON.stringify(messagesBody),
+        signal: watchdog.signal,
+      })
       const providerApiRequest = (): Promise<Response> => request(`${COMMANDCODE_API_BASE}/provider/v1/chat/completions`, {
         method: 'POST',
         headers: { ...headers, accept: 'text/event-stream' },
@@ -1646,24 +1735,38 @@ export class CommandCodeAdapter extends LlmAdapter {
         signal: watchdog.signal,
       })
       try {
-        if (usedProviderApi) {
-          response = await providerApiRequest()
+        if (usedTransport === 'messages') {
+          response = await messagesRequest()
           // A Go-plan account without API access answers 403 `upgrade_required`;
-          // a Messages-only model answers 400 and names the endpoint. Both mean
-          // the same thing: use the CLI transport, whose shape that plan serves.
-          if (!response.ok && (await isProviderUpgradeRequired(response) || await needsMessagesTransport(response))) {
-            usedProviderApi = false
+          // fall back to CLI transport if messages is denied or unsupported.
+          if (!response.ok && (await isProviderUpgradeRequired(response) || response.status === 403 || response.status === 404)) {
+            usedTransport = 'cli'
             response = await cliRequest()
           }
         } else {
-          response = await cliRequest()
+          response = await providerApiRequest()
+          if (!response.ok && (await isProviderUpgradeRequired(response) || await needsMessagesTransport(response))) {
+            if (await needsMessagesTransport(response)) {
+              usedTransport = 'messages'
+              response = await messagesRequest()
+              if (!response.ok && (await isProviderUpgradeRequired(response) || response.status === 403)) {
+                usedTransport = 'cli'
+                response = await cliRequest()
+              }
+            } else {
+              usedTransport = 'cli'
+              response = await cliRequest()
+            }
+          }
         }
       } catch (error) {
         throw mapFetchFailure('commandcode', error, watchdog, options.signal)
       }
       if (!response.ok) throw await httpLlmError(response, 'commandcode')
       if (response.body === null) throw new LlmError('commandcode returned an empty stream', 'EMPTY_RESPONSE')
-      if (usedProviderApi) {
+      if (usedTransport === 'messages') {
+        yield* streamAnthropic(response.body, () => watchdog.pulse())
+      } else if (usedTransport === 'provider') {
         yield* parseCommandCodeOpenAIStream(response.body, () => watchdog.pulse())
       } else {
         yield* parseCommandCodeStream(response.body, () => watchdog.pulse())
