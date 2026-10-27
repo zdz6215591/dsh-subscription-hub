@@ -329,6 +329,7 @@ bundle，并在其上继续自研。以下项目均已致谢。
 | [GooDAnDReaDY/dsh-clinebot](https://github.com/GooDAnDReaDY/dsh-clinebot) | Cline 次参考：`apiKeyEnv` 凭据引用模式、`disabledModels` 白名单思路、`/users/me/plan/usage-limits` 额度窗口（5 小时 / 每周 / 每月，80% 与 95% 阈值）—— 本仓库 Cline 用量条的来源，以及套餐标签解析。 |
 | [Variyaone/JoyCode2api-VABoost](https://github.com/Variyaone/JoyCode2api-VABoost) | JoyCode 路由的主参考：把京东 JoyCode 的私有协议反向工程成 OpenAI/Anthropic 兼容面。采纳其**三条线上路径**（`chat/completions`、`responses`、原生 `anthropic/messages`）、网关 HMAC 签名与 `functionId` 路由、请求信封与逐路径 `loginType`/`tenant` 默认值、Claude 系必须的 `-hq` 内部模型 id、`ChatToResponses` 的请求转换、**双层包裹的 SSE**（`data: data: {…}`）解析方式、逐族思考映射（GPT 用 `reasoning.effort`、chat 系用 `reasoning_effort` + `thinking` 开关、Claude 用 `output_config.effort`）、能力表与上下文/输出预算，以及 `userInfo` 会**轮换 ptKey** 的保活方式。 |
 | [rosanruan/switch-dev](https://github.com/rosanruan/switch-dev) | JoyCode 凭据层的次参考：`JoyCoder.IDE` 状态库（`state.vscdb`）的跨平台发现路径与只读打开方式、`userName`/`loginType` 默认值处理，以及**扩展版本**读取（网关灰度过期门看的是 joycoder-editor 扩展版本，而不是 App 外壳版本）与灰色拒绝（`AI_GRAY_ACCESS_DENIED` / `COLOR_FORWARD_EXCEPTION`）的识别。 |
+| [yetone/magpie](https://github.com/yetone/magpie) | WorkBuddy / CodeBuddy 渠道校验拦截（11128 "Illegal API invocation from an unapproved channel"）绕行方案：针对上游客户端防外挂校验，对 system/assistant 消息中的第三方 Harness/Agent 身份特征词进行中性化转述，遇到 11128 拦截时自动转为用户消息中的 `<instructions>` 包装重试（`systemAsUser`），并补齐官方客户端请求头。 |
 
 ### 与参考项目保持同步
 

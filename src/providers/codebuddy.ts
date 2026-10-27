@@ -32,8 +32,15 @@ import {
   CODEBUDDY_CLI_VERSION,
   CODEBUDDY_DISPLAY_NAME,
   CODEBUDDY_IDE_VERSION,
+  CODEBUDDY_UA_VERSION,
 } from './codebuddy-lib/constants.js'
-import { serializeRequest } from './codebuddy-lib/serialize.js'
+import {
+  isCodeBuddyUnapprovedChannelError,
+  serializeRequest,
+  systemAsUser,
+  systemKey,
+} from './codebuddy-lib/serialize.js'
+import type { WireRequest } from './codebuddy-lib/types.js'
 import { parseSse } from './codebuddy-lib/sse.js'
 import { translate } from './codebuddy-lib/translate.js'
 import { hasDisclosedCapacity } from './codebuddy-lib/types.js'
@@ -449,6 +456,8 @@ export function codebuddyReasoning(
 }
 export class CodeBuddyAdapter extends LlmAdapter {
   private readonly catalogs = new Map<string, { at: number; models: CodeBuddyModel[] }>()
+  /** Set of system prompt texts that triggered 11128 and must be sent as user instructions. */
+  private readonly refusedSystems = new Set<string>()
 
   constructor(private readonly options: CodeBuddyAdapterOptions) {
     super()
@@ -575,23 +584,59 @@ export class CodeBuddyAdapter extends LlmAdapter {
     const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
     try {
       const session = await this.options.tokens.session(account)
-      const request = serializeRequest(options, true)
+      let currentRequest = serializeRequest(options, true)
+      const sysKey = systemKey(currentRequest.messages)
+      if (sysKey !== '' && this.refusedSystems.has(sysKey)) {
+        currentRequest = systemAsUser(currentRequest)
+      }
+
+      const headers = {
+        'content-type': 'application/json',
+        accept: 'text/event-stream',
+        authorization: `Bearer ${session.accessToken}`,
+        'x-domain': session.domain,
+        'x-user-id': session.uid,
+        ...session.enterpriseId === undefined ? {} : { 'x-enterprise-id': session.enterpriseId },
+        'x-product': 'SaaS',
+        'x-ide-type': 'WorkBuddy',
+        'x-ide-name': 'WorkBuddy',
+        'x-ide-version': CODEBUDDY_UA_VERSION,
+        'x-requested-with': 'XMLHttpRequest',
+        'x-agent-intent': 'craft',
+        'x-agent-purpose': 'conversation',
+        'user-agent': `WorkBuddy/${CODEBUDDY_UA_VERSION}`,
+      }
+
+      const postChat = (reqBody: WireRequest): Promise<Response> => proxiedFetch(`${CODEBUDDY_CHAT_BASE}/chat/completions`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(reqBody),
+        signal: watchdog.signal,
+      })
+
       let response: Response
       try {
-        response = await proxiedFetch(`${CODEBUDDY_CHAT_BASE}/chat/completions`, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            accept: 'text/event-stream',
-            authorization: `Bearer ${session.accessToken}`,
-            'x-domain': session.domain,
-            'x-user-id': session.uid,
-            ...session.enterpriseId === undefined ? {} : { 'x-enterprise-id': session.enterpriseId },
-            'user-agent': `CLI/${CODEBUDDY_CLI_VERSION} CodeBuddy/${CODEBUDDY_CLI_VERSION}`,
-          },
-          body: JSON.stringify(request),
-          signal: watchdog.signal,
-        })
+        response = await postChat(currentRequest)
+        // If CodeBuddy refuses with 11128 ("Illegal API invocation from an unapproved channel"),
+        // relocate the system prompt into user message instructions and retry once.
+        // Sourced from yetone/magpie (`packages/workbuddy/index.mjs`).
+        if (!response.ok && response.status === 400) {
+          const errorBody = await response.clone().text().catch(() => '')
+          if (isCodeBuddyUnapprovedChannelError(errorBody)) {
+            if (sysKey !== '') {
+              this.refusedSystems.add(sysKey)
+              if (this.refusedSystems.size > 256) {
+                const oldest = this.refusedSystems.values().next().value
+                if (oldest !== undefined) this.refusedSystems.delete(oldest)
+              }
+            }
+            const moved = systemAsUser(currentRequest)
+            if (moved !== currentRequest) {
+              currentRequest = moved
+              response = await postChat(currentRequest)
+            }
+          }
+        }
       } catch (error) {
         throw mapFetchFailure('codebuddy', error, watchdog, options.signal)
       }

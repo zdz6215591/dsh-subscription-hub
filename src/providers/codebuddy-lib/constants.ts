@@ -30,6 +30,9 @@ export const CODEBUDDY_IDE_VERSION = '4.9.8'
 /** CLI version reported on chat requests. */
 export const CODEBUDDY_CLI_VERSION = '2.96.0'
 
+/** Official WorkBuddy desktop user-agent version. */
+export const CODEBUDDY_UA_VERSION = '5.5.6'
+
 /**
  * Context capacity assumed for a model the catalog does not describe at all.
  *
