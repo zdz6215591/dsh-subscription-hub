@@ -64,6 +64,7 @@ export async function fetchAvailableModels(
   accessToken: string,
   projectId?: string,
   fetchImpl: typeof fetch = proxiedFetch,
+  signal?: AbortSignal,
 ): Promise<DiscoveredModels> {
   let lastError: unknown = null
   const body = projectId ? { project: projectId } : {}
@@ -78,12 +79,14 @@ export async function fetchAvailableModels(
           'Client-Metadata': getAgyBootstrapClientMetadata(),
         },
         body: JSON.stringify(body),
+        ...signal === undefined ? {} : { signal },
       })
       if (response.ok) {
         return (await response.json()) as DiscoveredModels
       }
       lastError = new Error(`fetchAvailableModels ${response.status} at ${baseEndpoint}`)
     } catch (error) {
+      if (signal?.aborted) throw error
       lastError = error
     }
   }
@@ -127,9 +130,13 @@ export function parseAgyQuotaUsage(dynamic: DiscoveredModels): ProviderUsage {
     const remaining = entry.quotaInfo?.remainingFraction
     if (typeof remaining !== 'number' || !Number.isFinite(remaining)) continue
     const scope = familyScope(modelId)
+    if (scope === 'Other' && !entry.displayName) continue
     const current = families.get(scope)
     const reset = typeof entry.quotaInfo?.resetTime === 'string' ? Date.parse(entry.quotaInfo.resetTime) : undefined
-    const resetsAt = reset !== undefined && Number.isFinite(reset) ? reset : current?.resetsAt
+    const currentResetsAt = current?.resetsAt
+    const resetsAt = reset !== undefined && Number.isFinite(reset)
+      ? (currentResetsAt !== undefined ? Math.min(currentResetsAt, reset) : reset)
+      : currentResetsAt
     families.set(scope, {
       remaining: current === undefined ? remaining : Math.min(current.remaining, remaining),
       ...resetsAt === undefined ? {} : { resetsAt },
@@ -141,6 +148,7 @@ export function parseAgyQuotaUsage(dynamic: DiscoveredModels): ProviderUsage {
     usedPercent: Math.max(0, Math.min(100, Math.round((1 - row.remaining) * 100))),
     remaining: Math.round(row.remaining * 1000) / 10,
     limit: 100,
+    unit: 'percent' as const,
     ...row.resetsAt === undefined ? {} : { resetsAt: row.resetsAt },
   }))
   if (windows.length === 0) return { supported: false }
@@ -194,11 +202,12 @@ export async function listAgyModels(
   accessToken: string | undefined,
   projectId: string | undefined,
   fetchImpl: typeof fetch = proxiedFetch,
+  signal?: AbortSignal,
 ): Promise<readonly LlmModelInfo[]> {
   // Without a token there is nothing to read. Saying so lets the adapter report an
   // un-fetched roster rather than presenting the pinned catalog as the account's own.
   if (!accessToken) throw new Error('agy model list needs an access token; none is available')
-  const dynamic = await fetchAvailableModels(accessToken, projectId, fetchImpl)
+  const dynamic = await fetchAvailableModels(accessToken, projectId, fetchImpl, signal)
   // An endpoint that answered with nothing is reported as nothing. It is not evidence
   // that the account has the pinned twelve models.
   return mergeModelCatalog(dynamic)

@@ -20,6 +20,7 @@ process.env.DSH_HOME ??= mkdtempSync(join(tmpdir(), 'router-usage-test-'))
 const { fetchCodexUsage } = await import('../src/providers/codex.js')
 const { fetchClaudeUsage } = await import('../src/providers/claude.js')
 const { fetchGrokUsage, grokTierName } = await import('../src/providers/grok.js')
+const { fetchAgyUsage } = await import('../src/providers/agy.js')
 const plugin = await import('../src/index.js')
 const { SubscriptionsAuthController } = plugin
 const { OAuthFlowManager } = await import('../src/auth/oauth-flow.js')
@@ -28,8 +29,14 @@ const { PoolUsageTracker } = await import('../src/providers/pool-usage.js')
 
 import { OAuthEndpointError } from '../src/providers/common.js'
 import type { FetchFn, ProviderUsage } from '../src/providers/common.js'
-import type { ClaudeSession, CodexSession, GrokSession } from '../src/auth/store.js'
+import type { AgySession, ClaudeSession, CodexSession, GrokSession } from '../src/auth/store.js'
 
+const agySession: AgySession = {
+  accessToken: 'at',
+  refreshToken: 'rt',
+  expiresAt: Date.now() + 3_600_000,
+  projectId: 'test-project',
+}
 const codexSession: CodexSession = {
   accessToken: 'at',
   refreshToken: 'rt',
@@ -291,6 +298,106 @@ test('fetchGrokUsage tolerates a null config and non-2xx responses', async () =>
   assert.deepEqual(usage, { supported: true, windows: [] })
   const { fetchFn: failing } = fakeFetch({ error: 'nope' }, 403)
   await assert.rejects(fetchGrokUsage(grokSession, failing), /grok billing/)
+})
+
+test('fetchAgyUsage merges Gemini from catalog when retrieveUserQuotaSummary only returns Claude and GPT', async () => {
+  const fetchFn: FetchFn = ((input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url.includes('retrieveUserQuotaSummary')) {
+      return Promise.resolve(new Response(JSON.stringify({
+        groups: [
+          {
+            displayName: 'Claude and GPT models',
+            buckets: [
+              { window: 'weekly', remainingFraction: 1, resetTime: '2026-11-03T05:00:00Z' },
+              { window: '5h', remainingFraction: 1, resetTime: '2026-10-27T10:00:00Z' },
+            ],
+          },
+        ],
+      }), { status: 200 }))
+    }
+    if (url.includes('fetchAvailableModels')) {
+      return Promise.resolve(new Response(JSON.stringify({
+        models: {
+          'gemini-2.5-pro': {
+            displayName: 'Gemini 2.5 Pro',
+            quotaInfo: { remainingFraction: 0.45, resetTime: '2026-10-27T09:00:00Z' },
+          },
+          'claude-sonnet-4-6': {
+            displayName: 'Claude Sonnet 4.6',
+            quotaInfo: { remainingFraction: 1, resetTime: '2026-10-27T10:00:00Z' },
+          },
+        },
+      }), { status: 200 }))
+    }
+    return Promise.resolve(new Response(JSON.stringify({}), { status: 200 }))
+  }) as FetchFn
+
+  const usage = await fetchAgyUsage(agySession, fetchFn)
+  assert.equal(usage.supported, true)
+  assert.equal(usage.unit, 'percent')
+  assert.equal(usage.remaining, 45)
+  assert.equal(usage.windows?.length, 3)
+  assert.equal(usage.windows?.[0]?.scope, 'Gemini')
+  assert.equal(usage.windows?.[0]?.remaining, 45)
+  assert.equal(usage.windows?.[0]?.unit, 'percent')
+  assert.equal(usage.windows?.[1]?.scope, 'Claude / GPT')
+  assert.equal(usage.windows?.[2]?.scope, 'Claude / GPT')
+})
+
+test('fetchAgyUsage preserves Gemini when retrieveUserQuotaSummary already provides it', async () => {
+  const fetchFn: FetchFn = ((input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url.includes('retrieveUserQuotaSummary')) {
+      return Promise.resolve(new Response(JSON.stringify({
+        groups: [
+          {
+            displayName: 'Gemini Models',
+            buckets: [{ window: '5h', remainingFraction: 0.8, resetTime: '2026-10-27T08:00:00Z' }],
+          },
+          {
+            displayName: 'Claude and GPT models',
+            buckets: [{ window: '5h', remainingFraction: 1, resetTime: '2026-10-27T10:00:00Z' }],
+          },
+        ],
+      }), { status: 200 }))
+    }
+    return Promise.resolve(new Response(JSON.stringify({ models: {} }), { status: 200 }))
+  }) as FetchFn
+
+  const usage = await fetchAgyUsage(agySession, fetchFn)
+  assert.equal(usage.supported, true)
+  assert.equal(usage.windows?.length, 2)
+  assert.equal(usage.windows?.[0]?.scope, 'Gemini')
+  assert.equal(usage.windows?.[0]?.remaining, 80)
+  assert.equal(usage.windows?.[1]?.scope, 'Claude / GPT')
+})
+
+test('fetchAgyUsage falls back to catalog windows when retrieveUserQuotaSummary fails', async () => {
+  const fetchFn: FetchFn = ((input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url.includes('retrieveUserQuotaSummary')) {
+      return Promise.resolve(new Response(JSON.stringify({ error: 'unavailable' }), { status: 503 }))
+    }
+    if (url.includes('fetchAvailableModels')) {
+      return Promise.resolve(new Response(JSON.stringify({
+        models: {
+          'gemini-2.5-flash': {
+            displayName: 'Gemini 2.5 Flash',
+            quotaInfo: { remainingFraction: 0.65, resetTime: '2026-10-27T09:00:00Z' },
+          },
+        },
+      }), { status: 200 }))
+    }
+    return Promise.resolve(new Response(JSON.stringify({}), { status: 200 }))
+  }) as FetchFn
+
+  const usage = await fetchAgyUsage(agySession, fetchFn)
+  assert.equal(usage.supported, true)
+  assert.equal(usage.remaining, 65)
+  assert.equal(usage.windows?.length, 1)
+  assert.equal(usage.windows?.[0]?.scope, 'Gemini')
+  assert.equal(usage.windows?.[0]?.remaining, 65)
 })
 
 /** Mount the plugin with fake llm/connection; return the RPC handler. */

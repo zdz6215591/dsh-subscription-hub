@@ -407,6 +407,7 @@ export function parseAgyUserQuotaSummary(payload: unknown): UsageWindow[] {
         usedPercent: Math.max(0, Math.min(100, Math.round((1 - remainingFraction) * 100))),
         remaining: Math.round(remainingFraction * 1000) / 10,
         limit: 100,
+        unit: 'percent',
         ...typeof row.resetTime === 'string' ? { resetsAt: Date.parse(row.resetTime) } : {},
         ...typeof row.displayName === 'string' ? { scope: row.displayName } : {},
       })
@@ -432,28 +433,59 @@ export async function fetchAgyUsage(
   const body = JSON.stringify({
     ...ready.projectId === undefined ? {} : { project: ready.projectId },
   })
-  try {
-    const response = await fetchAgyFirstOk('/v1internal:retrieveUserQuotaSummary', {
+
+  // 1. Fetch quota summary (groups for 3p models like Claude / GPT with 5h + weekly limits)
+  // and available models (exposing per-model quotaInfo for 1st-party Gemini models) in parallel.
+  const [summaryRes, catalogRes] = await Promise.allSettled([
+    fetchAgyFirstOk('/v1internal:retrieveUserQuotaSummary', {
       method: 'POST',
       headers,
       body,
       ...signal === undefined ? {} : { signal },
-    }, fetchFn)
-    if (response.ok) {
-      const payload: unknown = await response.json()
-      const windows = parseAgyUserQuotaSummary(payload)
-      if (windows.length > 0) {
-        const worst = Math.min(...windows.map(w => w.remaining ?? 100))
-        return { supported: true, windows, remaining: worst, limit: 100, unit: 'percent' }
-      }
-    }
-  } catch { /* fall through to fetchAvailableModels */ }
+    }, fetchFn).then(async r => r.ok ? r.json() : null),
+    fetchAvailableModels(ready.accessToken, ready.projectId, fetchFn, signal),
+  ])
 
-  try {
-    const dynamic = await fetchAvailableModels(ready.accessToken, ready.projectId, fetchFn)
-    const fromCatalog = parseAgyQuotaUsage(dynamic)
-    if (fromCatalog.supported) return fromCatalog
-  } catch { /* fall through */ }
+  let summaryWindows: UsageWindow[] = []
+  if (summaryRes.status === 'fulfilled' && summaryRes.value !== null) {
+    summaryWindows = parseAgyUserQuotaSummary(summaryRes.value)
+  }
+
+  let catalogWindows: UsageWindow[] = []
+  if (catalogRes.status === 'fulfilled' && catalogRes.value) {
+    const fromCatalog = parseAgyQuotaUsage(catalogRes.value)
+    if (fromCatalog.supported && Array.isArray(fromCatalog.windows)) {
+      catalogWindows = fromCatalog.windows
+    }
+  }
+
+  // 2. Merge windows:
+  // Google's retrieveUserQuotaSummary only returns 3p groups ("Claude and GPT models") on
+  // consumer accounts, omitting 1st-party Gemini models whose quota lives on fetchAvailableModels.
+  // If summaryWindows has windows, keep them (they have exact 5h and weekly buckets).
+  // If Gemini or other families are not already represented in summaryWindows, prepend from catalogWindows.
+  let windows: UsageWindow[] = []
+  if (summaryWindows.length > 0) {
+    const coveredScopes = new Set(summaryWindows.map(w => w.scope?.toLowerCase() ?? ''))
+    const missingFromCatalog = catalogWindows.filter(w => {
+      const s = w.scope?.toLowerCase() ?? ''
+      if (s === 'other') return false
+      for (const cov of coveredScopes) {
+        if (cov.includes(s) || s.includes(cov)) return false
+      }
+      return true
+    })
+    // Prepend missing 1st-party models (Gemini) so Google's native models display first,
+    // followed by 3p Claude and GPT windows.
+    windows = [...missingFromCatalog, ...summaryWindows]
+  } else {
+    windows = catalogWindows.filter(w => w.scope?.toLowerCase() !== 'other')
+  }
+
+  if (windows.length > 0) {
+    const worst = Math.min(...windows.map(w => w.remaining ?? 100))
+    return { supported: true, windows, remaining: worst, limit: 100, unit: 'percent' }
+  }
 
   return { supported: false }
 }
