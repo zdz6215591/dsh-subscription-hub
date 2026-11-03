@@ -16,7 +16,7 @@
  */
 
 import type { LlmModelInfo } from '@deepseek-ai/dsh-llm'
-import { kiroControlCall, kiroAuthHeaders, kiroManagement, KIRO_ORIGIN } from './protocol.js'
+import { kiroControlCall, kiroAuthHeaders, kiroManagement, kiroManagementCall, KIRO_ORIGIN } from './protocol.js'
 
 /** One model as Kiro lists it. */
 export interface KiroModel {
@@ -79,10 +79,14 @@ export function parseKiroModels(payload: unknown): { models: KiroModel[]; nextTo
  */
 export async function fetchKiroModels(
   fetchFn: typeof fetch,
-  region: string,
-  key: string,
+  session: { region: string; token: string; method?: 'apikey' | 'social' | 'idc'; profileArn?: string },
   signal?: AbortSignal,
 ): Promise<KiroModel[]> {
+  if (session.method !== undefined && session.method !== 'apikey') {
+    return await fetchKiroModelsSignedIn(fetchFn, session, signal)
+  }
+  const region = session.region
+  const key = session.token
   const models: KiroModel[] = []
   let nextToken: string | undefined
   for (let page = 0; page < MAX_PAGES; page++) {
@@ -139,3 +143,47 @@ export function findKiroModel(models: readonly KiroModel[], id: string): KiroMod
 
 /** Re-export so callers do not need the management host directly. */
 export { kiroAuthHeaders, kiroManagement }
+
+/**
+ * Read the roster of a SIGNED-IN account.
+ *
+ * A different API from the API key's (`GET /List-Available-Models` with the
+ * profile named in the query). Sending the key's AWS-JSON shape here is exactly
+ * what answers `AccessDeniedException: Invalid token`.
+ *
+ * @param fetchFn - fetch to use.
+ * @param session - region, token and the profile the token may use.
+ * @param signal - caller cancellation.
+ * @returns the roster.
+ */
+async function fetchKiroModelsSignedIn(
+  fetchFn: typeof fetch,
+  session: { region: string; token: string; profileArn?: string },
+  signal?: AbortSignal,
+): Promise<KiroModel[]> {
+  if (session.profileArn === undefined || session.profileArn === '') {
+    throw new Error('kiro: this sign-in named no profile, so Kiro cannot list its models; sign in again (the profile is read at sign-in time)')
+  }
+  const models: KiroModel[] = []
+  let nextToken: string | undefined
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const call = kiroManagementCall(session.region, session.token, 'List-Available-Models', {
+      origin: KIRO_ORIGIN,
+      profileArn: session.profileArn,
+      ...nextToken === undefined ? {} : { nextToken },
+    })
+    const response = await fetchFn(call.url, {
+      method: call.method,
+      headers: call.headers,
+      ...signal === undefined ? {} : { signal },
+    })
+    if (!response.ok) {
+      throw new Error(`kiro: List-Available-Models answered ${response.status}: ${(await response.text()).slice(0, 200)}`)
+    }
+    const parsed = parseKiroModels(await response.json())
+    models.push(...parsed.models)
+    nextToken = parsed.nextToken
+    if (nextToken === undefined) break
+  }
+  return models
+}

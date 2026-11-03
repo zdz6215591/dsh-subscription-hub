@@ -13,6 +13,8 @@ import test from 'node:test'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import {
   assertUsableKiroKey,
+  fetchKiroModels,
+  fetchKiroUsage,
   buildKiroRequest,
   classifyKiroFailure,
   decodeEventStream,
@@ -410,4 +412,84 @@ test('kiro: a pasted key becomes a static session in the region its profile name
   assert.equal(session.region, 'eu-central-1')
   assert.equal(session.profileArn, 'arn:aws:codewhisperer:eu-central-1:1:profile/p')
   assert.ok(session.expiresAt > Date.now() + 3000 * 24 * 60 * 60 * 1000)
+})
+
+test('kiro: a signed-in token lists models over REST, an API key over AWS-JSON', async () => {
+  const roster = { models: [{ modelId: 'claude-sonnet-4.5', modelName: 'Claude Sonnet 4.5', tokenLimits: { maxInputTokens: 200000 } }] }
+  const calls: { url: string; method?: string; headers: Record<string, string>; body?: string }[] = []
+  const fetchFn = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    calls.push({
+      url: String(input),
+      ...init.method === undefined ? {} : { method: init.method },
+      headers: init.headers as Record<string, string>,
+      ...init.body === undefined ? {} : { body: String(init.body) },
+    })
+    return new Response(JSON.stringify(roster), { status: 200, headers: { 'content-type': 'application/json' } })
+  }) as unknown as typeof fetch
+
+  // A browser sign-in: REST path, profile in the query, no AWS-JSON target.
+  const signedIn = await fetchKiroModels(fetchFn, {
+    region: 'eu-central-1',
+    token: 'signed-in-token',
+    method: 'social',
+    profileArn: 'arn:aws:codewhisperer:eu-central-1:1:profile/p',
+  })
+  assert.equal(signedIn.length, 1)
+  const rest = calls[0]!
+  assert.equal(rest.method, 'GET')
+  assert.match(rest.url, /^https:\/\/management\.eu-central-1\.kiro\.dev\/List-Available-Models\?/)
+  assert.match(rest.url, /origin=KIRO_CLI/)
+  assert.match(rest.url, /profileArn=arn%3Aaws%3Acodewhisperer/)
+  assert.equal(rest.headers.Authorization, 'Bearer signed-in-token')
+  assert.equal(rest.headers.tokentype, undefined, 'a signed-in token carries no tokentype')
+  assert.equal(rest.headers['X-Amz-Target'], undefined)
+
+  // An API key: the AWS-JSON operation at the host root, exactly as kiro-cli does.
+  calls.length = 0
+  await fetchKiroModels(fetchFn, { region: 'us-east-1', token: 'ksk_AbCdEf123456', method: 'apikey' })
+  const rpc = calls[0]!
+  assert.equal(rpc.method, 'POST')
+  assert.equal(rpc.url, 'https://management.us-east-1.kiro.dev/?origin=KIRO_CLI')
+  assert.equal(rpc.headers['X-Amz-Target'], 'KiroControlPlaneBearerService.ListAvailableModels')
+  assert.equal(rpc.headers.tokentype, 'API_KEY')
+})
+
+test('kiro: a signed-in sign-in without a profile says so instead of asking', async () => {
+  const fetchFn = (async () => new Response('{}', { status: 200 })) as unknown as typeof fetch
+  await assert.rejects(
+    () => fetchKiroModels(fetchFn, { region: 'us-east-1', token: 't', method: 'idc' }),
+    /named no profile/,
+  )
+})
+
+test('kiro: the allowance is read over REST for a sign-in, over AWS-JSON for a key', async () => {
+  const allowance = {
+    usageBreakdownList: [{
+      displayNamePlural: 'Credits',
+      currentUsageWithPrecision: 100,
+      usageLimitWithPrecision: 1000,
+      nextDateReset: 1_700_100_000,
+    }],
+    subscriptionInfo: { subscriptionTitle: 'KIRO PRO' },
+  }
+  const calls: { url: string; method?: string; headers: Record<string, string> }[] = []
+  const fetchFn = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    calls.push({ url: String(input), ...init.method === undefined ? {} : { method: init.method }, headers: init.headers as Record<string, string> })
+    return new Response(JSON.stringify(allowance), { status: 200, headers: { 'content-type': 'application/json' } })
+  }) as unknown as typeof fetch
+
+  const signedIn = await fetchKiroUsage(fetchFn, {
+    region: 'us-east-1', token: 't', method: 'social', profileArn: 'arn:aws:codewhisperer:us-east-1:1:profile/p',
+  })
+  assert.equal(signedIn.supported, true)
+  assert.equal(signedIn.remaining, 900)
+  assert.equal(calls[0]?.method, 'GET')
+  assert.match(calls[0]?.url ?? '', /\/Get-Usage-Limits\?.*resourceType=CREDIT/)
+  assert.match(calls[0]?.url ?? '', /isEmailRequired=true/)
+
+  calls.length = 0
+  const keyed = await fetchKiroUsage(fetchFn, { region: 'us-east-1', token: 'ksk_x', method: 'apikey' })
+  assert.equal(keyed.supported, true)
+  assert.equal(calls[0]?.method, 'POST')
+  assert.equal(calls[0]?.headers['X-Amz-Target'], 'AmazonCodeWhispererService.GetUsageLimits')
 })

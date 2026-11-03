@@ -1588,7 +1588,12 @@ export function apply(ctx: Context, config: Config): void {
         // Kiro DOES publish a quota: Get-Usage-Limits, in credits.
         usageFetchers.kiro = async (account, signal) => {
           const session = await tokens.session(account)
-          return fetchKiroUsage(proxiedFetch, session.region ?? 'us-east-1', session.accessToken, signal)
+          return fetchKiroUsage(proxiedFetch, {
+            region: session.region ?? 'us-east-1',
+            token: session.accessToken,
+            ...session.method === undefined ? {} : { method: session.method },
+            ...session.profileArn === undefined ? {} : { profileArn: session.profileArn },
+          }, signal)
         }
         const adapter = new KiroAdapter({
           models: catalog.kiro,

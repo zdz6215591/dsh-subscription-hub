@@ -98,9 +98,10 @@ export function kiroSdkHeaders(invocationId: string): Record<string, string> {
   }
 }
 
-/** One AWS-JSON control-plane call. */
+/** One AWS-JSON control-plane call (always a POST to the host root). */
 export interface KiroControlCall {
   url: string
+  method: 'POST'
   headers: Record<string, string>
   body: string
 }
@@ -126,6 +127,7 @@ export function kiroControlCall(
   const url = query === undefined ? base : `${base}?${new URLSearchParams(query).toString()}`
   return {
     url,
+    method: 'POST',
     headers: {
       ...kiroAuthHeaders(key),
       'Content-Type': 'application/x-amz-json-1.0',
@@ -187,21 +189,79 @@ export async function discoverKiroProfile(fetchFn: typeof fetch, key: string): P
  */
 export async function discoverKiroProfileForToken(fetchFn: typeof fetch, token: string): Promise<string> {
   for (const region of KIRO_KEY_REGIONS) {
-    try {
-      const call = kiroControlCall(region, token, 'List-Available-Profiles', {}, {})
-      const response = await fetchFn(call.url, {
-        method: 'POST',
-        headers: { ...call.headers, tokentype: '' },
-        body: call.body,
-        signal: AbortSignal.timeout(15_000),
-      })
-      if (!response.ok) continue
-      const answer = await response.json() as { profiles?: { arn?: string }[] }
-      const arn = (answer.profiles ?? []).find(profile => typeof profile.arn === 'string' && profile.arn !== '')?.arn
-      if (arn !== undefined) return arn
-    } catch {
-      // Try the next region.
-    }
+    const profiles = await kiroProfilesForToken(fetchFn, region, token)
+    const first = profiles[0]
+    if (first !== undefined) return first
   }
   return ''
+}
+/** One REST call against Kiro's management plane (the signed-in token's shape). */
+export interface KiroRestCall {
+  url: string
+  method: 'GET' | 'POST'
+  headers: Record<string, string>
+  body?: string
+}
+
+/**
+ * Build a management-plane call for a SIGNED-IN token (Google/GitHub or AWS).
+ *
+ * This is a different API from the API key's: the key speaks AWS JSON 1.0 at the
+ * host root with `X-Amz-Target`, while a signed-in token speaks REST paths —
+ * `GET /List-Available-Models?origin=KIRO_CLI&profileArn=…`. Sending the key's
+ * shape with a signed-in token is what answers
+ * `AccessDeniedException: Invalid token`, because the control-plane bearer
+ * operation is not the one that token may call.
+ *
+ * @param region - account region.
+ * @param token - access token.
+ * @param operation - REST path, e.g. `List-Available-Models`.
+ * @param params - query parameters.
+ * @param body - JSON body for the operations that take one.
+ * @returns the request descriptor.
+ */
+export function kiroManagementCall(
+  region: string,
+  token: string,
+  operation: string,
+  params: Record<string, string> = {},
+  body?: Record<string, unknown>,
+): KiroRestCall {
+  const query = Object.keys(params).length === 0 ? '' : `?${new URLSearchParams(params).toString()}`
+  return {
+    url: `${kiroManagement(region)}/${operation}${query}`,
+    method: body === undefined ? 'GET' : 'POST',
+    headers: {
+      ...kiroAuthHeaders(token, ''),
+      Accept: 'application/json',
+      ...body === undefined ? {} : { 'Content-Type': 'application/json' },
+    },
+    ...body === undefined ? {} : { body: JSON.stringify(body) },
+  }
+}
+
+/**
+ * Read a signed-in token's profiles.
+ *
+ * `POST /List-Available-Profiles` with an empty body; the first profile is the
+ * one this route uses, exactly as the reference does.
+ *
+ * @param fetchFn - fetch to use.
+ * @param region - region to ask.
+ * @param token - access token.
+ * @returns the profile ARNs the account lists.
+ */
+export async function kiroProfilesForToken(fetchFn: typeof fetch, region: string, token: string): Promise<string[]> {
+  const call = kiroManagementCall(region, token, 'List-Available-Profiles', {}, {})
+  const response = await fetchFn.call(undefined, call.url, {
+    method: call.method,
+    headers: call.headers,
+    ...call.body === undefined ? {} : { body: call.body },
+    signal: AbortSignal.timeout(15_000),
+  })
+  if (!response.ok) return []
+  const answer = await response.json() as { profiles?: { arn?: string }[] }
+  return (answer.profiles ?? [])
+    .map(profile => profile.arn)
+    .filter((arn): arn is string => typeof arn === 'string' && arn !== '')
 }

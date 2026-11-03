@@ -13,7 +13,7 @@
  */
 
 import type { ProviderUsage, UsageWindow } from '../common.js'
-import { kiroControlCall, KIRO_ORIGIN } from './protocol.js'
+import { kiroControlCall, kiroManagementCall, KIRO_ORIGIN } from './protocol.js'
 
 /** One credit allowance. */
 export interface KiroAllowance {
@@ -173,25 +173,37 @@ export function kiroUsageToProviderUsage(snapshot: KiroUsageSnapshot): ProviderU
  */
 export async function fetchKiroUsage(
   fetchFn: typeof fetch,
-  region: string,
-  key: string,
+  session: { region: string; token: string; method?: 'apikey' | 'social' | 'idc'; profileArn?: string },
   signal?: AbortSignal,
 ): Promise<ProviderUsage> {
   try {
-    const call = kiroControlCall(
-      region,
-      key,
-      'AmazonCodeWhispererService.GetUsageLimits',
-      { origin: KIRO_ORIGIN },
-      { origin: KIRO_ORIGIN },
-    )
+    const call = session.method !== undefined && session.method !== 'apikey'
+      // A signed-in token reads the same allowance over REST, naming its profile
+      // and asking for the email so the card can say whose account it is.
+      ? kiroManagementCall(session.region, session.token, 'Get-Usage-Limits', {
+          origin: KIRO_ORIGIN,
+          profileArn: session.profileArn ?? '',
+          resourceType: 'CREDIT',
+          isEmailRequired: 'true',
+        })
+      : kiroControlCall(
+          session.region,
+          session.token,
+          'AmazonCodeWhispererService.GetUsageLimits',
+          { origin: KIRO_ORIGIN },
+          { origin: KIRO_ORIGIN },
+        )
     const response = await fetchFn(call.url, {
-      method: 'POST',
+      method: call.method,
       headers: call.headers,
-      body: call.body,
+      // The REST form is a GET with no body; the AWS-JSON form always has one.
+      ...'body' in call && call.body !== undefined ? { body: call.body } : {},
       ...signal === undefined ? {} : { signal },
     })
-    if (!response.ok) return { supported: false }
+    if (!response.ok) {
+      // An unreadable allowance is reported as unknown, never as a zero balance.
+      return { supported: false }
+    }
     const snapshot = parseKiroUsage(await response.json())
     return snapshot === undefined ? { supported: false } : kiroUsageToProviderUsage(snapshot)
   } catch {

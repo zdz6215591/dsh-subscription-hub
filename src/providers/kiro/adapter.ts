@@ -134,7 +134,12 @@ export class KiroAdapter extends LlmAdapter {
     }
     try {
       const session = await this.options.tokens.session(key)
-      const models = await fetchKiroModels(this.fetchFn, session.region ?? KIRO_DEFAULT_REGION, session.accessToken)
+      const models = await fetchKiroModels(this.fetchFn, {
+        region: session.region ?? KIRO_DEFAULT_REGION,
+        token: session.accessToken,
+        ...session.method === undefined ? {} : { method: session.method },
+        ...session.profileArn === undefined ? {} : { profileArn: session.profileArn },
+      })
       if (models.length === 0) {
         this.reportNotFetched(provider, {
           what: 'Kiro listed no models',
