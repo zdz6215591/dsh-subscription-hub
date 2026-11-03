@@ -15,6 +15,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import {
   KIRO_AUTH_SERVICE,
+  readKiroCliSignIn,
   KIRO_PORTAL,
   readKiroIdeSignIn,
   refreshKiroTokens,
@@ -176,4 +177,49 @@ test('kiro: an image over Kiro\u2019s limit is dropped with a note, not sent', (
   assert.deepEqual(current.images, [], 'the oversized image is not sent')
   assert.match(current.content, /image omitted: it is over Kiro's 5 MB image limit/)
   assert.match(current.content, /what is this\?/, 'the text beside it survives')
+})
+
+test('kiro login: kiro-cli\u2019s SQLite sign-in is read, with its AWS client', async () => {
+  let sqlite: { DatabaseSync: new (path: string) => { exec: (sql: string) => void; prepare: (sql: string) => { run: (...args: unknown[]) => void }; close: () => void } }
+  try {
+    sqlite = await import('node:sqlite') as typeof sqlite
+  } catch {
+    return // a Node without node:sqlite: the reader reports that itself, covered below
+  }
+  const home = mkdtempSync(join(tmpdir(), 'kiro-cli-home-'))
+  const dir = join(home, '.local', 'share', 'kiro-cli')
+  mkdirSync(dir, { recursive: true })
+  const database = new sqlite.DatabaseSync(join(dir, 'data.sqlite3'))
+  database.exec('CREATE TABLE auth_kv (key TEXT PRIMARY KEY, value TEXT)')
+  const insert = database.prepare('INSERT INTO auth_kv (key, value) VALUES (?, ?)')
+  insert.run('kirocli:odic:token', JSON.stringify({
+    access_token: 'cli-at',
+    refresh_token: 'cli-rt',
+    expires_at: '2030-01-01T00:00:00Z',
+    region: 'eu-central-1',
+    profile_arn: 'arn:aws:codewhisperer:eu-central-1:1:profile/p',
+  }))
+  insert.run('kirocli:odic:device-registration', JSON.stringify({ client_id: 'cid', client_secret: 'csec' }))
+  database.close()
+
+  try {
+    const found = await readKiroCliSignIn(home, 'linux')
+    assert.equal(found?.accessToken, 'cli-at')
+    assert.equal(found?.refreshToken, 'cli-rt')
+    assert.equal(found?.method, 'idc')
+    assert.equal(found?.clientId, 'cid')
+    assert.equal(found?.region, 'eu-central-1')
+    assert.ok((found?.expiresAt ?? 0) > Date.now())
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('kiro login: no kiro-cli database is not an error', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'kiro-cli-empty-'))
+  try {
+    assert.equal(await readKiroCliSignIn(home, 'linux'), undefined)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
 })

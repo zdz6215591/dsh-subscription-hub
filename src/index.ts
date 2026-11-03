@@ -219,6 +219,7 @@ import {
   KiroAdapter,
   assertUsableKiroKey,
   fetchKiroUsage,
+  readKiroCliSignIn,
   readKiroIdeSignIn,
   sessionFromKiroSignIn,
   startKiroSignIn,
@@ -743,19 +744,23 @@ export class SubscriptionsAuthController implements AuthController {
       //     supplied), skipping Kiro's page;
       //   - `import`: the sign-in this machine's Kiro IDE already holds.
       if (method === 'import') {
-        const local = await readKiroIdeSignIn()
+        // kiro-cli's sign-in first (it refreshes its own token), then the IDE's.
+        // Both are read where they live; nothing is copied.
+        const local = await readKiroCliSignIn() ?? await readKiroIdeSignIn()
         if (local === undefined) {
-          throw new Error('kiro: no Kiro IDE sign-in found (~/.aws/sso/cache/kiro-auth-token.json). Sign in to the IDE, or paste an API key instead.')
+          throw new Error('kiro: no kiro-cli or Kiro IDE sign-in found on this machine. Sign in to one of them, or paste an API key instead.')
         }
         const session = await sessionFromKiroSignIn({
           accessToken: local.accessToken,
           refreshToken: local.refreshToken,
           expiresAt: local.expiresAt,
-          method: 'social',
-          loginProvider: 'Kiro IDE',
+          method: local.method ?? 'social',
+          loginProvider: local.loginProvider ?? 'Kiro IDE',
           region: local.region ?? 'us-east-1',
           ...local.profileArn === undefined ? {} : { profileArn: local.profileArn },
-        }, `kiro-ide-${local.accessToken.slice(-6)}`, proxiedFetch)
+          ...local.clientId === undefined ? {} : { clientId: local.clientId },
+          ...local.clientSecret === undefined ? {} : { clientSecret: local.clientSecret },
+        }, `kiro-local-${local.accessToken.slice(-6)}`, proxiedFetch)
         await this.persist('kiro', session)
         this.lastError.delete('kiro')
         this.onAuthChanged('kiro', accountKeyOf('kiro', session))

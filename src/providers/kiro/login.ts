@@ -456,8 +456,101 @@ export interface LocalKiroSignIn {
   expiresAt: number
   region?: string
   profileArn?: string
+  /** How it refreshes: social (Kiro service) or idc (AWS OIDC). */
+  method?: 'social' | 'idc'
+  /** Display name of the way it was signed in. */
+  loginProvider?: string
+  /** AWS OIDC client, idc only. */
+  clientId?: string
+  clientSecret?: string
   /** Where it was read from, for the card's account label. */
   source: string
+}
+
+/** Where kiro-cli keeps its SQLite database, per platform. */
+export function kiroCliDatabasePath(home: string = homedir(), platform: NodeJS.Platform = process.platform): string {
+  if (platform === 'win32') {
+    return join(process.env.APPDATA ?? join(home, 'AppData', 'Roaming'), 'kiro-cli', 'data.sqlite3')
+  }
+  if (platform === 'darwin') return join(home, 'Library', 'Application Support', 'kiro-cli', 'data.sqlite3')
+  return join(home, '.local', 'share', 'kiro-cli', 'data.sqlite3')
+}
+
+/**
+ * Read kiro-cli's sign-in from its SQLite database.
+ *
+ * kiro-cli stores its credentials in `auth_kv` as `kirocli:<kind>:token` →
+ * JSON. Three kinds exist, and each maps to a different refresh path, so the
+ * kind decides `method` here exactly as it does at sign-in time:
+ *
+ *   - `social`  — Google/GitHub; refreshes on Kiro's auth service;
+ *   - `odic`    — AWS Builder ID / Identity Center; refreshes through AWS OIDC
+ *                 and needs the client from `kirocli:odic:device-registration`;
+ *   - `external-idp` — a company's own IdP, which this route does NOT refresh.
+ *
+ * The database is opened READ-ONLY, and a Node without `node:sqlite` says so
+ * instead of pretending there is no sign-in: the difference matters, because one
+ * means "sign in", the other means "this runtime cannot read it".
+ *
+ * @param home - user home directory (injected for tests).
+ * @param platform - platform to resolve the path for.
+ * @returns the sign-in, or undefined when kiro-cli is not signed in.
+ */
+export async function readKiroCliSignIn(
+  home: string = homedir(),
+  platform: NodeJS.Platform = process.platform,
+): Promise<LocalKiroSignIn | undefined> {
+  const path = kiroCliDatabasePath(home, platform)
+  try {
+    const { existsSync } = await import('node:fs')
+    if (!existsSync(path)) return undefined
+  } catch {
+    return undefined
+  }
+  let database: { prepare: (sql: string) => { get: (key: string) => { value?: unknown } | undefined }; close: () => void }
+  try {
+    const sqlite = await import('node:sqlite') as { DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => typeof database }
+    database = new sqlite.DatabaseSync(path, { readOnly: true })
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new Error(`kiro: kiro-cli's sign-in lives in SQLite and this Node has no node:sqlite (${detail}); use the Kiro IDE or paste an API key`)
+  }
+  try {
+    const read = (key: string): Record<string, unknown> | undefined => {
+      const row = database.prepare('SELECT value FROM auth_kv WHERE key = ?').get(key)
+      if (row?.value === undefined || typeof row.value !== 'string') return undefined
+      try {
+        const parsed: unknown = JSON.parse(row.value)
+        return typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : undefined
+      } catch {
+        return undefined
+      }
+    }
+    for (const kind of ['social', 'odic'] as const) {
+      const token = read(`kirocli:${kind}:token`)
+      const accessToken = token?.access_token
+      if (typeof accessToken !== 'string' || accessToken === '') continue
+      const expires = typeof token?.expires_at === 'string' ? Date.parse(token.expires_at) : Number(token?.expires_at)
+      const registration = kind === 'odic' ? read('kirocli:odic:device-registration') : undefined
+      return {
+        accessToken,
+        refreshToken: typeof token?.refresh_token === 'string' ? token.refresh_token : '',
+        expiresAt: Number.isFinite(expires) ? expires : 0,
+        ...typeof token?.region === 'string' && token.region !== '' ? { region: token.region } : {},
+        ...typeof token?.profile_arn === 'string' && token.profile_arn !== '' ? { profileArn: token.profile_arn } : {},
+        method: kind === 'social' ? 'social' : 'idc',
+        loginProvider: kind === 'social' ? 'Kiro CLI' : 'BuilderId',
+        ...typeof registration?.client_id === 'string' ? { clientId: registration.client_id } : {},
+        ...typeof registration?.client_secret === 'string' ? { clientSecret: registration.client_secret } : {},
+        source: path,
+      }
+    }
+    return undefined
+  } catch {
+    return undefined
+  } finally {
+    try { database.close() } catch { /* already closed */ }
+  }
 }
 
 /**

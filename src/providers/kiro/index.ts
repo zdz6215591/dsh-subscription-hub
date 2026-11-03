@@ -28,6 +28,8 @@ export {
   KIRO_PORTAL,
   KIRO_SCOPES,
   KIRO_SIGNIN_TIMEOUT_MS,
+  kiroCliDatabasePath,
+  readKiroCliSignIn,
   readKiroIdeSignIn,
   refreshKiroTokens,
   startKiroSignIn,
