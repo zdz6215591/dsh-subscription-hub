@@ -1,22 +1,19 @@
 /**
  * Kiro's model roster.
  *
- * Kiro splits its catalogue by CLIENT ORIGIN, and only one of the surfaces this
- * credential can reach is usable:
+ * Measured with two real credentials, and the two disagree:
  *
- *   management.<region>.kiro.dev  /List-Available-Models  → what Kiro lets this
- *       credential CHAT with (the partner models: gpt-5.6-*, kimi-k3,
- *       deepseek-3.2, minimax-*, glm-5, qwen3-coder-next)
- *   q.<region>.amazonaws.com      /ListAvailableModels    → a SUPERSET that also
- *       lists the Claude family — measured on a live account — but every Claude id
- *       is refused by the chat endpoint with INVALID_MODEL_ID, because that family
- *       is served by Kiro's web portal (service.user-subscriptions.<region>.amazonaws.com,
- *       cookie + CSRF), not by the CLI surface.
+ *   API key  → `KiroControlPlaneBearerService.ListAvailableModels` answers 22
+ *              models (Claude family included) AND every one of them chats —
+ *              verified end to end, tool calls included.
+ *   sign-in  → `management /List-Available-Models` answers 9 (partner models),
+ *              while `q.<region>.amazonaws.com` lists the same 22 — and on that
+ *              token a Claude id answers INVALID_MODEL_ID from the chat endpoint.
  *
- * So this route lists EXACTLY what it can chat with. An earlier version merged
- * several "sources"; every one of them answered from the management host with the
- * same models, so the merge never added a single row. It is gone rather than kept
- * as decoration.
+ * So what a credential can LIST is not what it may USE, and the catalogue does not
+ * say which side a model is on. This module therefore lists what the credential's
+ * own API reports and leaves the "listed but refused" case to `unsupported.ts`,
+ * which drops a model the first time Kiro refuses it.
  *
  * A model's window and output cap come from Kiro's own `tokenLimits`; a row that
  * states none is published WITHOUT one instead of with a plausible default.

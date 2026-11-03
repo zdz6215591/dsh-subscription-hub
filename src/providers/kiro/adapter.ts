@@ -35,6 +35,7 @@ import type { PoolAdapter } from '../pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, subscriptionRetryPolicy } from '../rate-limit.js'
 import type { RateLimitWait } from '../rate-limit.js'
 import { findKiroModel, fetchKiroModels, toKiroModelInfo, writeKiroRosterDiagnostic } from './catalog.js'
+import { readKiroUnsupported, recordKiroUnsupported } from './unsupported.js'
 import type { KiroModel } from './catalog.js'
 import { decodeEventStream } from './eventstream.js'
 import {
@@ -168,7 +169,11 @@ export class KiroAdapter extends LlmAdapter {
       // Kiro's listing is the only place a model's limits come from, and a model
       // a user added by hand (a family the listing does not carry) should not
       // cost them the ones that were listed.
-      const listed = new Map(roster.models.map(model => [model.id, model]))
+      // A model this account already had refused is not offered again for a
+      // week: what a credential LISTS and what it may USE are different sets on
+      // Kiro, and a row that fails on selection is worse than an absent row.
+      const refused = await readKiroUnsupported(key)
+      const listed = new Map(roster.models.filter(model => !refused.has(model.id)).map(model => [model.id, model]))
       for (const entry of this.configuredRoster()) if (!listed.has(entry.id)) listed.set(entry.id, entry)
       const merged = [...listed.values()]
       this.rosters.set(key, { at: Date.now(), models: merged })
@@ -260,14 +265,20 @@ export class KiroAdapter extends LlmAdapter {
       } catch (error) {
         throw mapFetchFailure('kiro', error, watchdog, options.signal)
       }
-      if (!response.ok) throw await this.kiroHttpError(response)
+      if (!response.ok) throw await this.kiroHttpError(response, session, options.model)
       if (response.body === null) throw new LlmError('kiro returned an empty stream', 'EMPTY_RESPONSE')
 
       const contextWindow = (await this.resolveOwnModel('kiro', options.model)).context?.contextWindow ?? 0
       const wantsThinking = options.reasoningEffort !== undefined && String(options.reasoningEffort) !== 'off'
       const frames = decodeEventStream(response.body)
       const events = readKiroReply(frames, contextWindow, wantsThinking)
-      yield* toStreamChunks(events, kiroToolNameMap(options.tools))
+      try {
+        yield* toStreamChunks(events, kiroToolNameMap(options.tools))
+      } catch (error) {
+        // The same refusal can also arrive as an exception frame inside a 200.
+        await this.noteRefusal(error, session, options.model)
+        throw error
+      }
     } finally {
       watchdog.stop()
     }
@@ -278,9 +289,11 @@ export class KiroAdapter extends LlmAdapter {
    *
    * Kiro's wording decides the code (too-long input, exhausted credits,
    * throttling, no capacity), because the same failure arrives with different
-   * statuses depending on where it happened.
+   * statuses depending on where it happened. One wording has a side effect:
+   * `INVALID_MODEL_ID` means this credential may not USE the model it may list,
+   * so the model is recorded and dropped from the roster rather than offered again.
    */
-  private async kiroHttpError(response: Response): Promise<LlmError> {
+  private async kiroHttpError(response: Response, session: KiroSession, model: string): Promise<LlmError> {
     const text = await response.clone().text().catch(() => '')
     let message = text.trim()
     try {
@@ -291,6 +304,13 @@ export class KiroAdapter extends LlmAdapter {
     } catch {
       // Not JSON: the raw text is the message.
     }
+    if (/INVALID_MODEL_ID/.test(message)) {
+      await this.noteRefusal(new Error(message), session, model)
+      return new LlmError(
+        `kiro: Kiro lists ${model} but refuses to run it for this account (${message.slice(0, 120)}); it has been hidden for 7 days`,
+        'INVALID_REQUEST',
+      )
+    }
     const mapped = classifyKiroFailure(message)
     if (mapped !== 'UPSTREAM_ERROR') {
       return new LlmError(`kiro: ${message}`, mapped)
@@ -300,5 +320,24 @@ export class KiroAdapter extends LlmAdapter {
       return new LlmError(`kiro: Kiro rejected the API key (${response.status}): ${message.slice(0, 200)}`, 'INVALID_CREDENTIAL')
     }
     return await httpLlmError(response, 'kiro')
+  }
+
+  /**
+   * Record a `INVALID_MODEL_ID` refusal so the model stops being offered.
+   *
+   * @param error - the failure, whatever carried it (HTTP body or exception frame).
+   * @param session - the account it happened on.
+   * @param model - the model Kiro refused.
+   */
+  private async noteRefusal(error: unknown, session: KiroSession, model: string): Promise<void> {
+    const text = error instanceof Error ? error.message : String(error)
+    if (!/INVALID_MODEL_ID/.test(text)) return
+    await recordKiroUnsupported(session.account, model, text.slice(0, 200))
+    // The roster this adapter serves must forget it too, or the picker keeps the
+    // row until the next discovery read.
+    for (const [key, entry] of this.rosters) {
+      if (key !== session.account) continue
+      this.rosters.set(key, { at: entry.at, models: entry.models.filter(candidate => candidate.id !== model) })
+    }
   }
 }

@@ -56,6 +56,13 @@ export type { EventStreamFrame } from './eventstream.js'
 export { fetchKiroModels, findKiroModel, parseKiroModels, toKiroModelInfo, writeKiroRosterDiagnostic, KIRO_ROSTER_DIAGNOSTIC_FILE } from './catalog.js'
 export type { KiroRosterDiagnostic } from './catalog.js'
 export type { KiroModel } from './catalog.js'
+export {
+  clearKiroUnsupported,
+  kiroUnsupportedPath,
+  readKiroUnsupported,
+  recordKiroUnsupported,
+  UNSUPPORTED_TTL_MS,
+} from './unsupported.js'
 export { fetchKiroUsage, kiroPlanName, kiroUsageToProviderUsage, parseKiroUsage } from './usage.js'
 export type { KiroAllowance, KiroUsageSnapshot } from './usage.js'
 export {

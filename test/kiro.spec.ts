@@ -9,10 +9,16 @@
  */
 
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import {
   assertUsableKiroKey,
+  clearKiroUnsupported,
+  readKiroUnsupported,
+  recordKiroUnsupported,
   fetchKiroModels,
   fetchKiroUsage,
   buildKiroRequest,
@@ -494,4 +500,27 @@ test('kiro: the allowance is read over REST for a sign-in, over AWS-JSON for a k
   assert.equal(keyed.supported, true)
   assert.equal(calls[0]?.method, 'POST')
   assert.equal(calls[0]?.headers['X-Amz-Target'], 'AmazonCodeWhispererService.GetUsageLimits')
+})
+test('kiro: a model Kiro refused is remembered, then forgotten after a week', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'kiro-unsupported-'))
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  try {
+    assert.equal((await readKiroUnsupported('acct')).size, 0)
+    await recordKiroUnsupported('acct', 'claude-opus-5.5', 'Invalid model. (INVALID_MODEL_ID)')
+    const now = await readKiroUnsupported('acct')
+    assert.equal(now.has('claude-opus-5.5'), true)
+    // Another account is unaffected: the refusal belongs to the credential.
+    assert.equal((await readKiroUnsupported('other')).size, 0)
+    // Eight days later the model is offered again.
+    const later = await readKiroUnsupported('acct', Date.now() + 8 * 24 * 60 * 60 * 1000)
+    assert.equal(later.has('claude-opus-5.5'), false)
+    // A re-login clears it immediately.
+    await clearKiroUnsupported('acct')
+    assert.equal((await readKiroUnsupported('acct')).size, 0)
+  } finally {
+    if (previous === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previous
+    rmSync(home, { recursive: true, force: true })
+  }
 })
