@@ -119,8 +119,14 @@ export async function fetchKiroModels(
   // between accounts, and neither is documented. They are asked as a small
   // matrix so one refresh answers it: which combination (if any) carries the
   // family the caller cannot see. Each combination is its own source line.
-  if (session.method !== undefined && session.method !== 'apikey' && session.profileArn !== undefined) {
-    const variants: { origin: string; region: string }[] = [{ origin: 'KIRO_IDE', region: session.region }]
+  if (session.method !== undefined && session.method !== 'apikey') {
+    // `origin` is an ENUM — Kiro refused 'KIRO_IDE' saying so — and the valid
+    // members are not published. The plausible ones are asked and every answer,
+    // including the list the refusal spells out, is recorded.
+    const variants: { origin: string; region: string }[] = [
+      { origin: 'CLI', region: session.region },
+      { origin: 'IDE', region: session.region },
+    ]
     for (const region of KIRO_KEY_REGIONS) {
       if (region !== session.region) variants.push({ origin: KIRO_ORIGIN, region })
     }
@@ -153,12 +159,15 @@ export async function fetchKiroModels(
   // list the partner models only, while the same account's app also offers the
   // Claude ones. So the second operation is asked too and the answers merged —
   // a superset that costs one call and cannot lose a model the first one had.
-  try {
-    const read = await fetchKiroModelsCodeWhisperer(fetchFn, session, signal)
-    sources.push({ api: 'codewhisperer', ok: true, count: read.models.length, pages: read.pages })
-    absorb(read.models)
-  } catch (error) {
-    sources.push({ api: 'codewhisperer', ok: false, count: 0, pages: 0, error: text(error) })
+  for (const withProfile of session.profileArn === undefined || session.profileArn === '' ? [false] : [true, false]) {
+    const label = withProfile ? 'codewhisperer+profileArn' : 'codewhisperer'
+    try {
+      const read = await fetchKiroModelsCodeWhisperer(fetchFn, session, signal, withProfile)
+      sources.push({ api: label, ok: true, count: read.models.length, pages: read.pages })
+      absorb(read.models)
+    } catch (error) {
+      sources.push({ api: label, ok: false, count: 0, pages: 0, error: text(error) })
+    }
   }
 
   // Nothing listed AND at least one source explained why: say it, rather than
@@ -224,14 +233,19 @@ async function fetchKiroModelsBearer(
  */
 async function fetchKiroModelsCodeWhisperer(
   fetchFn: typeof fetch,
-  session: { region: string; token: string; method?: 'apikey' | 'social' | 'idc' },
+  session: { region: string; token: string; method?: 'apikey' | 'social' | 'idc'; profileArn?: string },
   signal?: AbortSignal,
+  withProfile = false,
 ): Promise<{ models: KiroModel[]; pages: number }> {
+  // Kiro answers ValidationException: Invalid profileArn when this operation is
+  // asked without one, so the profile travels in the body when the account has
+  // it — and both shapes are probed, because which one lists the Claude family
+  // is exactly what is unknown here.
   const call = kiroControlCall(
     session.region,
     session.token,
     'AmazonCodeWhispererService.ListAvailableModels',
-    { origin: KIRO_ORIGIN },
+    { origin: KIRO_ORIGIN, ...withProfile && session.profileArn !== undefined ? { profileArn: session.profileArn } : {} },
     { origin: KIRO_ORIGIN },
   )
   // 	okentype: API_KEY is for a KEY. A signed-in token that carries it is

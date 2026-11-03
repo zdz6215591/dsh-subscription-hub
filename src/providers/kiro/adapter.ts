@@ -164,9 +164,16 @@ export class KiroAdapter extends LlmAdapter {
         })
         return this.configuredRoster().map(model => toKiroModelInfo(model, provider))
       }
-      this.rosters.set(key, { at: Date.now(), models: roster.models })
+      // Configured rows are merged ON TOP of what Kiro listed, not instead of it:
+      // Kiro's listing is the only place a model's limits come from, and a model
+      // a user added by hand (a family the listing does not carry) should not
+      // cost them the ones that were listed.
+      const listed = new Map(roster.models.map(model => [model.id, model]))
+      for (const entry of this.configuredRoster()) if (!listed.has(entry.id)) listed.set(entry.id, entry)
+      const merged = [...listed.values()]
+      this.rosters.set(key, { at: Date.now(), models: merged })
       this.notFetched.delete(provider)
-      return roster.models.map(model => toKiroModelInfo(model, provider))
+      return merged.map(model => toKiroModelInfo(model, provider))
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
       void writeKiroRosterDiagnostic({
