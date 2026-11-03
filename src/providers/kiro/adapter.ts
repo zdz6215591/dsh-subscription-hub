@@ -140,15 +140,15 @@ export class KiroAdapter extends LlmAdapter {
         ...session.method === undefined ? {} : { method: session.method },
         ...session.profileArn === undefined ? {} : { profileArn: session.profileArn },
       })
-      // Record what Kiro actually sent, source by source, so "the app shows a
-      // model this plugin does not" becomes a diff instead of a guess.
-      const failure = roster.sources.filter(source => !source.ok).map(source => `${source.api}: ${source.error ?? 'failed'}`).join('; ')
+      // Record what Kiro actually sent, so "the app shows a model this plugin
+      // does not" becomes a diff instead of a guess.
       void writeKiroRosterDiagnostic({
         at: Date.now(),
         region: session.region ?? KIRO_DEFAULT_REGION,
         tokenTail: session.accessToken.slice(-6),
         count: roster.models.length,
-        sources: roster.sources,
+        api: roster.api,
+        pages: roster.pages,
         models: roster.models.map(model => ({
           id: model.id,
           name: model.name,
@@ -160,7 +160,7 @@ export class KiroAdapter extends LlmAdapter {
       if (roster.models.length === 0) {
         this.reportNotFetched(provider, {
           what: 'Kiro listed no models',
-          detail: failure === '' ? 'every catalogue source answered with an empty roster' : failure,
+          detail: `${roster.api === 'management' ? 'List-Available-Models' : 'ListAvailableModels'} answered with an empty roster`,
         })
         return this.configuredRoster().map(model => toKiroModelInfo(model, provider))
       }
@@ -181,7 +181,8 @@ export class KiroAdapter extends LlmAdapter {
         region: 'unknown',
         tokenTail: 'unknown',
         count: 0,
-        sources: [{ api: 'bearer', ok: false, count: 0, pages: 0, error: detail }],
+        api: 'management',
+        pages: 0,
         models: [],
       })
       this.reportNotFetched(provider, { what: 'Kiro returned no model roster', detail })

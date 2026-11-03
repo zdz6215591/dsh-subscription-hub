@@ -435,7 +435,7 @@ test('kiro: a signed-in token lists models over REST, an API key over AWS-JSON',
     profileArn: 'arn:aws:codewhisperer:eu-central-1:1:profile/p',
   })
   assert.equal(signedIn.models.length, 1)
-  assert.equal(signedIn.sources[0]?.api, 'management')
+  assert.equal(signedIn.api, 'management')
   const rest = calls[0]!
   assert.equal(rest.method, 'GET')
   assert.match(rest.url, /^https:\/\/management\.eu-central-1\.kiro\.dev\/List-Available-Models\?/)
@@ -448,7 +448,7 @@ test('kiro: a signed-in token lists models over REST, an API key over AWS-JSON',
   // An API key: the AWS-JSON operation at the host root, exactly as kiro-cli does.
   calls.length = 0
   const bearer = await fetchKiroModels(fetchFn, { region: 'us-east-1', token: 'ksk_AbCdEf123456', method: 'apikey' })
-  assert.equal(bearer.sources[0]?.api, 'bearer')
+  assert.equal(bearer.api, 'bearer')
   const rpc = calls[0]!
   assert.equal(rpc.method, 'POST')
   assert.equal(rpc.url, 'https://management.us-east-1.kiro.dev/?origin=KIRO_CLI')
