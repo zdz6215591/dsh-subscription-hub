@@ -108,6 +108,19 @@ export async function fetchKiroModels(
     }
   }
 
+  // A third shape, so the answer is complete rather than inferred: the REST
+  // operation the SIGN-IN path uses, asked with the API key. When Claude models
+  // are missing from both AWS-JSON sources, this settles whether the family is
+  // behind the other operation or absent from the credential altogether.
+  if (session.method === undefined || session.method === 'apikey') {
+    try {
+      const read = await fetchKiroModelsRestWithKey(fetchFn, session, signal)
+      sources.push({ api: 'management', ok: true, count: read.models.length, pages: read.pages })
+      absorb(read.models)
+    } catch (error) {
+      sources.push({ api: 'management', ok: false, count: 0, pages: 0, error: text(error) })
+    }
+  }
   // A catalogue can be served by more than one operation, and which one carries
   // which family of models is NOT published: an API key here has been seen to
   // list the partner models only, while the same account's app also offers the
@@ -325,4 +338,36 @@ export function toKiroModelInfo(model: KiroModel, provider: string): LlmModelInf
  */
 export function findKiroModel(models: readonly KiroModel[], id: string): KiroModel | undefined {
   return models.find(model => model.id === id)
+}
+
+/**
+ * Ask the sign-in path's REST catalogue with an API KEY.
+ *
+ * Recorded as its own source because it answers a different question from the
+ * AWS-JSON ones: when the Claude family is missing from those, this says whether
+ * it lives behind the REST operation or is simply not in the credential's
+ * catalogue at all.
+ *
+ * @param fetchFn - fetch to use.
+ * @param session - region and key.
+ * @param signal - caller cancellation.
+ * @returns whatever that operation lists.
+ */
+async function fetchKiroModelsRestWithKey(
+  fetchFn: typeof fetch,
+  session: { region: string; token: string },
+  signal?: AbortSignal,
+): Promise<{ models: KiroModel[]; pages: number }> {
+  const response = await fetchFn(
+    `${kiroManagement(session.region)}/List-Available-Models?${new URLSearchParams({ origin: KIRO_ORIGIN }).toString()}`,
+    {
+      method: 'GET',
+      headers: { ...kiroAuthHeaders(session.token), Accept: 'application/json' },
+      ...signal === undefined ? {} : { signal },
+    },
+  )
+  if (!response.ok) {
+    throw new Error(`REST List-Available-Models answered ${response.status}: ${(await response.text()).slice(0, 160)}`)
+  }
+  return { models: parseKiroModels(await response.json()).models, pages: 1 }
 }
