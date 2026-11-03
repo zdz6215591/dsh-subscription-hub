@@ -115,51 +115,7 @@ export async function fetchKiroModels(
     }
   }
 
-  // Origin and region are the only two variables left that can move a catalogue
-  // between accounts, and neither is documented. They are asked as a small
-  // matrix so one refresh answers it: which combination (if any) carries the
-  // family the caller cannot see. Each combination is its own source line.
-  if (session.method !== undefined && session.method !== 'apikey') {
-    // `origin` is an ENUM — Kiro refused 'KIRO_IDE' saying so — and the valid
-    // members are not published. The plausible ones are asked and every answer,
-    // including the list the refusal spells out, is recorded.
-    const variants: { origin: string; region: string }[] = [
-      { origin: 'CLI', region: session.region },
-      { origin: 'IDE', region: session.region },
-    ]
-    for (const region of KIRO_KEY_REGIONS) {
-      if (region !== session.region) variants.push({ origin: KIRO_ORIGIN, region })
-    }
-    for (const variant of variants) {
-      const label = `management:${variant.origin}@${variant.region}`
-      try {
-        const read = await fetchKiroModelsRest(fetchFn, session, variant.origin, variant.region, signal)
-        sources.push({ api: label, ok: true, count: read.models.length, pages: read.pages })
-        absorb(read.models)
-      } catch (error) {
-        sources.push({ api: label, ok: false, count: 0, pages: 0, error: text(error) })
-      }
-    }
-  }
-  // A third shape, so the answer is complete rather than inferred: the REST
-  // operation the SIGN-IN path uses, asked with the API key. When Claude models
-  // are missing from both AWS-JSON sources, this settles whether the family is
-  // behind the other operation or absent from the credential altogether.
-  if (session.method === undefined || session.method === 'apikey') {
-    try {
-      const read = await fetchKiroModelsRestWithKey(fetchFn, session, signal)
-      sources.push({ api: 'management', ok: true, count: read.models.length, pages: read.pages })
-      absorb(read.models)
-    } catch (error) {
-      sources.push({ api: 'management', ok: false, count: 0, pages: 0, error: text(error) })
-    }
-  }
-  // A catalogue can be served by more than one operation, and which one carries
-  // which family of models is NOT published: an API key here has been seen to
-  // list the partner models only, while the same account's app also offers the
-  // Claude ones. So the second operation is asked too and the answers merged —
-  // a superset that costs one call and cannot lose a model the first one had.
-  for (const withProfile of session.profileArn === undefined || session.profileArn === '' ? [false] : [true, false]) {
+  for (const withProfile of [true]) {
     const label = withProfile ? 'codewhisperer+profileArn' : 'codewhisperer'
     try {
       const read = await fetchKiroModelsCodeWhisperer(fetchFn, session, signal, withProfile)
