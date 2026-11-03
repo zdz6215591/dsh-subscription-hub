@@ -16,7 +16,14 @@
  */
 
 import type { LlmModelInfo } from '@deepseek-ai/dsh-llm'
-import { kiroControlCall, kiroAuthHeaders, kiroManagement, kiroManagementCall, KIRO_ORIGIN } from './protocol.js'
+import {
+  kiroControlCall,
+  kiroAuthHeaders,
+  kiroManagement,
+  kiroManagementCall,
+  KIRO_KEY_REGIONS,
+  KIRO_ORIGIN,
+} from './protocol.js'
 
 /** One model as Kiro lists it. */
 export interface KiroModel {
@@ -108,6 +115,26 @@ export async function fetchKiroModels(
     }
   }
 
+  // Origin and region are the only two variables left that can move a catalogue
+  // between accounts, and neither is documented. They are asked as a small
+  // matrix so one refresh answers it: which combination (if any) carries the
+  // family the caller cannot see. Each combination is its own source line.
+  if (session.method !== undefined && session.method !== 'apikey' && session.profileArn !== undefined) {
+    const variants: { origin: string; region: string }[] = [{ origin: 'KIRO_IDE', region: session.region }]
+    for (const region of KIRO_KEY_REGIONS) {
+      if (region !== session.region) variants.push({ origin: KIRO_ORIGIN, region })
+    }
+    for (const variant of variants) {
+      const label = `management:${variant.origin}@${variant.region}`
+      try {
+        const read = await fetchKiroModelsRest(fetchFn, session, variant.origin, variant.region, signal)
+        sources.push({ api: label, ok: true, count: read.models.length, pages: read.pages })
+        absorb(read.models)
+      } catch (error) {
+        sources.push({ api: label, ok: false, count: 0, pages: 0, error: text(error) })
+      }
+    }
+  }
   // A third shape, so the answer is complete rather than inferred: the REST
   // operation the SIGN-IN path uses, asked with the API key. When Claude models
   // are missing from both AWS-JSON sources, this settles whether the family is
@@ -197,7 +224,7 @@ async function fetchKiroModelsBearer(
  */
 async function fetchKiroModelsCodeWhisperer(
   fetchFn: typeof fetch,
-  session: { region: string; token: string },
+  session: { region: string; token: string; method?: 'apikey' | 'social' | 'idc' },
   signal?: AbortSignal,
 ): Promise<{ models: KiroModel[]; pages: number }> {
   const call = kiroControlCall(
@@ -207,9 +234,14 @@ async function fetchKiroModelsCodeWhisperer(
     { origin: KIRO_ORIGIN },
     { origin: KIRO_ORIGIN },
   )
+  // 	okentype: API_KEY is for a KEY. A signed-in token that carries it is
+  // refused as an invalid token — which is what this source used to do.
+  const headers = session.method === undefined || session.method === 'apikey'
+    ? call.headers
+    : { ...call.headers, tokentype: '' }
   const response = await fetchFn(call.url, {
     method: call.method,
-    headers: call.headers,
+    headers,
     body: call.body,
     ...signal === undefined ? {} : { signal },
   })
@@ -260,7 +292,7 @@ const DIAGNOSTIC_ID_LIMIT = 500
 /** One catalogue source's outcome. */
 export interface KiroRosterSourceResult {
   /** Which API was asked, in the words the file uses. */
-  api: 'bearer' | 'management' | 'codewhisperer'
+  api: string
   ok: boolean
   /** Models this source contributed (before de-duplication). */
   count: number
@@ -368,6 +400,36 @@ async function fetchKiroModelsRestWithKey(
   )
   if (!response.ok) {
     throw new Error(`REST List-Available-Models answered ${response.status}: ${(await response.text()).slice(0, 160)}`)
+  }
+  return { models: parseKiroModels(await response.json()).models, pages: 1 }
+}
+/**
+ * Ask the REST catalogue for an explicit origin and region.
+ *
+ * @param fetchFn - fetch to use.
+ * @param session - a signed-in session (token and profile).
+ * @param origin - `KIRO_CLI` or `KIRO_IDE`.
+ * @param region - region to ask.
+ * @param signal - caller cancellation.
+ * @returns whatever that combination lists.
+ */
+async function fetchKiroModelsRest(
+  fetchFn: typeof fetch,
+  session: { token: string; profileArn?: string },
+  origin: string,
+  region: string,
+  signal?: AbortSignal,
+): Promise<{ models: KiroModel[]; pages: number }> {
+  const params: Record<string, string> = { origin }
+  if (session.profileArn !== undefined && session.profileArn !== '') params.profileArn = session.profileArn
+  const call = kiroManagementCall(region, session.token, 'List-Available-Models', params)
+  const response = await fetchFn(call.url, {
+    method: call.method,
+    headers: call.headers,
+    ...signal === undefined ? {} : { signal },
+  })
+  if (!response.ok) {
+    throw new Error(`${origin}@${region} answered ${response.status}: ${(await response.text()).slice(0, 140)}`)
   }
   return { models: parseKiroModels(await response.json()).models, pages: 1 }
 }
