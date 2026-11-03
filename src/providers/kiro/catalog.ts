@@ -81,7 +81,7 @@ export async function fetchKiroModels(
   fetchFn: typeof fetch,
   session: { region: string; token: string; method?: 'apikey' | 'social' | 'idc'; profileArn?: string },
   signal?: AbortSignal,
-): Promise<KiroModel[]> {
+): Promise<{ models: KiroModel[]; api: 'bearer' | 'management'; pages: number }> {
   if (session.method !== undefined && session.method !== 'apikey') {
     return await fetchKiroModelsSignedIn(fetchFn, session, signal)
   }
@@ -89,7 +89,9 @@ export async function fetchKiroModels(
   const key = session.token
   const models: KiroModel[] = []
   let nextToken: string | undefined
+  let pages = 0
   for (let page = 0; page < MAX_PAGES; page++) {
+    pages++
     const call = kiroControlCall(
       region,
       key,
@@ -111,7 +113,7 @@ export async function fetchKiroModels(
     nextToken = parsed.nextToken
     if (nextToken === undefined) break
   }
-  return models
+  return { models, api: 'bearer', pages }
 }
 
 /**
@@ -160,13 +162,15 @@ async function fetchKiroModelsSignedIn(
   fetchFn: typeof fetch,
   session: { region: string; token: string; profileArn?: string },
   signal?: AbortSignal,
-): Promise<KiroModel[]> {
+): Promise<{ models: KiroModel[]; api: 'bearer' | 'management'; pages: number }> {
   if (session.profileArn === undefined || session.profileArn === '') {
     throw new Error('kiro: this sign-in named no profile, so Kiro cannot list its models; sign in again (the profile is read at sign-in time)')
   }
   const models: KiroModel[] = []
   let nextToken: string | undefined
+  let pages = 0
   for (let page = 0; page < MAX_PAGES; page++) {
+    pages++
     const call = kiroManagementCall(session.region, session.token, 'List-Available-Models', {
       origin: KIRO_ORIGIN,
       profileArn: session.profileArn,
@@ -185,5 +189,58 @@ async function fetchKiroModelsSignedIn(
     nextToken = parsed.nextToken
     if (nextToken === undefined) break
   }
-  return models
+  return { models, api: 'management', pages }
 }
+/**
+ * Upper bound on the ids this diagnostic records, so a pathological roster
+ * cannot write a huge file.
+ */
+const DIAGNOSTIC_ID_LIMIT = 500
+
+/** What one roster read saw, written for the user to compare with Kiro's app. */
+export interface KiroRosterDiagnostic {
+  at: number
+  /** Which of Kiro's two APIs answered, because they can differ. */
+  api: 'bearer' | 'management'
+  region: string
+  /** Last six characters of the token, to tell two accounts apart. */
+  tokenTail: string
+  pages: number
+  count: number
+  models: { id: string; name: string; contextWindow?: number; maxOutputTokens?: number; images: boolean }[]
+  /** The failure, when the read failed instead of listing nothing. */
+  error?: string
+}
+
+/**
+ * Record the last roster read beside the plugin's other state.
+ *
+ * This exists because "Kiro's own app shows a model this plugin does not" is
+ * otherwise undiagnosable from outside: the two APIs differ (`bearer` for an
+ * API key, `management` for a sign-in), pagination can hide a page, and this
+ * route's own visibility rules hide newly discovered models by default. The
+ * file says exactly which ids Kiro sent, so the answer is a diff, not a guess.
+ *
+ * Best-effort: a diagnostic that fails must never fail the read it describes.
+ *
+ * @param diagnostic - what was seen.
+ */
+export async function writeKiroRosterDiagnostic(diagnostic: KiroRosterDiagnostic): Promise<void> {
+  try {
+    const { mkdir, writeFile } = await import('node:fs/promises')
+    const { dirname } = await import('node:path')
+    const { dshHomePath } = await import('@deepseek-ai/dsh-home-paths')
+    const path = dshHomePath('plugins', 'subscriptions', 'kiro-roster.json')
+    await mkdir(dirname(path), { recursive: true })
+    const trimmed: KiroRosterDiagnostic = {
+      ...diagnostic,
+      models: diagnostic.models.slice(0, DIAGNOSTIC_ID_LIMIT),
+    }
+    await writeFile(path, `${JSON.stringify(trimmed, null, 2)}\n`, 'utf8')
+  } catch {
+    // Never let the record break the read.
+  }
+}
+
+/** Where the diagnostic is written, for a message that tells the user where to look. */
+export const KIRO_ROSTER_DIAGNOSTIC_FILE = 'plugins/subscriptions/kiro-roster.json'

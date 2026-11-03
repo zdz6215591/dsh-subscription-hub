@@ -34,7 +34,7 @@ import type { FetchFn, ModelEntry, ModelListNotFetched } from '../common.js'
 import type { PoolAdapter } from '../pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, subscriptionRetryPolicy } from '../rate-limit.js'
 import type { RateLimitWait } from '../rate-limit.js'
-import { findKiroModel, fetchKiroModels, toKiroModelInfo } from './catalog.js'
+import { findKiroModel, fetchKiroModels, toKiroModelInfo, writeKiroRosterDiagnostic } from './catalog.js'
 import type { KiroModel } from './catalog.js'
 import { decodeEventStream } from './eventstream.js'
 import {
@@ -134,24 +134,51 @@ export class KiroAdapter extends LlmAdapter {
     }
     try {
       const session = await this.options.tokens.session(key)
-      const models = await fetchKiroModels(this.fetchFn, {
+      const roster = await fetchKiroModels(this.fetchFn, {
         region: session.region ?? KIRO_DEFAULT_REGION,
         token: session.accessToken,
         ...session.method === undefined ? {} : { method: session.method },
         ...session.profileArn === undefined ? {} : { profileArn: session.profileArn },
       })
-      if (models.length === 0) {
+      // Record what Kiro actually sent, so "the app shows a model this plugin
+      // does not" becomes a diff instead of a guess.
+      void writeKiroRosterDiagnostic({
+        at: Date.now(),
+        api: roster.api,
+        region: session.region ?? KIRO_DEFAULT_REGION,
+        tokenTail: session.accessToken.slice(-6),
+        pages: roster.pages,
+        count: roster.models.length,
+        models: roster.models.map(model => ({
+          id: model.id,
+          name: model.name,
+          ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
+          ...model.maxOutputTokens === undefined ? {} : { maxOutputTokens: model.maxOutputTokens },
+          images: model.supportsImages,
+        })),
+      })
+      if (roster.models.length === 0) {
         this.reportNotFetched(provider, {
           what: 'Kiro listed no models',
-          detail: 'ListAvailableModels answered with an empty roster',
+          detail: `${roster.api === 'bearer' ? 'ListAvailableModels' : 'List-Available-Models'} answered with an empty roster`,
         })
         return this.configuredRoster().map(model => toKiroModelInfo(model, provider))
       }
-      this.rosters.set(key, { at: Date.now(), models })
+      this.rosters.set(key, { at: Date.now(), models: roster.models })
       this.notFetched.delete(provider)
-      return models.map(model => toKiroModelInfo(model, provider))
+      return roster.models.map(model => toKiroModelInfo(model, provider))
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
+      void writeKiroRosterDiagnostic({
+        at: Date.now(),
+        api: 'bearer',
+        region: 'unknown',
+        tokenTail: 'unknown',
+        pages: 0,
+        count: 0,
+        models: [],
+        error: detail,
+      })
       this.reportNotFetched(provider, { what: 'Kiro returned no model roster', detail })
       return (cached?.models ?? this.configuredRoster()).map(model => toKiroModelInfo(model, provider))
     }
