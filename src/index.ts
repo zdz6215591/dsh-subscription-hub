@@ -1873,7 +1873,10 @@ export function apply(ctx: Context, config: Config): void {
       if (adapter === undefined) return { models: [] }
       const models = await adapter.listOwnModels(provider)
       const modelIds = models.map(m => m.id)
-      const { hidden, unread } = await syncDiscoveredModels(provider, modelIds)
+      // Kiro's catalogue IS the product: a model the account pays for must not
+      // start hidden, or the card reads as broken. Every other route keeps the
+      // default (new models hidden until the user opts in).
+      const { hidden, unread } = await syncDiscoveredModels(provider, modelIds, { revealNew: provider === 'kiro' })
       const rows = models.map(model => {
         // The vendor is resolved here rather than in the browser, so the client
         // bundle carries no vendor table. The NAME is consulted too, because some

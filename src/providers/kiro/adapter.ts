@@ -140,15 +140,15 @@ export class KiroAdapter extends LlmAdapter {
         ...session.method === undefined ? {} : { method: session.method },
         ...session.profileArn === undefined ? {} : { profileArn: session.profileArn },
       })
-      // Record what Kiro actually sent, so "the app shows a model this plugin
-      // does not" becomes a diff instead of a guess.
+      // Record what Kiro actually sent, source by source, so "the app shows a
+      // model this plugin does not" becomes a diff instead of a guess.
+      const failure = roster.sources.filter(source => !source.ok).map(source => `${source.api}: ${source.error ?? 'failed'}`).join('; ')
       void writeKiroRosterDiagnostic({
         at: Date.now(),
-        api: roster.api,
         region: session.region ?? KIRO_DEFAULT_REGION,
         tokenTail: session.accessToken.slice(-6),
-        pages: roster.pages,
         count: roster.models.length,
+        sources: roster.sources,
         models: roster.models.map(model => ({
           id: model.id,
           name: model.name,
@@ -160,7 +160,7 @@ export class KiroAdapter extends LlmAdapter {
       if (roster.models.length === 0) {
         this.reportNotFetched(provider, {
           what: 'Kiro listed no models',
-          detail: `${roster.api === 'bearer' ? 'ListAvailableModels' : 'List-Available-Models'} answered with an empty roster`,
+          detail: failure === '' ? 'every catalogue source answered with an empty roster' : failure,
         })
         return this.configuredRoster().map(model => toKiroModelInfo(model, provider))
       }
@@ -171,13 +171,11 @@ export class KiroAdapter extends LlmAdapter {
       const detail = error instanceof Error ? error.message : String(error)
       void writeKiroRosterDiagnostic({
         at: Date.now(),
-        api: 'bearer',
         region: 'unknown',
         tokenTail: 'unknown',
-        pages: 0,
         count: 0,
+        sources: [{ api: 'bearer', ok: false, count: 0, pages: 0, error: detail }],
         models: [],
-        error: detail,
       })
       this.reportNotFetched(provider, { what: 'Kiro returned no model roster', detail })
       return (cached?.models ?? this.configuredRoster()).map(model => toKiroModelInfo(model, provider))

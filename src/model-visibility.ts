@@ -180,6 +180,7 @@ export async function isModelVisible(provider: ProviderId, model: string): Promi
 export async function syncDiscoveredModels(
   provider: ProviderId,
   currentModelIds: readonly string[],
+  options: { revealNew?: boolean } = {},
 ): Promise<{ hidden: ReadonlySet<string>; unread: ReadonlySet<string> }> {
   return withFileLock(async () => {
     const document = await readDocument()
@@ -207,8 +208,12 @@ export async function syncDiscoveredModels(
 
     for (const id of currentModelIds) {
       if (!knownSet.has(id)) {
-        // New model discovered: default to hidden, tag as unread, and record as known.
-        hiddenSet.add(id)
+        // New model discovered. The default is to hide it and flag it unread, so a
+        // route that silently gains a model cannot change what a picker offers
+        // mid-session. A route whose catalogue IS the product (Kiro: the model a
+        // user paid for is the whole point) opts out with `revealNew` — hiding
+        // those left the list empty and read as "the plugin is broken".
+        if (options.revealNew !== true) hiddenSet.add(id)
         unreadSet.add(id)
         knownSet.add(id)
         changed = true

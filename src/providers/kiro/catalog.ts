@@ -81,83 +81,130 @@ export async function fetchKiroModels(
   fetchFn: typeof fetch,
   session: { region: string; token: string; method?: 'apikey' | 'social' | 'idc'; profileArn?: string },
   signal?: AbortSignal,
-): Promise<{ models: KiroModel[]; api: 'bearer' | 'management'; pages: number }> {
-  if (session.method !== undefined && session.method !== 'apikey') {
-    return await fetchKiroModelsSignedIn(fetchFn, session, signal)
+): Promise<{ models: KiroModel[]; sources: KiroRosterSourceResult[] }> {
+  const sources: KiroRosterSourceResult[] = []
+  const merged = new Map<string, KiroModel>()
+  const absorb = (models: readonly KiroModel[]): void => {
+    for (const model of models) if (!merged.has(model.id)) merged.set(model.id, model)
   }
-  const region = session.region
-  const key = session.token
+
+  // The source the credential's own client uses comes first, so its names and
+  // limits win a tie.
+  if (session.method !== undefined && session.method !== 'apikey') {
+    try {
+      const read = await fetchKiroModelsSignedIn(fetchFn, session, signal)
+      sources.push({ api: 'management', ok: true, count: read.models.length, pages: read.pages })
+      absorb(read.models)
+    } catch (error) {
+      sources.push({ api: 'management', ok: false, count: 0, pages: 0, error: text(error) })
+    }
+  } else {
+    try {
+      const read = await fetchKiroModelsBearer(fetchFn, session, signal)
+      sources.push({ api: 'bearer', ok: true, count: read.models.length, pages: read.pages })
+      absorb(read.models)
+    } catch (error) {
+      sources.push({ api: 'bearer', ok: false, count: 0, pages: 0, error: text(error) })
+    }
+  }
+
+  // A catalogue can be served by more than one operation, and which one carries
+  // which family of models is NOT published: an API key here has been seen to
+  // list the partner models only, while the same account's app also offers the
+  // Claude ones. So the second operation is asked too and the answers merged —
+  // a superset that costs one call and cannot lose a model the first one had.
+  try {
+    const read = await fetchKiroModelsCodeWhisperer(fetchFn, session, signal)
+    sources.push({ api: 'codewhisperer', ok: true, count: read.models.length, pages: read.pages })
+    absorb(read.models)
+  } catch (error) {
+    sources.push({ api: 'codewhisperer', ok: false, count: 0, pages: 0, error: text(error) })
+  }
+
+  // Nothing listed AND at least one source explained why: say it, rather than
+  // reporting an empty roster that reads as "this account has no models".
+  if (merged.size === 0) {
+    const firstFailure = sources.find(source => !source.ok && source.error !== undefined)
+    if (firstFailure?.error !== undefined) throw new Error(firstFailure.error)
+  }
+  return { models: [...merged.values()], sources }
+}
+
+/** One error's text, for a source's row. */
+function text(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * The control-plane roster an API key lists (`KiroControlPlaneBearerService`).
+ *
+ * `profileArn` must NOT be sent: kiro-cli sends none, and Kiro answers 400 when
+ * one is present.
+ */
+async function fetchKiroModelsBearer(
+  fetchFn: typeof fetch,
+  session: { region: string; token: string },
+  signal?: AbortSignal,
+): Promise<{ models: KiroModel[]; pages: number }> {
   const models: KiroModel[] = []
   let nextToken: string | undefined
   let pages = 0
   for (let page = 0; page < MAX_PAGES; page++) {
     pages++
     const call = kiroControlCall(
-      region,
-      key,
+      session.region,
+      session.token,
       'KiroControlPlaneBearerService.ListAvailableModels',
       { origin: KIRO_ORIGIN, ...nextToken === undefined ? {} : { nextToken } },
       { origin: KIRO_ORIGIN },
     )
     const response = await fetchFn(call.url, {
-      method: 'POST',
+      method: call.method,
       headers: call.headers,
       body: call.body,
       ...signal === undefined ? {} : { signal },
     })
     if (!response.ok) {
-      throw new Error(`kiro: ListAvailableModels answered ${response.status}: ${(await response.text()).slice(0, 200)}`)
+      throw new Error(`ListAvailableModels answered ${response.status}: ${(await response.text()).slice(0, 200)}`)
     }
     const parsed = parseKiroModels(await response.json())
     models.push(...parsed.models)
     nextToken = parsed.nextToken
     if (nextToken === undefined) break
   }
-  return { models, api: 'bearer', pages }
+  return { models, pages }
 }
 
 /**
- * Wrap a Kiro row as harness model info.
+ * The AWS-Q operation that lists models (`AmazonCodeWhispererService.ListAvailableModels`).
  *
- * @param model - roster row.
- * @param provider - registered route id.
- * @returns the selector-facing entry.
+ * This is the only source that can carry the Claude family for a credential the
+ * control plane lists partner models for. A credential Kiro refuses here simply
+ * contributes nothing.
  */
-export function toKiroModelInfo(model: KiroModel, provider: string): LlmModelInfo {
-  return {
-    provider,
-    id: model.id,
-    name: model.name,
-    inputModalities: model.supportsImages ? ['text', 'image'] : ['text'],
+async function fetchKiroModelsCodeWhisperer(
+  fetchFn: typeof fetch,
+  session: { region: string; token: string },
+  signal?: AbortSignal,
+): Promise<{ models: KiroModel[]; pages: number }> {
+  const call = kiroControlCall(
+    session.region,
+    session.token,
+    'AmazonCodeWhispererService.ListAvailableModels',
+    { origin: KIRO_ORIGIN },
+    { origin: KIRO_ORIGIN },
+  )
+  const response = await fetchFn(call.url, {
+    method: call.method,
+    headers: call.headers,
+    body: call.body,
+    ...signal === undefined ? {} : { signal },
+  })
+  if (!response.ok) {
+    throw new Error(`CodeWhisperer ListAvailableModels answered ${response.status}: ${(await response.text()).slice(0, 160)}`)
   }
+  return { models: parseKiroModels(await response.json()).models, pages: 1 }
 }
-
-/**
- * Resolve one model's window and output cap from a roster, for request building.
- *
- * @param models - the roster.
- * @param id - model id.
- * @returns the row, when the roster knows it.
- */
-export function findKiroModel(models: readonly KiroModel[], id: string): KiroModel | undefined {
-  return models.find(model => model.id === id)
-}
-
-/** Re-export so callers do not need the management host directly. */
-export { kiroAuthHeaders, kiroManagement }
-
-/**
- * Read the roster of a SIGNED-IN account.
- *
- * A different API from the API key's (`GET /List-Available-Models` with the
- * profile named in the query). Sending the key's AWS-JSON shape here is exactly
- * what answers `AccessDeniedException: Invalid token`.
- *
- * @param fetchFn - fetch to use.
- * @param session - region, token and the profile the token may use.
- * @param signal - caller cancellation.
- * @returns the roster.
- */
 async function fetchKiroModelsSignedIn(
   fetchFn: typeof fetch,
   session: { region: string; token: string; profileArn?: string },
@@ -197,19 +244,29 @@ async function fetchKiroModelsSignedIn(
  */
 const DIAGNOSTIC_ID_LIMIT = 500
 
+/** One catalogue source's outcome. */
+export interface KiroRosterSourceResult {
+  /** Which API was asked, in the words the file uses. */
+  api: 'bearer' | 'management' | 'codewhisperer'
+  ok: boolean
+  /** Models this source contributed (before de-duplication). */
+  count: number
+  /** Pages read. */
+  pages: number
+  /** The failure, when it failed. */
+  error?: string
+}
+
 /** What one roster read saw, written for the user to compare with Kiro's app. */
 export interface KiroRosterDiagnostic {
   at: number
-  /** Which of Kiro's two APIs answered, because they can differ. */
-  api: 'bearer' | 'management'
   region: string
   /** Last six characters of the token, to tell two accounts apart. */
   tokenTail: string
-  pages: number
   count: number
+  /** Every source that was asked, and what it said. */
+  sources: KiroRosterSourceResult[]
   models: { id: string; name: string; contextWindow?: number; maxOutputTokens?: number; images: boolean }[]
-  /** The failure, when the read failed instead of listing nothing. */
-  error?: string
 }
 
 /**
@@ -243,4 +300,29 @@ export async function writeKiroRosterDiagnostic(diagnostic: KiroRosterDiagnostic
 }
 
 /** Where the diagnostic is written, for a message that tells the user where to look. */
-export const KIRO_ROSTER_DIAGNOSTIC_FILE = 'plugins/subscriptions/kiro-roster.json'
+export const KIRO_ROSTER_DIAGNOSTIC_FILE = 'plugins/subscriptions/kiro-roster.json'/**
+ * Wrap a Kiro row as harness model info.
+ *
+ * @param model - roster row.
+ * @param provider - registered route id.
+ * @returns the selector-facing entry.
+ */
+export function toKiroModelInfo(model: KiroModel, provider: string): LlmModelInfo {
+  return {
+    provider,
+    id: model.id,
+    name: model.name,
+    inputModalities: model.supportsImages ? ['text', 'image'] : ['text'],
+  }
+}
+
+/**
+ * Resolve one model's row from a roster.
+ *
+ * @param models - the roster.
+ * @param id - model id.
+ * @returns the row, when the roster knows it.
+ */
+export function findKiroModel(models: readonly KiroModel[], id: string): KiroModel | undefined {
+  return models.find(model => model.id === id)
+}
