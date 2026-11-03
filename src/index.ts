@@ -1600,7 +1600,7 @@ export function apply(ctx: Context, config: Config): void {
           streamIdleTimeoutMs,
           rateLimit,
           tokens,
-          discovery: !overridden.has('kiro'),
+          // Always discover: models.kiro rows are MERGED with Kiro's own\n          // listing (a hand-added family must not cost the listed models), so\n          // switching discovery off here would undo that.\n          discovery: true,
           onWarn,
           resolveAttachments,
           pool: () => poolAdapter,
