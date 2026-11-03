@@ -171,6 +171,9 @@ export const PROVIDER_PROBE_TARGETS: Readonly<Record<ProviderId, { url: string; 
   // a hand-entered ptKey takes — is this host.
   joycode: { url: 'https://joycode-api.jd.com', method: 'GET' },
   zed: { url: 'https://cloud.zed.dev', method: 'GET' },
+  // Kiro's management host in its default region. It answers a 4xx on `/`; any
+  // status proves egress, which is what this probe measures.
+  kiro: { url: 'https://management.us-east-1.kiro.dev', method: 'GET' },
 })
 
 /** Result of an egress GeoIP probe. */
@@ -328,6 +331,9 @@ const PROVIDER_HOST_SUFFIXES: ReadonlyArray<readonly [string, ProviderId]> = [
   ['solo.trae.cn', 'trae'],
   ['cloud.zed.dev', 'zed'],
   ['zed.dev', 'zed'],
+  // Kiro's runtime and management hosts. Without these the per-provider proxy
+  // toggle silently stops applying (the Qoder note above is the same trap).
+  ['kiro.dev', 'kiro'],
   ['chatgpt.com', 'codex'],
   ['openai.com', 'codex'],
   ['auth.openai.com', 'codex'],

@@ -100,6 +100,7 @@ const SUBSCRIPTION_PROVIDERS = new Set([
   'codebuddy',
   'trae',
   'zed',
+  'kiro',
 ])
 
 export const USD_TO_CNY_RATE = 7.23

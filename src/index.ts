@@ -71,6 +71,7 @@ import type {
   TraeSession,
   JoyCodeSession,
   ZedSession,
+  KiroSession,
 } from './auth/store.js'
 import { DISCOVERY_TIMEOUT_MS, validateModels, withTimeout } from './providers/common.js'
 import type { ModelEntry, ModelListNotFetched, ProviderUsage } from './providers/common.js'
@@ -214,6 +215,20 @@ import {
   sessionFromZedPaste,
 } from './providers/zed.js'
 import {
+  KIRO_KEY_PREFIX,
+  KiroAdapter,
+  assertUsableKiroKey,
+  fetchKiroUsage,
+  readKiroIdeSignIn,
+  sessionFromKiroSignIn,
+  startKiroSignIn,
+  isKiroPermanentRefreshError,
+  maskKiroKey,
+  refreshKiro,
+  sessionFromKiroKey,
+} from './providers/kiro/index.js'
+import type { KiroSignIn } from './providers/kiro/index.js'
+import {
   filterVisible,
   hiddenIds,
   markProviderModelsRead,
@@ -250,6 +265,7 @@ export type {
   ProviderId,
   JoyCodeSession,
   ZedSession,
+  KiroSession,
 } from './auth/store.js'
 
 export const name = 'dsh-subscription-hub'
@@ -284,6 +300,7 @@ export interface Config {
     trae?: ModelEntry[]
     joycode?: ModelEntry[]
     zed?: ModelEntry[]
+    kiro?: ModelEntry[]
   }
   /** Same-subscription account pools (and optional extra tier models). */
   pool?: {
@@ -304,7 +321,7 @@ export interface Config {
   }
 }
 
-const providerIdSchema = z.union(['codex', 'claude', 'grok', 'copilot', 'agy', 'commandcode', 'cline', 'codebuddy','cline',  'qoder', 'trae', 'joycode', 'zed'])
+const providerIdSchema = z.union(['codex', 'claude', 'grok', 'copilot', 'agy', 'commandcode', 'cline', 'codebuddy', 'qoder', 'trae', 'joycode', 'zed', 'kiro'])
 const modelEntrySchema: z<ModelEntry> = z.object({
   id: z.string().required(),
   name: z.string(),
@@ -354,6 +371,7 @@ export const Config: z<Config> = z.object({
     qoder: z.array(modelEntrySchema),
     trae: z.array(modelEntrySchema),
     zed: z.array(modelEntrySchema),
+    kiro: z.array(modelEntrySchema),
   }),
   pool: z.object({
     enabled: z.boolean().default(true),
@@ -401,6 +419,7 @@ function resolveCatalog(models: Config['models']): Record<ProviderId, ModelEntry
     trae: resolve('trae'),
     joycode: resolve('joycode'),
     zed: resolve('zed'),
+    kiro: resolve('kiro'),
   }
 }
 
@@ -427,6 +446,7 @@ function accountOf(provider: ProviderId, session: StoredSession | undefined): st
     case 'trae': return (session as TraeSession).account ?? (session as TraeSession).userId
     case 'joycode': return (session as JoyCodeSession).account ?? (session as JoyCodeSession).userId
     case 'zed': return (session as ZedSession).account ?? (session as ZedSession).userId
+    case 'kiro': return (session as KiroSession).account
   }
 }
 
@@ -451,6 +471,8 @@ function planOf(provider: ProviderId, session: StoredSession): string | undefine
     // nothing rather than a tier this route cannot read.
     case 'joycode': return undefined
     case 'zed': return undefined
+    // Kiro states a plan in Get-Usage-Limits only, which the card's quota view shows.
+    case 'kiro': return undefined
   }
 }
 
@@ -501,6 +523,8 @@ export class SubscriptionsAuthController implements AuthController {
    * or starting a second attempt must free the bound port first.
    */
   private readonly joyCodeLogins = new Map<ProviderId, JoyCodeBrowserLogin>()
+  /** In-flight Kiro browser sign-ins, one per route. */
+  private readonly kiroSignIns = new Map<ProviderId, KiroSignIn>()
 
   constructor(
     private readonly flows: OAuthFlowManager,
@@ -710,6 +734,44 @@ export class SubscriptionsAuthController implements AuthController {
       // trying to start an authorization-code flow that cannot exist.
       return { authorizeUrl: '' }
     }
+    if (provider === 'kiro') {
+      // Three ways in, and the method decides which:
+      //   - default: Kiro's own sign-in page, which offers Google, GitHub, AWS
+      //     Builder ID and IAM Identity Center and reports the choice back, so
+      //     the panel asks for nothing;
+      //   - `oauth`: the AWS ways directly (Builder ID unless a Start URL is
+      //     supplied), skipping Kiro's page;
+      //   - `import`: the sign-in this machine's Kiro IDE already holds.
+      if (method === 'import') {
+        const local = await readKiroIdeSignIn()
+        if (local === undefined) {
+          throw new Error('kiro: no Kiro IDE sign-in found (~/.aws/sso/cache/kiro-auth-token.json). Sign in to the IDE, or paste an API key instead.')
+        }
+        const session = await sessionFromKiroSignIn({
+          accessToken: local.accessToken,
+          refreshToken: local.refreshToken,
+          expiresAt: local.expiresAt,
+          method: 'social',
+          loginProvider: 'Kiro IDE',
+          region: local.region ?? 'us-east-1',
+          ...local.profileArn === undefined ? {} : { profileArn: local.profileArn },
+        }, `kiro-ide-${local.accessToken.slice(-6)}`, proxiedFetch)
+        await this.persist('kiro', session)
+        this.lastError.delete('kiro')
+        this.onAuthChanged('kiro', accountKeyOf('kiro', session))
+        return { authorizeUrl: '' }
+      }
+      // One sign-in at a time: a second click must not leave the first loopback
+      // listener bound and waiting for a callback the newer attempt owns.
+      this.kiroSignIns.get(provider)?.cancel()
+      const signIn = await startKiroSignIn({
+        fetchFn: proxiedFetch,
+        ...method === 'oauth' ? { direct: { method: 'builderid' as const, region: 'us-east-1' } } : {},
+      })
+      this.kiroSignIns.set(provider, signIn)
+      this.completions.set(provider, this.completeKiro(signIn, this.claim(provider)))
+      return { authorizeUrl: signIn.authorizeUrl }
+    }
     const spec = provider === 'grok' ? await grokFlow() : provider === 'agy' ? agyFlow : codexFlow
     const attempt = await this.flows.start(provider, spec)
     // Claimed only once the attempt exists: a rejected `start()` (one attempt
@@ -779,6 +841,28 @@ export class SubscriptionsAuthController implements AuthController {
       }
     } finally {
       this.finalizing.delete(provider)
+    }
+  }
+
+  private async completeKiro(signIn: KiroSignIn, claim: number): Promise<void> {
+    try {
+      const outcome = await signIn.wait
+      if (this.claims.get('kiro') !== claim) return
+      if (!outcome.ok) throw new Error(outcome.error)
+      const session = await sessionFromKiroSignIn(
+        outcome.result,
+        `kiro-${outcome.result.loginProvider.toLowerCase()}-${outcome.result.accessToken.slice(-6)}`,
+        proxiedFetch,
+      )
+      if (this.claims.get('kiro') !== claim) return
+      await this.persist('kiro', session)
+      this.lastError.delete('kiro')
+      this.onAuthChanged('kiro', accountKeyOf('kiro', session))
+    } catch (error) {
+      if (this.claims.get('kiro') !== claim) return
+      this.lastError.set('kiro', errorChain(error))
+    } finally {
+      this.kiroSignIns.delete('kiro')
     }
   }
 
@@ -854,6 +938,7 @@ export class SubscriptionsAuthController implements AuthController {
       case 'qoder':
       case 'trae':
       case 'joycode':
+      case 'kiro':
       case 'zed':
         return Promise.reject(new Error(`${provider} does not use the authorization-code exchange`))
     }
@@ -916,6 +1001,32 @@ export class SubscriptionsAuthController implements AuthController {
       this.lastError.delete('joycode')
       this.onAuthChanged('joycode', accountKeyOf('joycode', session))
       return
+    }
+    if (provider === 'kiro') {
+      // Three pastes reach this branch:
+      //   - an API key (`ksk_…`), which is a whole sign-in by itself;
+      //   - the full address of the tab a browser sign-in ended on, for a browser
+      //     that runs on another machine (the loopback listener cannot be reached
+      //     from there, so the address is pasted back and fed to the attempt);
+      //   - anything else is refused with the reason.
+      const trimmed = input.trim()
+      if (trimmed.startsWith(KIRO_KEY_PREFIX)) {
+        const key = assertUsableKiroKey(trimmed, 'kiro')
+        const session = await sessionFromKiroKey(key, `kiro-${maskKiroKey(key)}`, proxiedFetch)
+        await this.persist('kiro', session)
+        this.lastError.delete('kiro')
+        this.onAuthChanged('kiro', accountKeyOf('kiro', session))
+        return
+      }
+      if (/^https?:\/\//i.test(trimmed)) {
+        const pending = this.kiroSignIns.get('kiro')
+        if (pending === undefined) {
+          throw new Error('kiro: no sign-in is in progress; start one, then paste the address of the page it ended on')
+        }
+        pending.manual(trimmed)
+        return
+      }
+      throw new Error('kiro: paste either an API key (ksk_…) or the full address of the sign-in tab')
     }
 
     const attempt = this.flows.pending(provider)
@@ -1452,6 +1563,39 @@ export function apply(ctx: Context, config: Config): void {
           pool: () => poolAdapter,
         })
         registerTrackedAdapter('zed', adapter)
+        break
+      }
+      case 'kiro': {
+        // Kiro is API-key only so far (see providers/kiro/index.ts for what the
+        // browser sign-ins would still need). The key is static: no refresh
+        // grant exists for one, so a "refresh" is the identity.
+        const tokens = new AccountTokenManager<KiroSession>({
+          provider: 'kiro',
+          displayName: 'Kiro',
+          makeOptions: () => ({
+            preemptMs: 0,
+            refresh: refreshKiro,
+            isPermanent: isKiroPermanentRefreshError,
+          }),
+          onAccountRemoved: account => { authChanged('kiro', account) },
+        })
+        accountTokens.set('kiro', tokens as unknown as AccountTokenManager<StoredSession>)
+        // Kiro DOES publish a quota: Get-Usage-Limits, in credits.
+        usageFetchers.kiro = async (account, signal) => {
+          const session = await tokens.session(account)
+          return fetchKiroUsage(proxiedFetch, session.region ?? 'us-east-1', session.accessToken, signal)
+        }
+        const adapter = new KiroAdapter({
+          models: catalog.kiro,
+          streamIdleTimeoutMs,
+          rateLimit,
+          tokens,
+          discovery: !overridden.has('kiro'),
+          onWarn,
+          resolveAttachments,
+          pool: () => poolAdapter,
+        })
+        registerTrackedAdapter('kiro', adapter)
         break
       }
     }

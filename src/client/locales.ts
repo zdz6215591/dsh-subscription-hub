@@ -235,6 +235,14 @@ export const en = {
   zedPasteHint: 'Zed has no credentials.json. One-click import reads Windows Credential Manager target “zed:url=https://zed.dev”. If that fails, fill the two fields: userId is the numeric User name of that credential (e.g. 1047718); token is its password. Control Panel → Credential Manager → Windows Credentials → Generic Credentials.',
   zedUserIdPlaceholder: 'Zed userId',
   zedTokenPlaceholder: 'Zed token',
+  loginKiro: 'Sign in to Kiro',
+  kiroPasteHint:
+    'Kiro signs in three ways. "Sign in to Kiro" opens Kiro\u2019s own page, which offers Google, GitHub, AWS Builder ID and IAM Identity Center; '
+    + '"Use this PC sign-in" reads the Kiro IDE\u2019s stored sign-in; or paste an API key (ksk_…) here. '
+    + 'A browser on another machine can paste the address of the tab the sign-in ended on. Its quota is read from Kiro in credits.',
+  kiroKeyPlaceholder: 'ksk_…',
+  kiroPasteKey: 'Paste API key',
+  kiroImport: 'Use this PC sign-in',
 } satisfies Record<string, string>
 
 /** zh strings, one per {@link en} key. */
@@ -474,6 +482,14 @@ export const zh = {
   zedPasteHint: 'Zed 客户端里没有 credentials.json。一键导入会读 Windows「凭据管理器」里目标为 zed:url=https://zed.dev 的通用凭据。失败时在下面两栏填：userId 是该凭据的用户名（一串数字，例如 1047718），token 是密码。路径：控制面板 → 凭据管理器 → Windows 凭据 → 普通凭据。',
   zedUserIdPlaceholder: 'Zed userId',
   zedTokenPlaceholder: 'Zed token',
+  loginKiro: '登录 Kiro',
+  kiroPasteHint:
+    'Kiro 有三种登入方式：「登录 Kiro」打开 Kiro 官方页面（可选 Google、GitHub、AWS Builder ID、IAM Identity Center）；'
+    + '「用本机登录」读取 Kiro IDE 已保存的登录；或在此粘贴 API Key（ksk_…）。'
+    + '浏览器在另一台机器时，可把登录结束那一页的完整地址粘贴回来。额度按 Kiro 的 credits 读。',
+  kiroKeyPlaceholder: 'ksk_…',
+  kiroPasteKey: '粘贴 API Key',
+  kiroImport: '用本机登录',
 } satisfies Record<keyof typeof en, string>
 
 /** The Subscriptions namespace key union (en is the key-set source of truth). */

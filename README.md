@@ -4,7 +4,7 @@ Unified subscription plugin for [DeepSeek Harness](https://github.com/deepseek-a
 
 English | [中文](README.zh.md)
 
-One Settings → **Subscriptions** page for twelve subscription routes:
+One Settings → **Subscriptions** page for thirteen subscription routes:
 
 | Route | Subscription | Notes |
 | --- | --- | --- |
@@ -20,6 +20,7 @@ One Settings → **Subscriptions** page for twelve subscription routes:
 | `joycode` | JD JoyCode | imports the local JoyCode IDE credential, or paste ptKey + userId; live catalog, **three wire paths chosen per model** |
 | `copilot` | GitHub Copilot | device-code login |
 | `zed` | Zed Pro | Windows import from Credential Manager, or paste userId + token; usage from `cloud.zed.dev/client/users/me` |
+| `kiro` | Kiro (kiro.dev) | paste a `ksk_…` API key — Kiro names the profile it belongs to, so the region is discovered; native tool calls, thinking, and a **credits** allowance from `Get-Usage-Limits` |
 
 **Deliberately absent: Freebuff.** Its free tier is not supported here — upstream
 gates free mode to its own CLI channel, and a byte-faithful replay of the CLI's own

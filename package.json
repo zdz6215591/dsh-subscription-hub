@@ -1,7 +1,7 @@
 {
   "name": "dsh-subscription-hub",
-  "version": "0.1.6",
-  "description": "Unified DeepSeek Harness subscription hub for 12 routes: Codex, Claude, SuperGrok, Antigravity, Command Code, Cline, CodeBuddy, Qoder, Trae, JoyCode, Copilot and Zed Pro — multi-account pool, usage, model visibility, image/video tools",
+  "version": "0.1.7",
+  "description": "Unified DeepSeek Harness subscription hub for 13 routes: Codex, Claude, SuperGrok, Antigravity, Command Code, Cline, CodeBuddy, Qoder, Trae, JoyCode, Copilot, Zed Pro and Kiro — multi-account pool, usage, model visibility, image/video tools",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -24,7 +24,8 @@
     "trae",
     "joycode",
     "copilot",
-    "zed"
+    "zed",
+    "kiro"
   ],
   "type": "module",
   "main": "lib/index.js",

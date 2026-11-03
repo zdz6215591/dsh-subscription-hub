@@ -133,6 +133,7 @@ const PROVIDER_NAMES: Record<SubscriptionProvider, string> = {
   trae: 'Trae',
   joycode: 'JoyCode',
   zed: 'Zed',
+  kiro: 'Kiro',
 }
 
 /** Providers whose quota is a credit pool rather than a percentage. */

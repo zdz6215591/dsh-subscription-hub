@@ -4,7 +4,7 @@
 
 [English](README.md) | 中文
 
-一个 **设置 → 订阅** 页面覆盖十二个订阅路由：
+一个 **设置 → 订阅** 页面覆盖十三个订阅路由：
 
 | 路由 | 订阅 | 说明 |
 | --- | --- | --- |
@@ -20,6 +20,7 @@
 | `joycode` | 京东 JoyCode | 读取本机 JoyCode IDE 凭据，或粘贴 ptKey + userId；实时目录，**按模型自动分流三条线上路径** |
 | `copilot` | GitHub Copilot | 设备码登录 |
 | `zed` | Zed Pro | Windows 从凭据管理器导入，或粘贴 userId + token |
+| `kiro` | Kiro（kiro.dev） | 粘贴 `ksk_…` API Key——Kiro 会告知这把 Key 属于哪个 profile，区域自动识别；原生工具调用、思考流，额度按 Kiro 的 **credits** 读（`Get-Usage-Limits`） |
 
 **故意不做：Freebuff。** 它的免费档在本插件里不受支持 —— 上游把 free 模式门控在它自己的 CLI
 通道上，哪怕逐字节复刻 CLI 自己的请求（同样的准入、run id、agent、`x-freebuff-*` 请求头与

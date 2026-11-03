@@ -75,3 +75,7 @@ import './codebuddy.spec.js'
 // default") pinned in one place, including the route-with-no-discovery,
 // unread-capability and unpriced-model cases.
 import './no-fabricated-fallbacks.spec.js'
+// Kiro: the AWS event-stream frame format, the conversation body Kiro accepts,
+// the reply translation, the roster and the credit allowance.
+import './kiro.spec.js'
+import './kiro-login.spec.js'

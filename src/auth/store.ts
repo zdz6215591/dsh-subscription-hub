@@ -32,6 +32,7 @@ export type ProviderId =
   | 'trae'
   | 'joycode'
   | 'zed'
+  | 'kiro'
 
 /** Every provider route, in display order. */
 export const PROVIDER_IDS: readonly ProviderId[] = [
@@ -47,6 +48,7 @@ export const PROVIDER_IDS: readonly ProviderId[] = [
   'joycode',
   'copilot',
   'zed',
+  'kiro',
 ]
 
 /** Stored ChatGPT/Codex subscription session. */
@@ -166,6 +168,40 @@ export interface ClineSession {
   account?: string
   /** Gateway base; empty means the built-in default. */
   baseUrl?: string
+}
+
+/**
+ * Kiro (kiro.dev) session, API-key edition.
+ *
+ * A `ksk_…` key is a static credential: there is no refresh grant and no token
+ * endpoint for one, so `refreshToken` mirrors `accessToken` only to satisfy the
+ * shared token manager's shape. `region` and `profileArn` come from asking Kiro
+ * which profile the key belongs to when it is pasted — the region there is what
+ * picks the runtime host, and a key minted in eu-central-1 is refused on
+ * us-east-1. A key Kiro names no profile for keeps the default region and
+ * sends no profile, which is how `kiro-cli` proceeds.
+ */
+export interface KiroSession {
+  accessToken: string
+  refreshToken: string
+  expiresAt: number
+  /**
+   * How it was signed in: pikey (static, no refresh), social (Google/GitHub)
+   * or idc (AWS Builder ID / IAM Identity Center). The last two DO refresh, and
+   * idc needs the client registered at sign-in time.
+   */
+  method?: 'apikey' | 'social' | 'idc'
+  /** Google | Github | BuilderId | Enterprise | Internal. */
+  loginProvider?: string
+  /** AWS OIDC client, idc only. */
+  clientId?: string
+  clientSecret?: string
+  /** Masked-key label; also the roster cache key. */
+  account: string
+  /** Runtime region, from the profile ARN (`arn:aws:codewhisperer:<region>:…`). */
+  region?: string
+  /** The profile the key belongs to, when Kiro named one. */
+  profileArn?: string
 }
 
 /**
@@ -295,6 +331,7 @@ export interface SessionMap {
   trae?: ProviderAccounts<TraeSession>
   joycode?: ProviderAccounts<JoyCodeSession>
   zed?: ProviderAccounts<ZedSession>
+  kiro?: ProviderAccounts<KiroSession>
 }
 
 /** Any stored session, for provider-agnostic plumbing. */
@@ -311,6 +348,7 @@ export type StoredSession =
   | TraeSession
   | JoyCodeSession
   | ZedSession
+  | KiroSession
 
 /** The session type one provider stores. */
 export type SessionOf<K extends ProviderId> = NonNullable<SessionMap[K]>['accounts'][string]
@@ -380,6 +418,10 @@ export function accountKeyOf(provider: ProviderId, session: StoredSession): stri
       return (session as JoyCodeSession).userId
     case 'zed':
       return (session as ZedSession).userId
+    case 'kiro':
+      // The key is the identity: an API key names no account of its own that this
+      // route can read without a call, and re-pasting one must not duplicate it.
+      return (session as KiroSession).account ?? tokenHash(session.refreshToken)
   }
 }
 
