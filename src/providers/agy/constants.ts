@@ -116,20 +116,67 @@ export async function fetchAgyFirstOk(
   throw new Error('all agy endpoints failed')
 }
 
-/** Default Antigravity client version used in User-Agent strings; overridden by the
- * runtime version fetcher (see runtime/fingerprint.ts). */
-export const AGY_VERSION_FALLBACK = '1.18.3'
+/**
+ * Antigravity client identity presented on every call.
+ *
+ * The product REFUSES an unrecognised client (`This version of Antigravity is no
+ * longer supported`) and answers it inside a normal 200, so the rejection looks
+ * like the model talking. The reference project moved this to the **CLI family**
+ * (`antigravity/cli/<version> (aidev_client; <os>; <arch)`) — the identity whose
+ * catalogue also carries the newest models — instead of the desktop build string
+ * this route was written with.
+ *
+ * Two overrides exist because the accepted identity is the vendor's to change:
+ * `agyUserAgent` / `DSH_AGY_USER_AGENT` replaces the whole string, and
+ * `agyVersion` / `DSH_AGY_VERSION` only the version inside the CLI default.
+ */
+export const AGY_VERSION_FALLBACK = '1.3.4'
 
-/** Electron-style UA used for bootstrap calls (loadCodeAssist/onboardUser). */
-export function getAgyBootstrapUserAgent(version = AGY_VERSION_FALLBACK): string {
-  return `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Antigravity/${version} Chrome/138.0.7204.235 Electron/37.3.1 Safari/537.36`
+/** Build the CLI-family User-Agent for one version. */
+export function agyCliUserAgent(version = currentAgyVersion()): string {
+  return `antigravity/cli/${version} (aidev_client; ${process.platform}; ${process.arch})`
 }
 
-/** Generate-call UA. Cloud Code treats the Electron bootstrap UA plus X-Goog-Api-Client as an API-key client. */
-export function getAgyGenerateUserAgent(version = AGY_VERSION_FALLBACK): string {
-  return `antigravity/${version} windows/amd64`
+/** A whole User-Agent set by config, which wins over everything else. */
+let configuredUserAgent: string | undefined
+/** A version set by config, which wins over the environment and the fallback. */
+let configuredVersion: string | undefined
+
+/**
+ * Set the client identity to present to Antigravity.
+ *
+ * @param options - a whole User-Agent, a version, or neither (both reset).
+ */
+export function setAgyIdentity(options: { userAgent?: string; version?: string } = {}): void {
+  const ua = options.userAgent?.trim()
+  configuredUserAgent = ua === undefined || ua === '' ? undefined : ua
+  const version = options.version?.trim()
+  configuredVersion = version === undefined || version === '' ? undefined : version
 }
 
+/** The version the default CLI User-Agent is built with right now. */
+export function currentAgyVersion(): string {
+  if (configuredVersion !== undefined) return configuredVersion
+  const fromEnv = process.env.DSH_AGY_VERSION?.trim()
+  return fromEnv === undefined || fromEnv === '' ? AGY_VERSION_FALLBACK : fromEnv
+}
+
+/** The User-Agent every call uses right now. */
+export function currentAgyUserAgent(): string {
+  if (configuredUserAgent !== undefined) return configuredUserAgent
+  const fromEnv = process.env.DSH_AGY_USER_AGENT?.trim()
+  return fromEnv === undefined || fromEnv === '' ? agyCliUserAgent() : fromEnv
+}
+
+/** User-Agent for bootstrap calls (loadCodeAssist/onboardUser). */
+export function getAgyBootstrapUserAgent(version?: string): string {
+  return version === undefined ? currentAgyUserAgent() : agyCliUserAgent(version)
+}
+
+/** User-Agent for generate calls. */
+export function getAgyGenerateUserAgent(version?: string): string {
+  return version === undefined ? currentAgyUserAgent() : agyCliUserAgent(version)
+}
 /** Client-Metadata payload for bootstrap calls — ideType only (backend enum
  * validation rejects freely-added platform/pluginType; AGENTS.md invariant). */
 export function getAgyBootstrapClientMetadata(): string {

@@ -53,6 +53,14 @@ import { recordToolSignature } from './agy/signature-cache.js'
 import { toAgyRequestBody } from './agy/translate.js'
 import { readRequestImage } from '../translate/image-request.js'
 
+export {
+  AGY_VERSION_FALLBACK,
+  agyCliUserAgent,
+  currentAgyUserAgent,
+  currentAgyVersion,
+  setAgyIdentity,
+} from './agy/constants.js'
+
 export const AGY_PREEMPT_MS = 2 * 60_000
 
 export const agyFlow: FlowSpec = {

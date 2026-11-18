@@ -134,6 +134,7 @@ import {
   fetchAgyUsage,
   isAgyPermanentRefreshError,
   refreshAgy,
+  setAgyIdentity,
 } from './providers/agy.js'
 import {
   CommandCodeAdapter,
@@ -285,6 +286,13 @@ export interface Config {
   providers?: ProviderId[]
   /** Maximum provider idle time while one stream read is outstanding (default five minutes). */
   streamIdleTimeoutMs?: number
+  /**
+   * Antigravity client version to present, when the release has moved past the
+   * baked-in default and Antigravity refuses it ('no longer supported').
+   */
+  agyVersion?: string
+  /** Whole Antigravity User-Agent override, when the version alone is not enough. */
+  agyUserAgent?: string
   /** Whether and how long a route waits out a closed rate-limit window. */
   rateLimit?: RateLimitConfig
   /** Advisory model catalogs for providers whose discovery you want to override, per provider. */
@@ -356,6 +364,8 @@ export const Config: z<Config> = z.object({
    */
   providers: z.array(providerIdSchema).default([...PROVIDER_IDS]),
   streamIdleTimeoutMs: z.number().min(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
+  agyVersion: z.string(),
+  agyUserAgent: z.string(),
   rateLimit: z.object({
     wait: z.boolean().default(true),
     maxWaitMs: z.number().min(1).default(DEFAULT_RATE_LIMIT_MAX_WAIT_MS),
@@ -1074,6 +1084,12 @@ export function apply(ctx: Context, config: Config): void {
     throw new Error(`${name}: streamIdleTimeoutMs must be a positive finite number`)
   }
   const rateLimit = resolveRateLimitWait(config.rateLimit, `${name}: rateLimit`)
+  // Antigravity refuses an unrecognised client outright (inside a 200), so the
+  // identity is configurable: the whole User-Agent, or just its version.
+  setAgyIdentity({
+    ...config.agyVersion === undefined ? {} : { version: config.agyVersion },
+    ...config.agyUserAgent === undefined ? {} : { userAgent: config.agyUserAgent },
+  })
   const catalog = resolveCatalog(config.models)
   // A non-empty configured catalog is an explicit override: it wins over live
   // discovery entirely (schemastery injects [] for omitted arrays, so only a
