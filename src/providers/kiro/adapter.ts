@@ -52,7 +52,7 @@ import { buildKiroRequest, classifyKiroFailure, kiroToolNameMap, readKiroReply, 
 const KIRO_RETRY = Object.freeze({ maxRetries: 2, initialDelayMs: 700, maxDelayMs: 5_000, jitterRatio: 0.1 })
 
 /** How long a probed roster is trusted before discovery asks again. */
-const CATALOG_TTL_MS = 30 * 60_000
+const CATALOG_TTL_MS = 60 * 60_000
 
 /** Adapter dependencies. */
 export interface KiroAdapterOptions {

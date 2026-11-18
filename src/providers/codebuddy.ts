@@ -419,7 +419,7 @@ export interface CodeBuddyAdapterOptions {
   defaultEffortOf?: (model: string) => string | undefined
 }
 
-const CATALOG_TTL_MS = 5 * 60_000
+const CATALOG_TTL_MS = 60 * 60_000
 
   /**
  * The thinking-level picker for one catalog model, from what the catalog NAMED.

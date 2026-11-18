@@ -61,7 +61,7 @@ import type { ClinePinStore } from './pins.js'
 export const CLINE_PREEMPT_MS = 24 * 60 * 60 * 1000
 
 /** Catalog cache lifetime. */
-const CATALOG_TTL_MS = 5 * 60_000
+const CATALOG_TTL_MS = 60 * 60_000
 
 /** Cline's retry shape: a busy gateway recovers in place. */
 const CLINE_RETRY = Object.freeze({

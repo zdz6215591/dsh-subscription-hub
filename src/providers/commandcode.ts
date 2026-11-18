@@ -1265,7 +1265,7 @@ export interface CommandCodeAdapterOptions {
   catalogCachePath?: string
 }
 
-const COMMANDCODE_CATALOG_TTL_MS = 5 * 60_000
+const COMMANDCODE_CATALOG_TTL_MS = 60 * 60_000
 
 /** A catalog model sized from the live `/provider/v1/models` response. */
 interface CommandCodeCatalogModel {

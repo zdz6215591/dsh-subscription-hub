@@ -51,6 +51,7 @@ import './joycode.spec.js'
 import './agy-signature.spec.js'
 import './image-request.spec.js'
 import './agy-efforts.spec.js'
+import './agy-schema.spec.js'
 import './zed-allowance.spec.js'
 import './price-display.spec.js'
 // The coverage guard: every model the Command Code vendor's own table lists must

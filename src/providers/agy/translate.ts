@@ -166,17 +166,123 @@ const AGY_SCHEMA_MAP_KEYS = new Set(['properties'])
 const AGY_SCHEMA_NESTED_KEYS = new Set(['items', 'additionalProperties'])
 const AGY_SCHEMA_LIST_KEYS = new Set(['required', 'enum'])
 
+/** Numeric types widen to `number`: every integer is also a number. */
+const NUMERIC_TYPES = new Set(['integer', 'number'])
+
+function schemaObject(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+}
+
+/** The strings one alternative is limited to (`enum` or `const`), or undefined when unconstrained. */
+function stringChoices(schema: Record<string, unknown>): string[] | undefined {
+  if (typeof schema.const === 'string') return [schema.const]
+  const candidates = schema.enum
+  return Array.isArray(candidates) && candidates.every(entry => typeof entry === 'string') ? candidates : undefined
+}
+
+/**
+ * Fold schema alternatives into one shape this bridge can express, never narrower
+ * than any alternative.
+ *
+ * Picking one branch would make the tool uncallable with the other branches'
+ * values — worse than a looser contract the tool itself still validates. Objects
+ * keep the union of their properties and only the fields EVERY alternative
+ * requires; scalars of one type keep it (plus a union of the string choices);
+ * anything heterogeneous becomes unconstrained.
+ *
+ * Ported from the reference (`c621ce2 fix(antigravity): widen tool-schema
+ * alternatives instead of rejecting`), which replaced a hard rejection: this
+ * route used to DROP `anyOf`/`oneOf` entirely through the allowlist below, so a
+ * union-typed parameter arrived at the model with no type at all.
+ *
+ * @param variants - the alternatives to fold.
+ * @returns the widest schema covering them all.
+ */
+function widenSchema(variants: readonly unknown[]): Record<string, unknown> {
+  const members = variants.map(schemaObject)
+  if (members.some(member => member === undefined) || members.length === 0) return {}
+  const present = members as Record<string, unknown>[]
+  const types = new Set(present.map(member => member.type))
+  const type = types.size === 1
+    ? present[0]?.type
+    : [...types].every(entry => typeof entry === 'string' && NUMERIC_TYPES.has(entry)) ? 'number' : undefined
+  if (typeof type !== 'string') return {}
+  if (type === 'object') {
+    const properties: Record<string, unknown> = {}
+    for (const member of present) {
+      const memberProperties = schemaObject(member.properties)
+      if (memberProperties === undefined) continue
+      for (const [name, property] of Object.entries(memberProperties)) {
+        properties[name] = !Object.hasOwn(properties, name) || JSON.stringify(properties[name]) === JSON.stringify(property)
+          ? property
+          : widenSchema([properties[name], property])
+      }
+    }
+    const required = present
+      .map(member => Array.isArray(member.required) ? member.required.filter(entry => typeof entry === 'string') : [])
+      .reduce((shared, next) => shared.filter(name => next.includes(name)))
+    return {
+      type,
+      ...Object.keys(properties).length === 0 ? {} : { properties },
+      ...required.length === 0 ? {} : { required },
+    }
+  }
+  if (type === 'array') return { type, items: widenSchema(present.map(member => member.items ?? {})) }
+  const choices = present.map(stringChoices)
+  return choices.every(entry => entry !== undefined)
+    ? { type, enum: [...new Set(choices.flat())] }
+    : { type }
+}
+
+/** Merge `extra` into `schema`: properties and required accumulate, other keywords override. */
+function absorbSchema(schema: Record<string, unknown>, extra: Record<string, unknown>): void {
+  const { properties, required, ...rest } = extra
+  Object.assign(schema, rest)
+  const extraProperties = schemaObject(properties)
+  if (extraProperties !== undefined) {
+    schema.properties = { ...schemaObject(schema.properties) ?? {}, ...extraProperties }
+  }
+  if (Array.isArray(required)) {
+    schema.required = [...new Set([...Array.isArray(schema.required) ? schema.required : [], ...required])]
+  }
+}
+
 function sanitizeToolSchema(schema: unknown): unknown {
   if (!schema || typeof schema !== 'object') return schema
   if (Array.isArray(schema)) return schema.map((entry) => sanitizeToolSchema(entry))
 
-  // Normalize union types: upstream `type` is a single enum string. Pick the
-  // first non-null string type (`"null"` maps to the `nullable` keyword);
-  // fall back to `string` when no usable type remains.
-  let normalized = schema as Record<string, unknown>
+  let normalized = { ...(schema as Record<string, unknown>) }
+
+  // An intersection holds every member's constraints at once.
+  if (Array.isArray(normalized.allOf)) {
+    const members = normalized.allOf.map(schemaObject).filter((member): member is Record<string, unknown> => member !== undefined)
+    delete normalized.allOf
+    for (const member of members) absorbSchema(normalized, member)
+  }
+
+  // Alternatives are folded, never dropped: see widenSchema.
+  for (const keyword of ['anyOf', 'oneOf'] as const) {
+    const alternatives = normalized[keyword]
+    if (!Array.isArray(alternatives)) continue
+    const variants = alternatives.filter(item => {
+      const candidate = schemaObject(item)
+      return candidate === undefined || candidate.type !== 'null'
+    })
+    delete normalized[keyword]
+    const single = variants.length === 1 ? schemaObject(variants[0]) : undefined
+    absorbSchema(normalized, single ?? widenSchema(variants))
+  }
+
+  // Normalize union types: upstream `type` is a single enum string (`"null"`
+  // becomes the `nullable` keyword). A numeric union widens to `number`; a union
+  // mixing unrelated types is left unconstrained rather than narrowed to the
+  // first entry, which would silently reject the others' values.
   if (Array.isArray(normalized.type)) {
-    const types = normalized.type.filter((t): t is string => typeof t === 'string' && t !== 'null')
-    normalized = { ...normalized, type: types[0] ?? 'string' }
+    const types = normalized.type.filter((entry): entry is string => typeof entry === 'string' && entry !== 'null')
+    const widened = types.length === 1 ? types[0]
+      : types.length > 1 && types.every(entry => NUMERIC_TYPES.has(entry)) ? 'number' : undefined
+    if (widened === undefined) delete normalized.type
+    else normalized.type = widened
   }
 
   const result: Record<string, unknown> = {}

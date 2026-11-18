@@ -54,7 +54,7 @@ import type { TraeModel } from './catalog.js'
 export const TRAE_PREEMPT_MS = 5 * 60_000
 
 /** Catalog cache lifetime. */
-const CATALOG_TTL_MS = 5 * 60_000
+const CATALOG_TTL_MS = 60 * 60_000
 
 /** Per-model reasoning-effort display names. */
 const EFFORT_NAMES: Readonly<Record<string, string>> = Object.freeze({

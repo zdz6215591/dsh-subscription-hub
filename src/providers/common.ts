@@ -737,7 +737,7 @@ export async function discoverAcrossAccounts(
 }
 
 /** How long a discovered catalog is trusted before re-fetching. */
-export const DISCOVERY_TTL_MS = 5 * 60_000
+export const DISCOVERY_TTL_MS = 60 * 60_000
 
 /** A durable snapshot of one provider's discovered catalog. */
 export interface CatalogSnapshot {
