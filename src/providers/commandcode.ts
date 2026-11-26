@@ -28,6 +28,13 @@ import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from 
 import { httpLlmError, idleWatchdog, mapFetchFailure, priceLabel } from './common.js'
 import { readCommandCodeCatalog, writeCommandCodeCatalog } from './commandcode-catalog-cache.js'
 import { COMMANDCODE_MODELS_VERSION, COMMANDCODE_PUBLISHED_MODELS } from './commandcode-models.js'
+import {
+  modelVisibleInPlan,
+  parseCommandCodeOnDemandCredits,
+  parseCommandCodeSubscription,
+} from './commandcode-plan.js'
+import type { CommandCodeAccess } from './commandcode-plan.js'
+import { readCommandCodeUnsupported, recordCommandCodeUnsupported } from './commandcode-unsupported.js'
 import { resolveModelPrice } from '../stats/model-prices.js'
 import type { FetchFn, ModelEntry, ProviderUsage } from './common.js'
 import type { PoolAdapter } from './pool.js'
@@ -83,6 +90,8 @@ export function commandCodeCliVersion(): string {
   const fromEnv = process.env.DSH_COMMANDCODE_CLI_VERSION?.trim()
   return fromEnv === undefined || fromEnv === '' ? COMMAND_CODE_CLI_VERSION : fromEnv
 }
+/** How long a billing read is trusted before the plan gate is re-evaluated. */
+const COMMANDCODE_ACCESS_TTL_MS = 10 * 60_000
 const STUDIO_BASE = 'https://commandcode.ai'
 const LOGIN_ORIGINS = new Set(['https://commandcode.ai', 'https://staging.commandcode.ai', 'http://localhost:3000'])
 
@@ -1445,6 +1454,9 @@ export class CommandCodeAdapter extends LlmAdapter {
   /** Catalog ids already warned about a missing effort-table entry (one warning each). */
   private readonly warnedEffortGaps = new Set<string>()
 
+  /** Per-account billing access (plan tier + on-demand credits), short-lived. */
+  private readonly accessCache = new Map<string, { at: number; value: CommandCodeAccess | undefined }>()
+
   /**
    * The durable catalog read, memoized. `undefined` means nothing usable was
    * stored; the read itself never throws.
@@ -1545,6 +1557,43 @@ export class CommandCodeAdapter extends LlmAdapter {
     return [...own, ...extra.filter(model => !seen.has(model.id))]
   }
 
+  /**
+   * The account's plan access, read from billing and cached briefly.
+   *
+   * Two calls (subscriptions + credits), best-effort: any failure returns
+   * `undefined`, which `modelVisibleInPlan` treats as "unknown, show everything".
+   * The server stays the authority — this only stops the picker offering models a
+   * Go plan answers with `MODEL_NOT_IN_PLAN`.
+   */
+  private async accessFor(account: string, signal?: AbortSignal): Promise<CommandCodeAccess | undefined> {
+    const cachedAccess = this.accessCache.get(account)
+    if (cachedAccess !== undefined && Date.now() - cachedAccess.at < COMMANDCODE_ACCESS_TTL_MS) return cachedAccess.value
+    let value: CommandCodeAccess | undefined
+    try {
+      const session = await this.options.tokens.session(account)
+      const fetchFn = this.options.fetchFn ?? proxiedFetch
+      const headers = {
+        authorization: `Bearer ${session.accessToken}`,
+        accept: 'application/json',
+        'x-command-code-version': commandCodeCliVersion(),
+        'x-cli-environment': 'production',
+        ...attributionHeaders(),
+      }
+      const [subscription, credits] = await Promise.all([
+        fetchFn(`${COMMANDCODE_API_BASE}/alpha/billing/subscriptions`, { headers, ...signal === undefined ? {} : { signal } }),
+        fetchFn(`${COMMANDCODE_API_BASE}/alpha/billing/credits`, { headers, ...signal === undefined ? {} : { signal } }),
+      ])
+      const plan = subscription.ok ? parseCommandCodeSubscription(await subscription.json()) : {}
+      const onDemandCredits = credits.ok ? parseCommandCodeOnDemandCredits(await credits.json()) : 0
+      value = { ...plan, onDemandCredits }
+    } catch {
+      // Unknown access: show everything rather than hide what was paid for.
+      value = undefined
+    }
+    this.accessCache.set(account, { at: Date.now(), value })
+    return value
+  }
+
   async listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
     if (account === undefined) {
       const accounts = (await this.options.tokens.list()).map(entry => entry.key)
@@ -1556,9 +1605,19 @@ export class CommandCodeAdapter extends LlmAdapter {
       )
     }
     if (!await this.options.tokens.hasSession(account)) return []
+    // A Go plan lists 105 models and refuses most of them (`MODEL_NOT_IN_PLAN`);
+    // the gate is the plan's, so the roster is filtered here rather than by
+    // letting a user pick a model the server will refuse.
+    const access = await this.accessFor(account, signal)
+    // Two gates: the vendored plan table (a snapshot) and the refusals this
+    // account actually received — which is how a model released after the table
+    // was written gets excluded too.
+    const refused = await readCommandCodeUnsupported(account)
+    const keep = (models: readonly CommandCodeCatalogModel[]): CommandCodeCatalogModel[] =>
+      models.filter(model => !refused.has(model.id) && modelVisibleInPlan(model.id, access))
     const cached = this.catalogs.get(account)
     if (cached !== undefined && Date.now() - cached.at < COMMANDCODE_CATALOG_TTL_MS) {
-      return cached.models.map(model => toModelInfo(model, provider))
+      return keep(cached.models).map(model => toModelInfo(model, provider))
     }
     try {
       const session = await this.options.tokens.session(account)
@@ -1634,10 +1693,10 @@ export class CommandCodeAdapter extends LlmAdapter {
             + ' thinking-level selector until `node scripts/sync-commandcode-models.mjs` is run.',
           )
         }
-        return rawModels.map(model => toModelInfo(model, provider))
+        return keep(rawModels).map(model => toModelInfo(model, provider))
       }
     } catch (error) {
-      if (cached !== undefined) return cached.models.map(model => toModelInfo(model, provider))
+      if (cached !== undefined) return keep(cached.models).map(model => toModelInfo(model, provider))
       // No fresher answer: fall back to the last catalog this machine actually
       // read, rather than to a two-model list that mis-sizes everything else.
       const persisted = await this.durableCatalog()
@@ -1855,7 +1914,15 @@ export class CommandCodeAdapter extends LlmAdapter {
       } catch (error) {
         throw mapFetchFailure('commandcode', error, watchdog, options.signal)
       }
-      if (!response.ok) throw await commandCodeError(response, options.model, usedTransport)
+      if (!response.ok) {
+        const failure = await commandCodeError(response, options.model, usedTransport)
+        if (/not in this account's plan/.test(failure.message)) {
+          const accountKey = (session as { account?: string }).account ?? ''
+          if (accountKey !== '') await recordCommandCodeUnsupported(accountKey, options.model, failure.message).catch(() => undefined)
+          if (accountKey !== '') this.catalogs.delete(accountKey)
+        }
+        throw failure
+      }
       if (response.body === null) throw new LlmError('commandcode returned an empty stream', 'EMPTY_RESPONSE')
       if (usedTransport === 'messages') {
         yield* streamAnthropic(response.body, () => watchdog.pulse())
