@@ -71,8 +71,29 @@ export const AGY_ENDPOINT_FALLBACKS: readonly string[] = [
   AGY_ENDPOINT_AUTOPUSH,
 ]
 
-/** Statuses that mean "this endpoint is not usable for this account"; skip to the next. */
-export const AGY_ENDPOINT_SKIP_STATUSES = new Set([429, 403])
+/**
+ * Statuses that mean "this ENDPOINT is not usable for this account"; skip to the next.
+ *
+ * `429` is deliberately NOT here. A quota answer is the ACCOUNT's state, not the
+ * host's: measured on one account, the daily canary answers
+ * `400 FAILED_PRECONDITION "User location is not supported for the API use"`
+ * while production answers `429 RESOURCE_EXHAUSTED` for the same request. Skipping
+ * 429 used to hide that, and the caller was left reporting the canary's location
+ * rejection as if the account were region-locked.
+ */
+export const AGY_ENDPOINT_SKIP_STATUSES = new Set([403])
+
+/** Bodies that mean "wrong Code Assist host for this account", not a request fault. */
+const AGY_WRONG_HOST_BODY = /api key is invalid|API_KEY_INVALID|request had invalid authentication credentials/i
+
+/**
+ * Bodies a host answers when it does not serve this account's location.
+ *
+ * This is host-specific in practice — the daily canary refuses a request that
+ * production then answers (429/200) — so it is a reason to try the next host, not
+ * a verdict on the account.
+ */
+const AGY_LOCATION_BODY = /UNSUPPORTED_LOCATION|User location is not supported|FAILED_PRECONDITION/i
 
 /** Daily host often answers 400 "API key is invalid" for consumer accounts that actually live on prod. */
 export async function isAgyUnusableEndpoint(response: Response): Promise<boolean> {
@@ -80,19 +101,21 @@ export async function isAgyUnusableEndpoint(response: Response): Promise<boolean
   if (response.status !== 400) return false
   try {
     const text = await response.clone().text()
-    return /api key is invalid|API_KEY_INVALID|request had invalid authentication credentials/i.test(text)
+    return AGY_WRONG_HOST_BODY.test(text) || AGY_LOCATION_BODY.test(text)
   } catch {
     return false
   }
 }
 
 /**
- * Try each runtime endpoint in order, skipping unusable ones (429/403/network,
- * and 400 "API key is invalid" which means the wrong Code Assist host).
- * Returns the first other response (2xx or a real error like 401); when
- * every endpoint is unusable, returns the first skipped response (preferring
- * the primary daily endpoint's real error rather than later sandbox/prod fake ones)
- * so the caller's classifier can still produce a meaningful error.
+ * Try each runtime endpoint in order, skipping the ones that do not serve this
+ * account (403, a wrong-host 400, a location refusal).
+ *
+ * Returns the first other response, so a quota `429` — or a 2xx — ends the walk
+ * with the account's REAL answer. Only when every endpoint refuses does it return
+ * the first refusal, and it prefers one that is not a location refusal, because
+ * "location not supported" from the canary is the least informative thing that can
+ * be said about a request production accepted.
  */
 export async function fetchAgyFirstOk(
   urlPath: string,
@@ -100,11 +123,14 @@ export async function fetchAgyFirstOk(
   fetchImpl: typeof fetch = proxiedFetch,
 ): Promise<Response> {
   let firstSkipped: Response | null = null
+  let firstLocationRefusal: Response | null = null
   for (const baseEndpoint of AGY_ENDPOINT_FALLBACKS) {
     try {
       const response = await fetchImpl(`${baseEndpoint}${urlPath}`, init)
       if (await isAgyUnusableEndpoint(response)) {
-        firstSkipped ??= response
+        const text = await response.clone().text().catch(() => '')
+        if (AGY_LOCATION_BODY.test(text)) firstLocationRefusal ??= response
+        else firstSkipped ??= response
         continue
       }
       return response
@@ -112,7 +138,8 @@ export async function fetchAgyFirstOk(
       // network error — try the next endpoint
     }
   }
-  if (firstSkipped) return firstSkipped
+  if (firstSkipped !== null) return firstSkipped
+  if (firstLocationRefusal !== null) return firstLocationRefusal
   throw new Error('all agy endpoints failed')
 }
 
