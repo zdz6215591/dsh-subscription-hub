@@ -58,6 +58,31 @@ export const COMMANDCODE_API_BASE = 'https://api.commandcode.ai'
  * only thing to mirror here is the version a current client claims.
  */
 export const COMMAND_CODE_CLI_VERSION = '1.88.0'
+
+/** A version set by config, which wins over the environment and the default. */
+let configuredCliVersion: string | undefined
+
+/**
+ * Set the CLI version this route claims to be.
+ *
+ * Command Code gates routes on it — `403 upgrade_required` names a `minVersion`,
+ * and the scheme does not match the value this constant was written against — so
+ * an operator can raise it without waiting for a release.
+ *
+ * @param version - the version to present, or undefined to fall back to
+ *   `DSH_COMMANDCODE_CLI_VERSION` and then {@link COMMAND_CODE_CLI_VERSION}.
+ */
+export function setCommandCodeCliVersion(version: string | undefined): void {
+  const trimmed = version?.trim()
+  configuredCliVersion = trimmed === undefined || trimmed === '' ? undefined : trimmed
+}
+
+/** The CLI version every Command Code request presents right now. */
+export function commandCodeCliVersion(): string {
+  if (configuredCliVersion !== undefined) return configuredCliVersion
+  const fromEnv = process.env.DSH_COMMANDCODE_CLI_VERSION?.trim()
+  return fromEnv === undefined || fromEnv === '' ? COMMAND_CODE_CLI_VERSION : fromEnv
+}
 const STUDIO_BASE = 'https://commandcode.ai'
 const LOGIN_ORIGINS = new Set(['https://commandcode.ai', 'https://staging.commandcode.ai', 'http://localhost:3000'])
 
@@ -225,6 +250,74 @@ function hasTerminalStreamMarker(message: string): boolean {
  * @param response - the failed response (its body is consumed).
  * @returns whether to fall back to the CLI transport.
  */
+/**
+ * Classify a failed Command Code answer.
+ *
+ * Pure, so it is testable without a socket. This vendor answers 403 for three
+ * different reasons, measured on one live Go-plan key, and only the last is about
+ * the credential:
+ *
+ *   `MODEL_NOT_IN_PLAN`         the model is not in this plan (GOAT and above)
+ *   `upgrade_required`          the CLI version presented is too old (minVersion given)
+ *   `permission_error` "Go plans use the Provider API with credits"
+ *   anything else               the credential really is refused
+ *
+ * Reporting all of them as "API key invalid" sent a user chasing a credential
+ * problem three times for three different, actionable causes.
+ *
+ * @param status - HTTP status (kept for the caller's mapping when nothing matches).
+ * @param text - response body.
+ * @param model - the model asked for.
+ * @param transport - which wire was used.
+ * @returns an override for the shared mapping, or `code: undefined` to use it.
+ */
+export function classifyCommandCodeFailure(
+  status: number,
+  text: string,
+  model: string,
+  transport: 'messages' | 'provider' | 'cli',
+): { code?: 'INVALID_REQUEST'; message: string } {
+  const message = text.replace(/\s+/g, ' ').slice(0, 300)
+  if (/MODEL_NOT_IN_PLAN/i.test(text)) {
+    return { code: 'INVALID_REQUEST', message: `commandcode: ${model} is not in this account's plan (${message})` }
+  }
+  if (/upgrade_required/i.test(text)) {
+    const min = /"minVersion"\s*:\s*"([^"]+)"/.exec(text)?.[1]
+    return {
+      code: 'INVALID_REQUEST',
+      message: `commandcode: Command Code requires a newer CLI${min === undefined ? '' : ` (>= ${min})`}; this route presents ${commandCodeCliVersion()}. Raise it with the commandCodeCliVersion setting or update the plugin (${message})`,
+    }
+  }
+  if (/Go plans use the Provider API/i.test(text)) {
+    return {
+      code: 'INVALID_REQUEST',
+      message: `commandcode: the Go plan cannot use the Provider API (${transport}); it needs credits or the GOAT plan (${message})`,
+    }
+  }
+  void status
+  return { message }
+}
+
+/**
+ * Turn a failed Command Code answer into the error to throw.
+ *
+ * @param response - the failed answer.
+ * @param model - the model asked for.
+ * @param transport - which wire was used.
+ * @returns the error.
+ */
+async function commandCodeError(
+  response: Response,
+  model: string,
+  transport: 'messages' | 'provider' | 'cli',
+): Promise<LlmError> {
+  const text = await response.clone().text().catch(() => '')
+  const verdict = classifyCommandCodeFailure(response.status, text, model, transport)
+  return verdict.code === undefined
+    ? await httpLlmError(response, 'commandcode')
+    : new LlmError(verdict.message, verdict.code)
+}
+
 async function isProviderUpgradeRequired(response: Response): Promise<boolean> {
   if (response.status !== 403) return false
   let text = ''
@@ -1696,7 +1789,7 @@ export class CommandCodeAdapter extends LlmAdapter {
       const headers = {
         'content-type': 'application/json',
         authorization: `Bearer ${session.accessToken}`,
-        'x-command-code-version': COMMAND_CODE_CLI_VERSION,
+        'x-command-code-version': commandCodeCliVersion(),
         'x-cli-environment': 'production',
         'x-project-slug': projectSlugFromPath(workingDir),
         // The reference client reports taste learning as OFF on every request
@@ -1762,7 +1855,7 @@ export class CommandCodeAdapter extends LlmAdapter {
       } catch (error) {
         throw mapFetchFailure('commandcode', error, watchdog, options.signal)
       }
-      if (!response.ok) throw await httpLlmError(response, 'commandcode')
+      if (!response.ok) throw await commandCodeError(response, options.model, usedTransport)
       if (response.body === null) throw new LlmError('commandcode returned an empty stream', 'EMPTY_RESPONSE')
       if (usedTransport === 'messages') {
         yield* streamAnthropic(response.body, () => watchdog.pulse())

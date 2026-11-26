@@ -145,6 +145,7 @@ import {
   refreshCommandCode,
   sessionFromCommandCodePaste,
   startCommandCodeLogin,
+  setCommandCodeCliVersion,
 } from './providers/commandcode.js'
 import {
   CodeBuddyAdapter,
@@ -293,6 +294,11 @@ export interface Config {
   agyVersion?: string
   /** Whole Antigravity User-Agent override, when the version alone is not enough. */
   agyUserAgent?: string
+  /**
+   * CLI version Command Code is told this route presents, when its gate demands a
+   * newer one than the baked-in default.
+   */
+  commandCodeCliVersion?: string
   /** Whether and how long a route waits out a closed rate-limit window. */
   rateLimit?: RateLimitConfig
   /** Advisory model catalogs for providers whose discovery you want to override, per provider. */
@@ -366,6 +372,7 @@ export const Config: z<Config> = z.object({
   streamIdleTimeoutMs: z.number().min(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   agyVersion: z.string(),
   agyUserAgent: z.string(),
+  commandCodeCliVersion: z.string(),
   rateLimit: z.object({
     wait: z.boolean().default(true),
     maxWaitMs: z.number().min(1).default(DEFAULT_RATE_LIMIT_MAX_WAIT_MS),
@@ -1086,6 +1093,7 @@ export function apply(ctx: Context, config: Config): void {
   const rateLimit = resolveRateLimitWait(config.rateLimit, `${name}: rateLimit`)
   // Antigravity refuses an unrecognised client outright (inside a 200), so the
   // identity is configurable: the whole User-Agent, or just its version.
+  setCommandCodeCliVersion(config.commandCodeCliVersion)
   setAgyIdentity({
     ...config.agyVersion === undefined ? {} : { version: config.agyVersion },
     ...config.agyUserAgent === undefined ? {} : { userAgent: config.agyUserAgent },
