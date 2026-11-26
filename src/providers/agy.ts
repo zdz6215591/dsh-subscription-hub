@@ -512,6 +512,20 @@ export interface AgyAdapterOptions {
   rateLimit?: RateLimitWait
 }
 
+/**
+ * Whether a model id is one Antigravity marks as NOT ENABLED for this account.
+ *
+ * Measured: `gemini-4-neon-disabled` answers `404 NOT_FOUND` while
+ * `gemini-3-flash` on the same account answers normally, so these rows are in the
+ * catalogue but cannot be called. The suffix is the vendor's own word for it, which
+ * makes this a fact read from the id rather than a guess.
+ *
+ * @param id - the model id.
+ * @returns true when the model must not be offered.
+ */
+function isDisabledAgyModel(id: string): boolean {
+  return /-disabled$/i.test(id)
+}
 function discoveredFromList(models: readonly LlmModelInfo[]): DiscoveredModel[] {
   return models.map(model => {
     const meta = catalogModel(model.id)
@@ -608,7 +622,7 @@ export class AgyAdapter extends LlmAdapter {
     }
     if (!await this.options.tokens.hasSession(account)) return []
     if (!this.options.discovery) {
-      return this.options.models.map(model => ({
+      return this.options.models.filter(model => !isDisabledAgyModel(model.id)).map(model => ({
         provider,
         id: model.id,
         name: model.name ?? model.id,
@@ -627,7 +641,7 @@ export class AgyAdapter extends LlmAdapter {
         }),
       )
       if (discovered.length > 0) this.notFetched.delete(provider)
-      return discovered.map(model => ({
+      return discovered.filter(model => !isDisabledAgyModel(model.id)).map(model => ({
         provider,
         id: model.id,
         name: model.name,

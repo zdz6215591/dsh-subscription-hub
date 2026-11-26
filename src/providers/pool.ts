@@ -372,11 +372,27 @@ export class PoolAdapter extends LlmAdapter {
   }
 
   /**
-   * The error for an exhausted pool, carrying the earliest recovery hint of
-   * THIS pool's members (the health registry is shared across pools, so the
-   * hint is scoped to the keys this pool can actually recover through).
+   * The error for an exhausted pool.
+   *
+   * A failure that is the SAME for every member — an unknown model id, a request
+   * the provider rejects — is not "exhausted" and has nothing to retry: reporting
+   * it as `RATE_LIMIT` with a recovery hint (as this did) told a user to wait 58
+   * seconds for `404 NOT_FOUND: gemini-4-neon-disabled`, which no amount of
+   * waiting fixes. Only genuinely transient failures keep the retry hint.
    */
   private exhausted(model: string, pool: ConcretePoolMember[], cause?: unknown): LlmError {
+    const underlying = cause instanceof LlmError ? cause : undefined
+    const transient = underlying === undefined
+      || underlying.code === 'RATE_LIMIT'
+      || underlying.code === QUOTA_EXCEEDED_CODE
+      || underlying.code === 'UPSTREAM_ERROR'
+      || underlying.code === 'SERVER'
+      || underlying.code === 'TIMEOUT'
+      || underlying.code === 'TRANSPORT'
+      || underlying.code === EMPTY_RESPONSE_CODE
+    if (!transient) {
+      return new LlmError(`pool "${model}": ${underlying.message}`, underlying.code, { cause })
+    }
     const keys = new Set<string>()
     for (const member of pool) {
       keys.add(memberKey(member.provider, member.account, member.model))

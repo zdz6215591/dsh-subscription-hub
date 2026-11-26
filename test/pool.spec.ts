@@ -617,6 +617,23 @@ test('stream: an exhausted pool throws RATE_LIMIT with the earliest recovery hin
   )
 })
 
+test('stream: a model-level failure is reported as itself, with no retry hint', async () => {
+  // `404 NOT_FOUND: gemini-4-neon-disabled` is the same for every member, so
+  // "pool exhausted, retry in 58s" was a fiction: no wait makes the model exist.
+  const codex = new FakeAdapter(() => serveFail(new LlmError('agy error (HTTP 404): not found', 'HTTP_404')))
+  const { pool } = makePool({ codex })
+  await assert.rejects(
+    collect(pool.stream(OPTIONS)),
+    (error: unknown) => {
+      assert.ok(error instanceof LlmError)
+      assert.equal(error.code, 'HTTP_404', 'the real code survives the pool')
+      assert.match(error.message, /pool ".*": agy error \(HTTP 404\)/)
+      assert.equal(error.failure.providerRetryAfterMs, undefined, 'nothing to wait for')
+      return true
+    },
+  )
+})
+
 test('resolveModel uses the pool display name', async () => {
   const family = new Map<string, PoolDefinition>([
     [poolKey('codex', 'm'), {
