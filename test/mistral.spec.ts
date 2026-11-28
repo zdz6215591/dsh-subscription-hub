@@ -228,3 +228,20 @@ test('mistral: the effort is sent as reasoning_effort, and only for such a model
   assert.equal(bodies[0]?.reasoning_effort, 'high', 'a reasoning model gets the level it asked for')
   assert.equal(bodies[1]?.reasoning_effort, undefined, 'a model without the capability is not sent one')
 })
+test('mistral: a wallet funded with nothing is not shown', () => {
+  // The Vibe CLI's own credential reports exactly this: a 10 USD plan allowance and
+  // an `api_budget` of 0, which used to render as a "$0 / $0" line.
+  const usage = mistralUsageFromBilling(
+    { plan_name: 'FREE' },
+    {
+      vibe_budget: { usage_percentage: 0, initial_budget: 10, currency: 'USD' },
+      api_budget: { usage_percentage: 0, initial_budget: 0, currency: 'USD' },
+    },
+  )
+  assert.equal(usage.supported, true)
+  if (!usage.supported) throw new Error('unreachable')
+  assert.equal(usage.plan, 'FREE')
+  assert.deepEqual((usage.windows ?? []).map(window => window.scope), ['Vibe allowance (plan)'])
+  // Every wallet empty still reports unsupported rather than a row of zeroes.
+  assert.deepEqual(mistralUsageFromBilling({}, { api_budget: { initial_budget: 0 } }), { supported: false })
+})

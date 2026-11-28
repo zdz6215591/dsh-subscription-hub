@@ -66,7 +66,8 @@ export interface MistralModel {
   contextWindow?: number
   maxOutputTokens?: number
   supportsImages: boolean
-  /** capabilities.reasoning: the model accepts easoning_effort. */
+  /** capabilities.reasoning: the model accepts 
+easoning_effort. */
   supportsReasoning: boolean
 }
 
@@ -170,6 +171,10 @@ export function mistralUsageFromBilling(subscription: unknown, budget: unknown):
     const raw = [record.usage_percentage, record.usagePercentage].find(value => typeof value === 'number' && Number.isFinite(value)) as number | undefined
     const size = [record.initial_budget, record.initialBudget, record.budget].find(value => typeof value === 'number' && Number.isFinite(value)) as number | undefined
     if (raw === undefined && size === undefined) return
+    // A wallet funded with nothing is not a wallet. The Vibe CLI's own credential
+    // reports `api_budget.initial_budget: 0`, and a "$0 / $0" row reads as a bug
+    // rather than as "this credential has no pay-as-you-go wallet".
+    if (size !== undefined && size <= 0) return
     // `usage_percentage` is a PERCENTAGE (0–100), not a fraction. Verified against
     // the console: the live key reported 0.41892786666666665 here while the site
     // showed $0.06 of $15, and 0.4189…% of 15 is 0.0628. Reading it as a fraction
