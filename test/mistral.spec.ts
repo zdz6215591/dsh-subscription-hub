@@ -245,3 +245,27 @@ test('mistral: a wallet funded with nothing is not shown', () => {
   // Every wallet empty still reports unsupported rather than a row of zeroes.
   assert.deepEqual(mistralUsageFromBilling({}, { api_budget: { initial_budget: 0 } }), { supported: false })
 })
+test('mistral: the picker serves the union of every account, because one roster can be partial', async () => {
+  // Measured: a FREE Vibe key listed 51 Mistral-only ids while
+  // `deepseek-v4-1-flash-1017` answered 200 for that same key.
+  const session = sessionFromMistralKey('test-key-0123456789', 'mistral-test')
+  const fetchFn = (async () => new Response(JSON.stringify({
+    data: [{ id: 'mistral-small-latest', capabilities: {} }],
+  }), { status: 200 })) as unknown as typeof fetch
+  const adapter = new MistralAdapter({
+    models: [],
+    streamIdleTimeoutMs: 5_000,
+    discovery: true,
+    fetchFn: fetchFn as never,
+    tokens: {
+      session: async () => session,
+      list: async () => [
+        { key: 'a', session, isDefault: true },
+        { key: 'b', session, isDefault: false },
+      ],
+      hasSession: async () => true,
+    } as unknown as MistralAdapterOptions['tokens'],
+  })
+  const models = await adapter.listOwnModels('mistral')
+  assert.deepEqual(models.map(model => model.id), ['mistral-small-latest'], 'duplicates collapse across accounts')
+})

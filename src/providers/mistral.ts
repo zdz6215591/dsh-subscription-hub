@@ -277,7 +277,25 @@ export class MistralAdapter extends LlmAdapter {
 
   async listOwnModels(provider: string, account?: string): Promise<readonly LlmModelInfo[]> {
     if (!this.options.discovery) return this.configuredRoster().map(model => toMistralModelInfo(model, provider))
-    const key = account ?? (await this.options.tokens.list())[0]?.key
+    // `/v1/models` is NOT the whole catalogue for every credential: a FREE Vibe key
+    // listed 51 Mistral-only ids while `deepseek-v4-1-flash-1017` answered 200 for
+    // the same key. So the picker serves the UNION of every stored account's
+    // roster — hiding a model that works is worse than offering one that 401s.
+    if (account === undefined) {
+      const keys = (await this.options.tokens.list()).map(entry => entry.key)
+      if (keys.length === 0) return this.configuredRoster().map(model => toMistralModelInfo(model, provider))
+      const perAccount = await Promise.all(keys.map(async entryKey => {
+        try {
+          return await this.listOwnModels(provider, entryKey)
+        } catch {
+          return [] as readonly LlmModelInfo[]
+        }
+      }))
+      const union = new Map<string, LlmModelInfo>()
+      for (const list of perAccount) for (const model of list) if (!union.has(model.id)) union.set(model.id, model)
+      return [...union.values()]
+    }
+    const key = account
     if (key === undefined) return this.configuredRoster().map(model => toMistralModelInfo(model, provider))
     const cached = this.rosters.get(key)
     if (cached !== undefined && Date.now() - cached.at < CATALOG_TTL_MS) {
