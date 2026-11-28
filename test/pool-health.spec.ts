@@ -65,7 +65,7 @@ test('classifyPoolFailure: auth failures park the account until re-login', () =>
 })
 
 test('classifyPoolFailure: transient server failures cool the member briefly', () => {
-  for (const code of ['SERVER', 'TIMEOUT', 'EMPTY_RESPONSE']) {
+  for (const code of ['SERVER', 'TIMEOUT']) {
     assert.deepEqual(classifyPoolFailure(new LlmError('oops', code as never), 'codex'), {
       action: 'switch',
       cooldownMs: TRANSIENT_COOLDOWN_MS,
@@ -73,6 +73,12 @@ test('classifyPoolFailure: transient server failures cool the member briefly', (
       scope: 'member',
     })
   }
+})
+
+test('classifyPoolFailure: an empty completion switches without parking the member', () => {
+  // The registry is shared across sessions; one session's empty answers must
+  // not cool members another session could still use.
+  assert.deepEqual(classifyPoolFailure(new LlmError('empty', 'EMPTY_RESPONSE'), 'codex'), { action: 'switch' })
 })
 
 test('classifyPoolFailure: transport failures switch without a health record', () => {

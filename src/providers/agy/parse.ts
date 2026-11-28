@@ -8,8 +8,9 @@
  * and `finishReason`. Streams terminate with `data: [DONE]`.
  */
 
-import type { FinishReason, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { FinishReason, LlmError, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '../../compat.js'
+import { llmErrorFromFailure } from '../common.js'
 
 export interface SsePart {
   text?: string
@@ -92,6 +93,7 @@ export async function* parseAgySse(
   const reader = body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
+  let finished = false
   let blockIndex = 0
   let finishReason: FinishReason = { kind: 'stop' }
   let sawUsage = false
@@ -169,18 +171,24 @@ export async function* parseAgySse(
         throw new DOMException('aborted', 'AbortError')
       }
       const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
+      if (done) {
+        finished = true
+        // A last `data:` line without a trailing newline still carries the
+        // finish reason or the final usage; flush the decoder and keep it.
+        buffer += decoder.decode()
+        if (buffer.length > 0) buffer += '\n'
+      } else {
+        buffer += decoder.decode(value, { stream: true })
+      }
       let newlineIndex: number
       while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
-        const line = buffer.slice(0, newlineIndex)
+        const line = buffer.slice(0, newlineIndex).replace(/\r$/u, '')
         buffer = buffer.slice(newlineIndex + 1)
         if (!line.startsWith('data:')) continue
         const payload = parseSseDataLine(line)
         if (!payload) continue
         if (payload.error) {
-          const message = payload.error.message ?? payload.error.status ?? 'upstream error'
-          throw new Error(`agy stream error (${payload.error.code ?? 'unknown'}): ${message}`)
+          throw agyStreamError(payload.error)
         }
         for (const candidate of payload.candidates ?? []) {
           if (candidate.finishReason) {
@@ -261,6 +269,7 @@ export async function* parseAgySse(
           }
         }
       }
+      if (finished) break
     }
     const closed = closeBlock()
     if (closed) yield closed
@@ -271,6 +280,33 @@ export async function* parseAgySse(
     }
     yield { type: 'finish', reason: finishReason }
   } finally {
+    // An early stop (abort, a consumer break, a thrown error) leaves the body
+    // unread; cancel it so the connection is released now rather than at GC.
+    if (!finished) await reader.cancel().catch(() => undefined)
     reader.releaseLock()
   }
+}
+
+/**
+ * Classify an error object that arrives inside the stream. Without a code, a
+ * mid-stream 429 / RESOURCE_EXHAUSTED was a plain Error the pool could not
+ * fail over on.
+ * @param error - the payload's `error` object.
+ * @returns the classified error.
+ */
+export function agyStreamError(error: NonNullable<SsePayload['error']>): LlmError {
+  const message = `agy stream error (${error.code ?? 'unknown'}): ${error.message ?? error.status ?? 'upstream error'}`
+  const status = error.status ?? ''
+  const code = error.code === 429 || status === 'RESOURCE_EXHAUSTED'
+    ? 'RATE_LIMIT'
+    : error.code === 401 || error.code === 403 || status === 'UNAUTHENTICATED' || status === 'PERMISSION_DENIED'
+      ? 'AUTH'
+      : error.code === 400 || status === 'INVALID_ARGUMENT'
+        ? 'HTTP_400'
+        : 'SERVER'
+  return llmErrorFromFailure({
+    message,
+    code,
+    ...typeof error.code === 'number' && error.code >= 100 && error.code <= 599 ? { status: error.code } : {},
+  })
 }

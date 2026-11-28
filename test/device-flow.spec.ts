@@ -55,6 +55,21 @@ const DEVICE_CODE = {
   expires_in: 60,
 }
 
+test('device flow: a dropped poll connection does not end the login', async () => {
+  // A network blip between polls is not an answer from GitHub; the login
+  // keeps polling instead of failing the user's authorization window.
+  let polls = 0
+  const fetchFn = ((input: RequestInfo | URL) => {
+    if (String(input) === DEVICE_CODE_URL) return Promise.resolve(new Response(JSON.stringify(DEVICE_CODE)))
+    polls += 1
+    if (polls === 1) return Promise.reject(new TypeError('fetch failed'))
+    return Promise.resolve(new Response(JSON.stringify({ access_token: 'gh-token' })))
+  }) as typeof fetch
+  const attempt = await new DeviceFlowManager().start('copilot', spec(fetchFn))
+  assert.equal(await attempt.waitToken(), 'gh-token')
+  assert.equal(polls, 2)
+})
+
 test('device flow: pending polls resolve to the access token', async () => {
   const { fetchFn, bodies } = fakeFetch({
     [DEVICE_CODE_URL]: [DEVICE_CODE],

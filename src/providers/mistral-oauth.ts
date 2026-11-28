@@ -309,11 +309,9 @@ export async function exchangeMistralSignIn(
   if (verifier !== undefined) shapes.push({ name: 'captured: token+verifier', headers: baseHeaders, body: { exchange_token: exchangeToken, code_verifier: verifier } })
   shapes.push({ name: 'exchange_token', headers: baseHeaders, body: { exchange_token: exchangeToken } })
   if (verifier !== undefined) {
-    shapes.push({
-      name: 'exchange_token+code_verifier',
-      headers: baseHeaders,
-      body: { exchange_token: exchangeToken, code_verifier: verifier },
-    })
+    // No second `exchange_token+code_verifier` shape: it was byte-identical to
+    // the captured one above, so a refusal re-sent the same POST (with its own
+    // rate-limit retries) for nothing.
     shapes.push({
       name: 'bearer+code_verifier',
       headers: { ...baseHeaders, authorization: `Bearer ${exchangeToken}` },

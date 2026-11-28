@@ -196,3 +196,37 @@ test('agy: Gemini 4 and later require thought signatures; Gemini 2 and unversion
   }
   assert.equal(requiresThoughtSignatures(undefined), false, 'an unknown model is not treated as a Gemini 3+')
 })
+
+test('agy: a final data line without a trailing newline still delivers its finish', async () => {
+  const last = JSON.stringify({ candidates: [{ content: { parts: [{ text: 'done' }] }, finishReason: 'MAX_TOKENS' }] })
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(`data: ${last}`))
+      controller.close()
+    },
+  })
+  const chunks = await drain(parseAgySse(body)) as { type: string; text?: string; reason?: { kind: string } }[]
+  assert.ok(chunks.some(chunk => chunk.type === 'text-delta' && chunk.text === 'done'), 'the text was kept')
+  assert.equal(chunks.at(-1)?.reason?.kind, 'max-tokens', 'the finish reason was kept')
+})
+
+test('agy: an in-stream 429 is classified, so the pool can fail over', async () => {
+  const error = JSON.stringify({ error: { code: 429, status: 'RESOURCE_EXHAUSTED', message: 'quota' } })
+  await assert.rejects(
+    drain(parseAgySse(sseBody([error]))),
+    (thrown: unknown) => (thrown as { code?: string }).code === 'RATE_LIMIT',
+  )
+})
+
+test('agy: stopping early cancels the response body', async () => {
+  let cancelled = false
+  const payload = JSON.stringify({ candidates: [{ content: { parts: [{ text: 'a' }] } }] })
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(new TextEncoder().encode(`data: ${payload}\n\n`)) },
+    cancel() { cancelled = true },
+  })
+  for await (const chunk of parseAgySse(body)) {
+    if ((chunk as { type: string }).type === 'text-delta') break
+  }
+  assert.equal(cancelled, true)
+})

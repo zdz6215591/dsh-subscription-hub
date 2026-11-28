@@ -407,6 +407,25 @@ test('toAnthropicMessages: merge, tool_use input parsing, tool_result', () => {
   assert.deepEqual(malformed[0].content[0], { type: 'tool_use', id: 'c', name: 'n', input: {} })
 })
 
+test('toAnthropicMessages: tool ids the Messages API refuses are rewritten consistently', () => {
+  // A session that switched routes holds ids such as Codex's `call_…|fc_…`;
+  // Anthropic answers them with HTTP 400 unless they match ^[a-zA-Z0-9_-]+$.
+  const refused = 'call_abc|fc_1.2'
+  const messages = toAnthropicMessages([
+    message('assistant', [toolCall(refused, 'bash', '{}'), toolCall('ok_id', 'bash', '{}')]),
+    message('user', [toolResult(refused, 'one'), toolResult('ok_id', 'two')]),
+  ])
+  const use = messages[0].content as { id: string }[]
+  const result = messages[1].content as { tool_use_id: string }[]
+  assert.match(use[0].id, /^[a-zA-Z0-9_-]+$/u, 'the refused id is made acceptable')
+  assert.equal(result[0].tool_use_id, use[0].id, 'the call and its result still pair')
+  assert.equal(use[1].id, 'ok_id', 'an accepted id is sent verbatim')
+  assert.equal(result[1].tool_use_id, 'ok_id')
+  // Deterministic, so the cached prefix matches on the next request.
+  const again = toAnthropicMessages([message('assistant', [toolCall(refused, 'bash', '{}')])])
+  assert.equal((again[0].content as { id: string }[])[0].id, use[0].id)
+})
+
 test('toAnthropicMessages: a replayed tool call in a user message rides as text', () => {
   // A settled background subagent's closing message is spliced into the parent
   // conversation as a user-role notice, carrying the subagent's own blocks —

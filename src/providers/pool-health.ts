@@ -83,8 +83,12 @@ export function classifyPoolFailure(error: unknown, provider: ProviderId): PoolF
       return { action: 'switch', cooldownMs: AUTH_COOLDOWN_MS, reason: error.code, scope: 'account' }
     case 'SERVER':
     case 'TIMEOUT':
-    case 'EMPTY_RESPONSE':
       return { action: 'switch', cooldownMs: TRANSIENT_COOLDOWN_MS, reason: error.code, scope: 'member' }
+    case 'EMPTY_RESPONSE':
+      // An empty completion is usually about this request, not the member: the
+      // registry is shared by every session, so a 60s cooldown here let one
+      // session's empty answers park members another session could still use
+      // (the reference's faca32c). Switch, but record nothing.
     case 'TRANSPORT':
       return { action: 'switch' }
     case 'HTTP_402':

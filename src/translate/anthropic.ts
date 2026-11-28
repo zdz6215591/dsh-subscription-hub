@@ -5,6 +5,7 @@
  * ({@link AnthropicStreamTranslator}) so tests need no streams.
  */
 
+import { createHash } from 'node:crypto'
 import {
   CONTEXT_WINDOW_EXCEEDED_CODE,
   EMPTY_RESPONSE_CODE,
@@ -86,6 +87,65 @@ function parseToolInput(raw: string): Record<string, unknown> {
 }
 
 /**
+ * The ids the Messages API accepts in `tool_use.id` and
+ * `tool_result.tool_use_id`; anything else is an HTTP 400
+ * (`String should match pattern '^[a-zA-Z0-9_-]+$'`).
+ */
+const ANTHROPIC_TOOL_ID = /^[a-zA-Z0-9_-]+$/
+
+/** Longest generated id, and the base64url digest characters that close it. */
+const GENERATED_TOOL_ID_MAX_LENGTH = 64
+const GENERATED_TOOL_ID_DIGEST = 16
+
+/** An accepted id for a refused one: readable stem plus a digest of the original. */
+function generatedToolId(id: string, attempt: number): string {
+  const digest = createHash('sha256').update(attempt === 0 ? id : `${attempt}\u0000${id}`).digest('base64url')
+  const stem = id.replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, GENERATED_TOOL_ID_MAX_LENGTH - GENERATED_TOOL_ID_DIGEST - 1)
+  return `${stem}_${digest.slice(0, GENERATED_TOOL_ID_DIGEST)}`
+}
+
+/**
+ * The wire id of every tool call and tool result in one request (the
+ * reference's 374f91f). A session can switch routes, so its history holds ids
+ * other providers produced (`call_…|fc_…`, ids with `.` or `:`) that Anthropic
+ * refuses. An accepted id is sent verbatim; a refused one gets a deterministic
+ * replacement, so every request of a session sends the same id and the cached
+ * prefix keeps matching. Accepted ids are reserved first, so two ids never
+ * share a wire id, and a call and its result map identically.
+ * @param messages - the request's messages.
+ * @returns the wire id of a stored id.
+ */
+function anthropicToolIds(messages: readonly TranslatableMessage[]): (id: string) => string {
+  const stored = new Set<string>()
+  for (const message of messages) {
+    const answered = message.role === 'tool' ? toolMessageCallId(message) : undefined
+    if (answered !== undefined) stored.add(answered)
+    for (const block of message.content) {
+      if (block.type === 'tool-call') stored.add(String(block.id))
+      else if (block.type === 'tool-result') stored.add(String(block.toolCallId))
+    }
+  }
+  const taken = new Set([...stored].filter(id => ANTHROPIC_TOOL_ID.test(id)))
+  const generated = new Map<string, string>()
+  for (const id of stored) {
+    if (ANTHROPIC_TOOL_ID.test(id)) continue
+    let attempt = 0
+    let wire = generatedToolId(id, attempt)
+    while (taken.has(wire)) wire = generatedToolId(id, ++attempt)
+    taken.add(wire)
+    generated.set(id, wire)
+  }
+  return id => generated.get(id) ?? id
+}
+
+/** The call a tool-role message answers: its own field, the chat spelling, or its source. */
+function toolMessageCallId(message: TranslatableMessage): string | undefined {
+  const id = message.toolCallId ?? message.tool_call_id
+    ?? (message.source?.kind === 'tool' ? String(message.source.callId) : undefined)
+  return id === undefined || id === '' ? undefined : id
+}
+
+/**
  * Move a user message's `tool_result` blocks into one contiguous run at the
  * front, preserving the relative order of both groups.
  *
@@ -142,6 +202,7 @@ function conversationStart(messages: readonly TranslatableMessage[]): number {
 export function toAnthropicMessages(messages: readonly TranslatableMessage[]): AnthropicMessage[] {
   const out: AnthropicMessage[] = []
   const start = conversationStart(messages)
+  const toolId = anthropicToolIds(messages)
   for (const [index, message] of messages.entries()) {
     // A leading system message is an opening instruction; toAnthropicSystem
     // owns those. A later one rides here so the cached prefix ahead of it
@@ -150,13 +211,20 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[]): A
     const role: 'user' | 'assistant' = message.role === 'assistant' ? 'assistant' : 'user'
     const blocks: Record<string, unknown>[] = []
     if (message.role === 'tool') {
-      const toolCallId = message.toolCallId ?? (message as unknown as { source?: { callId?: string } }).source?.callId ?? ''
-      blocks.push({
-        type: 'tool_result',
-        tool_use_id: String(toolCallId),
-        content: toolResultContent({ content: message.content as any, isError: message.isError } as any),
-        ...message.isError === true ? { is_error: true } : {},
-      })
+      const toolCallId = toolMessageCallId(message)
+      // A result that names no call cannot be paired; Anthropic would refuse
+      // `tool_use_id: ''`, so it rides as plain text instead.
+      if (toolCallId === undefined) {
+        const text = message.content.map(part => (part.type === 'text' ? part.text : '')).join('')
+        if (text !== '') blocks.push({ type: 'text', text })
+      } else {
+        blocks.push({
+          type: 'tool_result',
+          tool_use_id: toolId(toolCallId),
+          content: toolResultContent({ content: message.content as any, isError: message.isError } as any),
+          ...message.isError === true ? { is_error: true } : {},
+        })
+      }
     } else {
       for (const block of message.content) {
         switch (block.type) {
@@ -178,7 +246,7 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[]): A
             blocks.push(role === 'assistant'
               ? {
                   type: 'tool_use',
-                  id: String(block.id),
+                  id: toolId(String(block.id)),
                   name: block.name,
                   input: parseToolInput(block.arguments),
                 }
@@ -187,7 +255,7 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[]): A
           case 'tool-result':
             blocks.push({
               type: 'tool_result',
-              tool_use_id: String(block.toolCallId),
+              tool_use_id: toolId(String(block.toolCallId)),
               content: toolResultContent(block),
               ...block.isError === true ? { is_error: true } : {},
             })

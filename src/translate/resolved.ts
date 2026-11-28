@@ -138,6 +138,8 @@ export interface TranslatableMessage {
   /** Preserved for adapters whose provider-private replay metadata is required. */
   source?: Message['source']
   toolCallId?: string
+  /** Chat Completions correlation in imported histories. */
+  tool_call_id?: string
   isError?: boolean
 }
 
