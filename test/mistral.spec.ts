@@ -339,3 +339,43 @@ test('mistral: the attribution can be switched off', async () => {
   for await (const _chunk of adapter.stream(OPTIONS)) { /* drain */ }
   assert.equal(bodies[0]?.metadata, undefined, 'switched off means no metadata at all')
 })
+test('mistral: an empty allowance falls back to the pay-as-you-go wallet, once', async () => {
+  // Measured: a 402 means the plan allowance is spent, and the SAME request without
+  // the attribution metadata bills the API wallet instead.
+  const bodies: Record<string, unknown>[] = []
+  const fetchFn = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const payload = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+    bodies.push(payload)
+    if (payload.metadata !== undefined) {
+      return new Response('{"error":{"code":"billing_api_budget_exhausted"}}', { status: 402 })
+    }
+    return new Response([
+      'data: {"choices":[{"index":0,"delta":{"content":"ok"}}]}',
+      '',
+      'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n'), { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  }) as unknown as typeof fetch
+  const adapter = new MistralAdapter({
+    models: [],
+    streamIdleTimeoutMs: 5_000,
+    discovery: false,
+    fetchFn: fetchFn as never,
+    planName: 'EDU',
+    tokens: {
+      session: async () => sessionFromMistralKey('test-key-0123456789', 'mistral-test'),
+      list: async () => [{ key: 'a', session: sessionFromMistralKey('test-key-0123456789', 'mistral-test'), isDefault: true }],
+      hasSession: async () => true,
+    } as unknown as MistralAdapterOptions['tokens'],
+  })
+  let text = ''
+  for await (const chunk of adapter.stream(OPTIONS)) {
+    if (chunk.type === 'text-delta') text += chunk.text
+  }
+  assert.equal(text, 'ok', 'the retry streamed the answer')
+  assert.equal(bodies.length, 2, 'one attempt on the allowance, one on the wallet')
+  assert.ok(bodies[0]?.metadata !== undefined)
+  assert.equal(bodies[1]?.metadata, undefined, 'the fallback carries no attribution')
+})

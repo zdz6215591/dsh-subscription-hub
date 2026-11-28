@@ -428,18 +428,28 @@ export class MistralAdapter extends LlmAdapter {
       if (declared?.supportsReasoning === true && effort !== '' && effort !== 'off') body.reasoning_effort = effort
 
       let response: Response
+      const send = async (payload: Record<string, unknown>): Promise<Response> => await this.fetchFn(`${this.baseUrl(session)}${MISTRAL_CHAT_PATH}`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${session.accessToken}`,
+          accept: 'text/event-stream',
+          ...attributionHeaders(),
+        },
+        body: JSON.stringify(payload),
+        signal: watchdog.signal,
+      })
       try {
-        response = await this.fetchFn(`${this.baseUrl(session)}${MISTRAL_CHAT_PATH}`, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            authorization: `Bearer ${session.accessToken}`,
-            accept: 'text/event-stream',
-            ...attributionHeaders(),
-          },
-          body: JSON.stringify(body),
-          signal: watchdog.signal,
-        })
+        response = await send(body)
+        // Plan allowance FIRST, pay-as-you-go after it. A 402 means the allowance is
+        // empty, and dropping the attribution metadata is exactly what moves the same
+        // request to the API wallet — measured both ways on the live account, so this
+        // retry is a wallet switch rather than a hope.
+        if (response.status === 402 && body.metadata !== undefined) {
+          const withoutMetadata = { ...body }
+          delete withoutMetadata.metadata
+          response = await send(withoutMetadata)
+        }
       } catch (error) {
         throw mapFetchFailure('mistral', error, watchdog, options.signal)
       }
