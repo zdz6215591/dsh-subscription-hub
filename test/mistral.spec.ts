@@ -65,13 +65,14 @@ test('mistral: the roster keeps what /v1/models states and nothing it does not',
   assert.equal(models[1]?.supportsImages, false)
 })
 
-test('mistral: usage_percentage is a fraction of the budget, so 0.0003533 is 0.035%', () => {
-  // Measured on the live key: one ~half-cent chat against a 15 USD API budget.
+test('mistral: usage_percentage is a percentage, not a fraction', () => {
+  // The console is the authority here: it showed 0.06 USD used of 15 while the
+  // API reported usage_percentage 0.41892786666666665, i.e. 0.4189%.
   const usage = mistralUsageFromBilling(
     { plan_name: 'EDU' },
     {
       vibe_budget: { usage_percentage: 0, initial_budget: 150, currency: 'USD', reset_at: '2026-12-01T00:00:00Z' },
-      api_budget: { usage_percentage: 0.0003533333333333333, initial_budget: 15, currency: 'USD', reset_at: '2026-12-01T00:00:00Z' },
+      api_budget: { usage_percentage: 0.41892786666666665, initial_budget: 15, currency: 'USD', reset_at: '2026-12-01T00:00:00Z' },
     },
   )
   assert.equal(usage.supported, true)
@@ -82,14 +83,16 @@ test('mistral: usage_percentage is a fraction of the budget, so 0.0003533 is 0.0
   assert.equal(windows[0]?.usedPercent, 0)
   assert.equal(windows[0]?.limit, 150)
   assert.equal(windows[0]?.unit, 'currency', 'the amounts are dollars, not a percentage')
-  // 100x off if the fraction were read as a percentage.
-  assert.ok(Math.abs((windows[1]?.usedPercent ?? 0) - 0.035333333) < 1e-6)
-  assert.ok(Math.abs((windows[1]?.used ?? 0) - 0.0053) < 1e-4)
+  // Not scaled: the earlier reading multiplied by 100 and showed 41.89%.
+  assert.ok(Math.abs((windows[1]?.usedPercent ?? 0) - 0.41892786666666665) < 1e-12)
+  assert.ok(Math.abs((windows[1]?.used ?? 0) - 0.06283918) < 1e-6, 'about the figure the console shows')
+  assert.ok(Math.abs((windows[1]?.remaining ?? 0) - 14.93716082) < 1e-6)
   assert.equal(windows[1]?.resetsAt, Date.parse('2026-12-01T00:00:00Z'), 'the reset date is kept')
-  // A value above 1 can only be a percentage.
-  const doubled = mistralUsageFromBilling({}, { budget: { usage_percentage: 40, initial_budget: 100 } })
-  if (!doubled.supported) throw new Error('unreachable')
-  assert.equal(doubled.windows?.[0]?.usedPercent, 40)
+  // A percentage of 100 is the cap, not 10000.
+  const full = mistralUsageFromBilling({}, { budget: { usage_percentage: 100, initial_budget: 100 } })
+  if (!full.supported) throw new Error('unreachable')
+  assert.equal(full.windows?.[0]?.usedPercent, 100)
+  assert.equal(full.windows?.[0]?.remaining, 0)
 })
 
 test('mistral: an empty billing answer reports no quota instead of zeroes', () => {

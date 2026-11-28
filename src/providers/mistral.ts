@@ -16,8 +16,8 @@
  *   - **The quota is published** for an API key: `/billing/subscription` names the
  *     plan and `/billing/budget` reports the Vibe and API allowances as a
  *     percentage of their initial size. Those are percentages, not token counts,
- *     as a FRACTION, which is why the parser scales it and reports the budget in
- *   - **Prompt caching** is opt-in per request (`prompt_cache_key`). This route
+ *     as a PERCENTAGE (0-100), which is what the parser reports; the console's
+ *     $used /  is the figure this route reproduces.
  *     does not send one: a stable key per conversation is what makes it hit, and
  *     the hub does not own the conversation's lifetime. A cache that never hits
  *     would be worse than none.
@@ -140,11 +140,11 @@ interface MistralBudget {
  *                                              "currency": "USD",
  *                                              "reset_at": "2026-12-01T00:00:00Z" }, … }
  *
- * `usage_percentage` is a FRACTION of the budget, not a 0–100 percentage: a chat
- * costing about half a cent against `initial_budget: 15` came back as
- * `0.0003533…`, i.e. used/budget — 100× smaller than the percentage it looks
- * like. A value above 1 can only be a percentage, so it is taken as one; that is
- * the single case where the field is not ambiguous.
+ * `usage_percentage` is a PERCENTAGE (0–100). This was first read as a fraction on
+ * the strength of a guessed spend, which made the card show 41.89% where the
+ * console showed $0.06 of $15 — the console figure is the authority: with
+ * `initial_budget: 15` and `usage_percentage: 0.41892786666666665`, 0.4189…% of 15
+ * is 0.0628, i.e. the site's "$0.06 / $15".
  *
  * The amounts are money, so the window is `unit: 'currency'` and `limit`, `used`
  * and `remaining` are all in the entry's `currency`.
@@ -164,8 +164,11 @@ export function mistralUsageFromBilling(subscription: unknown, budget: unknown):
     const raw = [record.usage_percentage, record.usagePercentage].find(value => typeof value === 'number' && Number.isFinite(value)) as number | undefined
     const size = [record.initial_budget, record.initialBudget, record.budget].find(value => typeof value === 'number' && Number.isFinite(value)) as number | undefined
     if (raw === undefined && size === undefined) return
-    const fraction = raw === undefined ? 0 : raw > 1 ? raw / 100 : raw
-    const usedPercent = Math.min(100, Math.max(0, fraction * 100))
+    // `usage_percentage` is a PERCENTAGE (0–100), not a fraction. Verified against
+    // the console: the live key reported 0.41892786666666665 here while the site
+    // showed $0.06 of $15, and 0.4189…% of 15 is 0.0628. Reading it as a fraction
+    // (an earlier, wrong guess) displayed 41.89% for that same $0.06.
+    const usedPercent = Math.min(100, Math.max(0, raw ?? 0))
     const reset = [record.reset_at, record.resetsAt].find(value => typeof value === 'string' || typeof value === 'number')
     const resetsAt = typeof reset === 'number' ? reset : typeof reset === 'string' ? Date.parse(reset) : Number.NaN
     windows.push({
@@ -175,8 +178,8 @@ export function mistralUsageFromBilling(subscription: unknown, budget: unknown):
       unit: 'currency',
       ...size === undefined ? {} : {
         limit: size,
-        used: size * fraction,
-        remaining: Math.max(0, size * (1 - fraction)),
+        used: size * usedPercent / 100,
+        remaining: Math.max(0, size * (1 - usedPercent / 100)),
       },
       ...Number.isFinite(resetsAt) ? { resetsAt } : {},
     })
