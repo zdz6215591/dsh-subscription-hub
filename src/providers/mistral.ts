@@ -23,7 +23,7 @@
  *     would be worse than none.
  */
 
-import { attributionHeaders, LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
+import { attributionHeaders, LlmAdapter, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -181,8 +181,8 @@ export function mistralUsageFromBilling(subscription: unknown, budget: unknown):
       ...Number.isFinite(resetsAt) ? { resetsAt } : {},
     })
   }
-  add(body.vibe_budget, 'Vibe budget')
-  add(body.api_budget, 'API budget')
+  add(body.vibe_budget, 'Vibe allowance (plan)')
+  add(body.api_budget, 'API wallet (pay-as-you-go)')
   if (windows.length === 0) add(body.budget, 'Monthly budget')
   if (windows.length === 0) return { supported: false }
   return {
@@ -360,7 +360,17 @@ export class MistralAdapter extends LlmAdapter {
       } catch (error) {
         throw mapFetchFailure('mistral', error, watchdog, options.signal)
       }
-      if (!response.ok) throw await httpLlmError(response, 'mistral')
+      if (!response.ok) {
+        // Mistral answers 402 with `billing_api_budget_exhausted` when a wallet is
+        // empty. That is a QUOTA state, not a request fault: classifying it as
+        // `HTTP_402` (what the shared mapping does) stops a pool from switching to
+        // an account that still has budget, which is the one useful reaction.
+        if (response.status === 402) {
+          const detail = (await response.clone().text().catch(() => '')).slice(0, 300)
+          throw new LlmError(`mistral: budget exhausted (402): ${detail}`, QUOTA_EXCEEDED_CODE)
+        }
+        throw await httpLlmError(response, 'mistral')
+      }
       if (response.body === null) throw new LlmError('mistral returned an empty stream', 'EMPTY_RESPONSE')
       yield* streamChatCompletions(response.body, () => { watchdog.pulse() })
     } finally {

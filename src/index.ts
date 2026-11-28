@@ -232,6 +232,7 @@ import {
   sessionFromKiroKey,
 } from './providers/kiro/index.js'
 import type { KiroSignIn } from './providers/kiro/index.js'
+import { readMistralVibeKey } from './providers/mistral-vibe.js'
 import {
   MistralAdapter,
   assertUsableMistralKey,
@@ -763,8 +764,19 @@ export class SubscriptionsAuthController implements AuthController {
       return { authorizeUrl: login.authorizeUrl }
     }
     if (provider === 'mistral') {
-      // Mistral has no OAuth grant and no device flow: its only login is a pasted
-      // API key, which the panel collects through the manual-input field.
+      // Two ways in, and neither is a browser sign-in: the Vibe CLI's key from
+      // this machine (the one that draws the plan allowance), or a pasted key.
+      if (method === 'import') {
+        const vibeKey = await readMistralVibeKey()
+        if (vibeKey === undefined) {
+          throw new Error('mistral: no Vibe CLI sign-in found at ~/.vibe/.env. Run `vibe --setup`, or paste an API key.')
+        }
+        const session = sessionFromMistralKey(assertUsableMistralKey(vibeKey, 'mistral'), `mistral-vibe-${maskMistralKey(vibeKey)}`)
+        await this.persist('mistral', session)
+        this.lastError.delete('mistral')
+        this.onAuthChanged('mistral', accountKeyOf('mistral', session))
+        return { authorizeUrl: '' }
+      }
       return { authorizeUrl: '' }
     }
     if (provider === 'cline') {

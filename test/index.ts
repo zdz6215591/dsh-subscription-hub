@@ -83,4 +83,5 @@ import './no-fabricated-fallbacks.spec.js'
 // the reply translation, the roster and the credit allowance.
 import './kiro.spec.js'
 import './mistral.spec.js'
+import './mistral-wallets.spec.js'
 import './kiro-login.spec.js'
