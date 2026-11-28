@@ -145,3 +145,35 @@ export async function importLocalMistralKey(
   if (fromEnv !== undefined) return { key: fromEnv, source: 'env' }
   return undefined
 }
+
+/**
+ * The real keyring runner for this platform.
+ *
+ * Windows is the only store this route can read without a native dependency; on
+ * anything else it returns empty output so the env file is the source.
+ *
+ * @returns a runner that executes the enumeration script and returns its stdout.
+ */
+export function windowsKeyringRunner(): RunScript {
+  return async (script: string): Promise<string> => {
+    if (process.platform !== 'win32') return ''
+    const { execFile } = await import('node:child_process')
+    const { rm, writeFile } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const { promisify } = await import('node:util')
+    const run = promisify(execFile)
+    const scriptPath = join(tmpdir(), `dsh-mistral-cred-${process.pid}-${Date.now()}.ps1`)
+    try {
+      await writeFile(scriptPath, script, 'utf8')
+      const { stdout } = await run(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
+        { timeout: 20_000, windowsHide: true, encoding: 'utf8' },
+      )
+      return stdout
+    } finally {
+      await rm(scriptPath, { force: true })
+    }
+  }
+}
