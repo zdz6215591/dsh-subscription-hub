@@ -65,6 +65,14 @@ export interface StartedSignIn {
   expiresAt: number
   /** Kept for a `code` exchange; never sent to the browser. */
   verifier: string
+  /**
+   * The `csrftoken` cookie the console set when the sign-in started.
+   *
+   * The console is CSRF-protected: a later call without it answers
+   * `401 {"detail":null}` even when its own token is valid. The vendor CLI keeps a
+   * cookie jar for this; this route carries the value forward by hand.
+   */
+  csrf?: string
 }
 
 /**
@@ -114,7 +122,12 @@ export async function startMistralSignIn(
   if (!response.ok) {
     throw new Error(`mistral: sign-in start failed (HTTP ${response.status})`)
   }
-  return parseStartedSignIn(await response.json(), pkce.verifier)
+  const started = parseStartedSignIn(await response.json(), pkce.verifier)
+  // Keep the cookie the console just set: the exchange needs it, and this route has
+  // no cookie jar.
+  const cookieHeader = response.headers.get('set-cookie') ?? ''
+  const csrf = /csrftoken=([^;]+)/.exec(cookieHeader)?.[1]
+  return csrf === undefined ? started : { ...started, csrf }
 }
 
 /** What one poll said. */
@@ -254,20 +267,43 @@ export const MISTRAL_EXCHANGE_PATH = '/api/vibe/sign-in/exchange'
 export async function exchangeMistralSignIn(
   fetchFn: FetchFn,
   exchangeToken: string,
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal; csrf?: string; sleep?: (ms: number) => Promise<void> } = {},
 ): Promise<string> {
-  const response = await fetchFn(`${MISTRAL_CONSOLE_BASE}${MISTRAL_EXCHANGE_PATH}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'application/json', ...attributionHeaders() },
-    body: JSON.stringify({ exchange_token: exchangeToken }),
-    ...options.signal === undefined ? {} : { signal: options.signal },
-  })
-  if (!response.ok) throw new Error(`mistral: exchanging the sign-in failed (HTTP ${response.status})`)
-  const payload: unknown = await response.json().catch(() => ({}))
-  const body = (typeof payload === 'object' && payload !== null ? payload : {}) as Record<string, unknown>
-  const key = [body.api_key, body.apiKey, body.key].find((value): value is string => typeof value === 'string' && value !== '')
-  if (key === undefined) throw new Error('mistral: the exchange answered without an API key')
-  return key
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    accept: 'application/json',
+    ...attributionHeaders(),
+  }
+  // The console is CSRF-protected: its start answer sets `csrftoken`, and a later
+  // call without it answers `401 {"detail":null}`. The vendor CLI keeps a cookie
+  // jar; this route carries the value forward by hand.
+  if (options.csrf !== undefined) {
+    headers.cookie = `csrftoken=${options.csrf}`
+    headers['x-csrftoken'] = options.csrf
+  }
+  const sleep = options.sleep ?? (async (ms: number) => { await new Promise(resolve => setTimeout(resolve, ms)) })
+  // A 429 here is the console's RATE LIMIT, not a bad token: the same request with
+  // the token in the body answers 429 while one without it answers 401, so the shape
+  // is right and waiting is the correct reaction. The exchange token lives ten
+  // minutes, which this backoff stays well inside.
+  for (let attempt = 0; ; attempt++) {
+    const response = await fetchFn(`${MISTRAL_CONSOLE_BASE}${MISTRAL_EXCHANGE_PATH}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ exchange_token: exchangeToken }),
+      ...options.signal === undefined ? {} : { signal: options.signal },
+    })
+    if (response.status === 429 && attempt < 3) {
+      await sleep(2_000 * (attempt + 1))
+      continue
+    }
+    if (!response.ok) throw new Error(`mistral: exchanging the sign-in failed (HTTP ${response.status})`)
+    const payload: unknown = await response.json().catch(() => ({}))
+    const body = (typeof payload === 'object' && payload !== null ? payload : {}) as Record<string, unknown>
+    const key = [body.api_key, body.apiKey, body.key].find((value): value is string => typeof value === 'string' && value !== '')
+    if (key === undefined) throw new Error('mistral: the exchange answered without an API key')
+    return key
+  }
 }
 
 /**

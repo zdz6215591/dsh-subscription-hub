@@ -823,11 +823,12 @@ export class SubscriptionsAuthController implements AuthController {
           let candidate: string | undefined = resultKey
           try {
             if (candidate === undefined && resultExchange !== undefined) {
-              candidate = await exchangeMistralSignIn(proxiedFetch, resultExchange)
+              candidate = await exchangeMistralSignIn(proxiedFetch, resultExchange, started.csrf === undefined ? {} : { csrf: started.csrf })
             }
           } catch (error) {
-            await writeSignInDiagnostic({ fields, adopted: 'code' })
-            this.lastError.set('mistral', error instanceof Error ? error.message : String(error))
+            const reason = error instanceof Error ? error.message : String(error)
+            await writeSignInDiagnostic({ fields, adopted: 'code', status: reason })
+            this.lastError.set('mistral', reason)
             return
           }
           if (candidate === undefined) {

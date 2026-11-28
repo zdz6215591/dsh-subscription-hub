@@ -190,3 +190,39 @@ test('mistral oauth: a credential is verified against /v1/models before it is st
   const broken = (async () => { throw new Error('network down') }) as unknown as FetchFn
   assert.equal(await verifyMistralKey(broken, 'k'), false, 'a network failure is not a pass')
 })
+test('mistral oauth: the start call keeps the console CSRF cookie for later calls', async () => {
+  const fetchFn = (async () => new Response(JSON.stringify(START_BODY), {
+    status: 200,
+    headers: {
+      'content-type': 'application/json',
+      'set-cookie': 'csrftoken=jDjs7EG0kZPKSRIMSkOHKJmwUqqgrNe2; Path=/; SameSite=Lax; Secure',
+    },
+  })) as unknown as FetchFn
+  const started = await startMistralSignIn(fetchFn)
+  assert.equal(started.csrf, 'jDjs7EG0kZPKSRIMSkOHKJmwUqqgrNe2', 'the exchange needs this cookie')
+})
+
+test('mistral oauth: the exchange carries the CSRF cookie and header', async () => {
+  let headers: Record<string, string> = {}
+  const fetchFn = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    headers = { ...(init?.headers as Record<string, string> ?? {}) }
+    return new Response(JSON.stringify({ api_key: 'mstrl_withcsrf_0123456789' }), { status: 200 })
+  }) as unknown as FetchFn
+  await exchangeMistralSignIn(fetchFn, 'tok', { csrf: 'abc123' })
+  assert.equal(headers.cookie, 'csrftoken=abc123')
+  assert.equal(headers['x-csrftoken'], 'abc123')
+})
+
+test('mistral oauth: a rate-limited exchange waits instead of failing', async () => {
+  let calls = 0
+  const waits: number[] = []
+  const fetchFn = (async () => {
+    calls++
+    if (calls < 3) return new Response('{"message":"Too many requests. Retry later."}', { status: 429 })
+    return new Response(JSON.stringify({ api_key: 'mstrl_afterwait_0123456789' }), { status: 200 })
+  }) as unknown as FetchFn
+  const key = await exchangeMistralSignIn(fetchFn, 'tok', { sleep: async ms => { waits.push(ms) } })
+  assert.equal(key, 'mstrl_afterwait_0123456789')
+  assert.equal(calls, 3)
+  assert.deepEqual(waits, [2_000, 4_000], 'backoff grows, and stays inside the token lifetime')
+})
