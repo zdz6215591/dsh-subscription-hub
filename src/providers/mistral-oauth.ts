@@ -195,6 +195,8 @@ export async function writeSignInDiagnostic(info: {
   fields: string[]
   status?: string
   adopted: 'key' | 'code' | 'none'
+  /** One entry per exchange shape tried, with the console's answer. */
+  attempts?: { shape: string; status: number }[]
 }): Promise<void> {
   const path = mistralSignInDiagnosticPath()
   try {
@@ -267,9 +269,19 @@ export const MISTRAL_EXCHANGE_PATH = '/api/vibe/sign-in/exchange'
 export async function exchangeMistralSignIn(
   fetchFn: FetchFn,
   exchangeToken: string,
-  options: { signal?: AbortSignal; csrf?: string; sleep?: (ms: number) => Promise<void> } = {},
+  options: {
+    signal?: AbortSignal
+    csrf?: string
+    sleep?: (ms: number) => Promise<void>
+    /** The PKCE verifier that produced the start challenge, when the caller has it. */
+    codeVerifier?: string
+    /** The sign-in's process id, for shapes that name it. */
+    processId?: string
+    /** Every shape tried, with the console's answer — for the diagnostic. */
+    attempts?: { shape: string; status: number }[]
+  } = {},
 ): Promise<string> {
-  const headers: Record<string, string> = {
+  const baseHeaders: Record<string, string> = {
     'content-type': 'application/json',
     accept: 'application/json',
     ...attributionHeaders(),
@@ -278,32 +290,67 @@ export async function exchangeMistralSignIn(
   // call without it answers `401 {"detail":null}`. The vendor CLI keeps a cookie
   // jar; this route carries the value forward by hand.
   if (options.csrf !== undefined) {
-    headers.cookie = `csrftoken=${options.csrf}`
-    headers['x-csrftoken'] = options.csrf
+    baseHeaders.cookie = `csrftoken=${options.csrf}`
+    baseHeaders['x-csrftoken'] = options.csrf
   }
   const sleep = options.sleep ?? (async (ms: number) => { await new Promise(resolve => setTimeout(resolve, ms)) })
-  // A 429 here is the console's RATE LIMIT, not a bad token: the same request with
-  // the token in the body answers 429 while one without it answers 401, so the shape
-  // is right and waiting is the correct reaction. The exchange token lives ten
-  // minutes, which this backoff stays well inside.
-  for (let attempt = 0; ; attempt++) {
-    const response = await fetchFn(`${MISTRAL_CONSOLE_BASE}${MISTRAL_EXCHANGE_PATH}`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ exchange_token: exchangeToken }),
-      ...options.signal === undefined ? {} : { signal: options.signal },
+  // Which body the console wants is not published, and a wrong guess answers the
+  // same `401 {"detail":null}` a missing cookie does. So the plausible shapes are
+  // tried in order of likelihood — each is one request, and every answer is
+  // recorded so the next attempt does not have to guess again.
+  const shapes: { name: string; headers: Record<string, string>; body: Record<string, unknown> }[] = []
+  const verifier = options.codeVerifier
+  const process = options.processId
+  shapes.push({ name: 'exchange_token', headers: baseHeaders, body: { exchange_token: exchangeToken } })
+  if (verifier !== undefined) {
+    shapes.push({
+      name: 'exchange_token+code_verifier',
+      headers: baseHeaders,
+      body: { exchange_token: exchangeToken, code_verifier: verifier },
     })
-    if (response.status === 429 && attempt < 3) {
-      await sleep(2_000 * (attempt + 1))
-      continue
+    shapes.push({
+      name: 'bearer+code_verifier',
+      headers: { ...baseHeaders, authorization: `Bearer ${exchangeToken}` },
+      body: { code_verifier: verifier },
+    })
+    if (process !== undefined) {
+      shapes.push({
+        name: 'exchange_token+code_verifier+process_id',
+        headers: baseHeaders,
+        body: { exchange_token: exchangeToken, code_verifier: verifier, process_id: process },
+      })
     }
-    if (!response.ok) throw new Error(`mistral: exchanging the sign-in failed (HTTP ${response.status})`)
-    const payload: unknown = await response.json().catch(() => ({}))
-    const body = (typeof payload === 'object' && payload !== null ? payload : {}) as Record<string, unknown>
-    const key = [body.api_key, body.apiKey, body.key].find((value): value is string => typeof value === 'string' && value !== '')
-    if (key === undefined) throw new Error('mistral: the exchange answered without an API key')
-    return key
   }
+
+  let lastStatus = 0
+  for (const shape of shapes) {
+    for (let attempt = 0; attempt <= 3; attempt++) {
+      const response = await fetchFn(`${MISTRAL_CONSOLE_BASE}${MISTRAL_EXCHANGE_PATH}`, {
+        method: 'POST',
+        headers: shape.headers,
+        body: JSON.stringify(shape.body),
+        ...options.signal === undefined ? {} : { signal: options.signal },
+      })
+      lastStatus = response.status
+      if (response.status === 429 && attempt < 3) {
+        // A rate limit is not a verdict on the shape: wait and ask again. The
+        // exchange token lives ten minutes, which this stays inside.
+        await sleep(2_000 * (attempt + 1))
+        continue
+      }
+      if (response.ok) {
+        const payload: unknown = await response.json().catch(() => ({}))
+        const body = (typeof payload === 'object' && payload !== null ? payload : {}) as Record<string, unknown>
+        const key = [body.api_key, body.apiKey, body.key].find((value): value is string => typeof value === 'string' && value !== '')
+        if (key === undefined) throw new Error(`mistral: the exchange (${shape.name}) answered without an API key`)
+        options.attempts?.push({ shape: shape.name, status: response.status })
+        return key
+      }
+      break
+    }
+    options.attempts?.push({ shape: shape.name, status: lastStatus })
+  }
+  throw new Error(`mistral: exchanging the sign-in failed (HTTP ${lastStatus})`)
 }
 
 /**

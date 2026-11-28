@@ -820,14 +820,21 @@ export class SubscriptionsAuthController implements AuthController {
           // The poll may hand back a key outright, or an `exchange_token` that must be
           // exchanged. Only a credential the inference API ACCEPTS is stored: a token
           // that is not an API key would list an account that can never answer.
+          // Every exchange shape tried is recorded, so a refusal names itself.
+          const exchangeAttempts: { shape: string; status: number }[] = []
           let candidate: string | undefined = resultKey
           try {
             if (candidate === undefined && resultExchange !== undefined) {
-              candidate = await exchangeMistralSignIn(proxiedFetch, resultExchange, started.csrf === undefined ? {} : { csrf: started.csrf })
+              candidate = await exchangeMistralSignIn(proxiedFetch, resultExchange, {
+                codeVerifier: started.verifier,
+                processId: started.processId,
+                attempts: exchangeAttempts,
+                ...started.csrf === undefined ? {} : { csrf: started.csrf },
+              })
             }
           } catch (error) {
             const reason = error instanceof Error ? error.message : String(error)
-            await writeSignInDiagnostic({ fields, adopted: 'code', status: reason })
+            await writeSignInDiagnostic({ fields, adopted: 'code', status: reason, attempts: exchangeAttempts })
             this.lastError.set('mistral', reason)
             return
           }

@@ -226,3 +226,39 @@ test('mistral oauth: a rate-limited exchange waits instead of failing', async ()
   assert.equal(calls, 3)
   assert.deepEqual(waits, [2_000, 4_000], 'backoff grows, and stays inside the token lifetime')
 })
+test('mistral oauth: the ladder tries each shape once and reports what each answered', async () => {
+  // The console answers the SAME 401 to a wrong body and to a missing cookie, so the
+  // only way to learn which shape it wants is to try them and record the answers.
+  const seen: { auth?: string; body: Record<string, unknown> }[] = []
+  const fetchFn = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const headers = init?.headers as Record<string, string>
+    seen.push({ ...headers.authorization === undefined ? {} : { auth: headers.authorization }, body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown> })
+    // Only the shape carrying the verifier is accepted.
+    const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+    return body.code_verifier === undefined
+      ? new Response('{"detail":null}', { status: 401 })
+      : new Response(JSON.stringify({ api_key: 'mstrl_ladder_0123456789abcd' }), { status: 200 })
+  }) as unknown as FetchFn
+  const attempts: { shape: string; status: number }[] = []
+  const key = await exchangeMistralSignIn(fetchFn, 'tok', {
+    codeVerifier: 'verifier-value',
+    processId: 'proc-1',
+    attempts,
+    sleep: async () => {},
+  })
+  assert.equal(key, 'mstrl_ladder_0123456789abcd')
+  assert.deepEqual(attempts.map(attempt => attempt.status), [401, 200])
+  assert.equal(seen[0]?.body.code_verifier, undefined, 'the bare shape goes first')
+  assert.equal(seen[1]?.body.code_verifier, 'verifier-value')
+})
+
+test('mistral oauth: every shape refused ends with the console\u2019s own status', async () => {
+  const fetchFn = (async () => new Response('{"detail":null}', { status: 401 })) as unknown as FetchFn
+  const attempts: { shape: string; status: number }[] = []
+  await assert.rejects(
+    exchangeMistralSignIn(fetchFn, 'tok', { codeVerifier: 'v', processId: 'p', attempts, sleep: async () => {} }),
+    /failed \(HTTP 401\)/,
+  )
+  assert.ok(attempts.length >= 3, 'the whole ladder was tried')
+  assert.ok(attempts.every(attempt => attempt.status === 401))
+})
