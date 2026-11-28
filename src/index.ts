@@ -23,8 +23,13 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { OAuthFlowManager, type OAuthAttempt } from './auth/oauth-flow.js'
 import { DeviceFlowManager, type DeviceAttempt } from './auth/device-flow.js'
-import { readFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { promisify } from 'node:util'
+
+const execFileAsync = promisify(execFile)
 import { readClaudeCodeCredentials, refreshClaudeSynced } from './auth/claude-code-creds.js'
 import { BadRequest, registerAuthRpc } from './auth/rpc.js'
 import { CodexClientVersionCache } from './providers/codex-client-version.js'
@@ -232,7 +237,7 @@ import {
   sessionFromKiroKey,
 } from './providers/kiro/index.js'
 import type { KiroSignIn } from './providers/kiro/index.js'
-import { readMistralVibeKey } from './providers/mistral-vibe.js'
+import { importLocalMistralKey } from './providers/mistral-keyring.js'
 import {
   MistralAdapter,
   assertUsableMistralKey,
@@ -764,20 +769,40 @@ export class SubscriptionsAuthController implements AuthController {
       return { authorizeUrl: login.authorizeUrl }
     }
     if (provider === 'mistral') {
-      // Two ways in, and neither is a browser sign-in: the Vibe CLI's key from
-      // this machine (the one that draws the plan allowance), or a pasted key.
+      // Mistral's own browser sign-in exists only inside the closed-source Vibe
+      // CLI, which stores the credential it provisions in the OS keyring or
+      // ~/.vibe/.env. So import reads that (keyring first, as the CLI prefers),
+      // and a pasted key remains the fallback.
       if (method === 'import') {
-        const vibeKey = await readMistralVibeKey()
-        if (vibeKey === undefined) {
-          throw new Error('mistral: no Vibe CLI sign-in found at ~/.vibe/.env. Run `vibe --setup`, or paste an API key.')
+        const imported = await importLocalMistralKey({
+          run: async script => {
+            const scriptPath = join(tmpdir(), `dsh-mistral-cred-${process.pid}-${Date.now()}.ps1`)
+            try {
+              await writeFile(scriptPath, script, 'utf8')
+              const { stdout } = await execFileAsync(
+                'powershell.exe',
+                ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
+                { timeout: 20_000, windowsHide: true, encoding: 'utf8' },
+              )
+              return stdout
+            } finally {
+              await rm(scriptPath, { force: true })
+            }
+          },
+        })
+        if (imported === undefined) {
+          throw new Error('mistral: no Vibe CLI credential found (system keyring or ~/.vibe/.env). Run the Vibe CLI once and complete its browser sign-in, or paste an API key.')
         }
-        const session = sessionFromMistralKey(assertUsableMistralKey(vibeKey, 'mistral'), `mistral-vibe-${maskMistralKey(vibeKey)}`)
+        const key = assertUsableMistralKey(imported.key, 'mistral')
+        const session = sessionFromMistralKey(key, `mistral-vibe-${maskMistralKey(key)}`)
         await this.persist('mistral', session)
         this.lastError.delete('mistral')
         this.onAuthChanged('mistral', accountKeyOf('mistral', session))
         return { authorizeUrl: '' }
       }
-      return { authorizeUrl: '' }
+      // No in-plugin OAuth: open Mistral's own key page, which is where the
+      // browser sign-in and key creation happen.
+      return { authorizeUrl: 'https://chat.mistral.ai/code/extensions' }
     }
     if (provider === 'cline') {
       // Cline has no OAuth grant and no device flow: its only login is a pasted

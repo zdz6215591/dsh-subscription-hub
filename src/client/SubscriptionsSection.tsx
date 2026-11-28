@@ -3113,13 +3113,25 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                         </button>
                       )}
                       {id === 'mistral' && (
-                        <button
-                          type="button"
-                          style={styles.buttonSmall}
-                          onClick={() => { setManualOpen(prev => ({ ...prev, [id]: !prev[id] })) }}
-                        >
-                          {manualOpen[id] ? t('cancel') : t('loginMistral')}
-                        </button>
+                        <>
+                          <button
+                            type="button"
+                            style={styles.buttonSmall}
+                            onClick={() => { void login(id) }}
+                          >
+                            {t('loginMistral')}
+                          </button>
+                          <button
+                            type="button"
+                            style={styles.buttonSmall}
+                            onClick={() => { setManualOpen(prev => ({ ...prev, [id]: !prev[id] })) }}
+                          >
+                            {manualOpen[id] ? t('cancel') : t('mistralPasteKey')}
+                          </button>
+                          <button type="button" style={styles.buttonSmall} onClick={() => { void login(id, 'import') }}>
+                            {t('mistralImport')}
+                          </button>
+                        </>
                       )}
                       {id === 'kiro' && (
                         <>
