@@ -239,6 +239,7 @@ import {
 import type { KiroSignIn } from './providers/kiro/index.js'
 import { importLocalMistralKey } from './providers/mistral-keyring.js'
 import { VIBE_INSTALL_HINT, runVibeSignIn } from './providers/mistral-signin.js'
+import { pollMistralSignIn, startMistralSignIn, writeSignInDiagnostic } from './providers/mistral-oauth.js'
 import {
   MistralAdapter,
   assertUsableMistralKey,
@@ -801,24 +802,44 @@ export class SubscriptionsAuthController implements AuthController {
         this.onAuthChanged('mistral', accountKeyOf('mistral', session))
         return { authorizeUrl: '' }
       }
-      // One click: start Mistral's own setup (its browser login IS the sign-in),
-      // then adopt whatever credential it provisions into the keyring or
-      // ~/.vibe/.env. Nothing private is called, and no protocol is guessed.
-      void runVibeSignIn().then(async outcome => {
-        if (outcome.kind !== 'found') {
-          this.lastError.set('mistral', outcome.kind === 'no-cli'
-            ? `mistral: the Vibe CLI is not installed; run ${VIBE_INSTALL_HINT}, or paste a key`
-            : 'mistral: sign-in was not completed in time; paste a key instead')
-          return
-        }
-        const session = sessionFromMistralKey(assertUsableMistralKey(outcome.key, 'mistral'), `mistral-vibe-${maskMistralKey(outcome.key)}`)
-        await this.persist('mistral', session)
-        this.lastError.delete('mistral')
-        this.onAuthChanged('mistral', accountKeyOf('mistral', session))
-      }).catch(error => {
-        this.lastError.set('mistral', `mistral: sign-in failed (${error instanceof Error ? error.message : String(error)})`)
-      })
-      return { authorizeUrl: 'https://chat.mistral.ai/code/extensions' }
+      // Zero-dependency sign-in, reverse-engineered from the vendor CLI: this route
+      // starts a PKCE sign-in, the browser approves it, and the poll returns what
+      // the page provisioned. The card opens the returned URL for us.
+      try {
+        const started = await startMistralSignIn(proxiedFetch)
+        void pollMistralSignIn(proxiedFetch, started).then(async result => {
+          if (result.kind !== 'ready' || result.key === undefined) {
+            await writeSignInDiagnostic({
+              fields: result.kind === 'ready' ? result.fields : [],
+              ...result.kind === 'failed' ? { status: result.reason } : {},
+              adopted: result.kind === 'ready' && result.key !== undefined ? 'key' : result.kind === 'ready' && result.code !== undefined ? 'code' : 'none',
+            })
+            this.lastError.set('mistral', result.kind === 'failed'
+              ? `mistral: sign-in did not complete (${result.reason})`
+              : 'mistral: the sign-in answered with a code instead of a key; paste an API key for now')
+            return
+          }
+          const session = sessionFromMistralKey(assertUsableMistralKey(result.key, 'mistral'), `mistral-vibe-${maskMistralKey(result.key)}`)
+          await this.persist('mistral', session)
+          this.lastError.delete('mistral')
+          this.onAuthChanged('mistral', accountKeyOf('mistral', session))
+        }).catch(error => {
+          this.lastError.set('mistral', `mistral: sign-in failed (${error instanceof Error ? error.message : String(error)})`)
+        })
+        return { authorizeUrl: started.signInUrl }
+      } catch (error) {
+        // Fall back to the vendor CLI when the console refuses (an older account, a
+        // blocked network): its own setup still provisions a credential we import.
+        this.lastError.set('mistral', `mistral: could not start the browser sign-in (${error instanceof Error ? error.message : String(error)}); trying the Vibe CLI`)
+        void runVibeSignIn().then(async outcome => {
+          if (outcome.kind !== 'found') return
+          const session = sessionFromMistralKey(assertUsableMistralKey(outcome.key, 'mistral'), `mistral-vibe-${maskMistralKey(outcome.key)}`)
+          await this.persist('mistral', session)
+          this.lastError.delete('mistral')
+          this.onAuthChanged('mistral', accountKeyOf('mistral', session))
+        }).catch(() => undefined)
+        return { authorizeUrl: 'https://chat.mistral.ai/code/extensions' }
+      }
     }
     if (provider === 'cline') {
       // Cline has no OAuth grant and no device flow: its only login is a pasted
