@@ -65,23 +65,31 @@ test('mistral: the roster keeps what /v1/models states and nothing it does not',
   assert.equal(models[1]?.supportsImages, false)
 })
 
-test('mistral: billing percentages stay percentages', () => {
+test('mistral: usage_percentage is a fraction of the budget, so 0.0003533 is 0.035%', () => {
+  // Measured on the live key: one ~half-cent chat against a 15 USD API budget.
   const usage = mistralUsageFromBilling(
-    { plan_name: 'Vibe Pro' },
+    { plan_name: 'EDU' },
     {
-      vibe_budget: { usage_percentage: 40, initial_budget: 100 },
-      api_budget: { usage_percentage: 0, initial_budget: 50 },
+      vibe_budget: { usage_percentage: 0, initial_budget: 150, currency: 'USD', reset_at: '2026-12-01T00:00:00Z' },
+      api_budget: { usage_percentage: 0.0003533333333333333, initial_budget: 15, currency: 'USD', reset_at: '2026-12-01T00:00:00Z' },
     },
   )
   assert.equal(usage.supported, true)
   if (!usage.supported) throw new Error('unreachable')
-  assert.equal(usage.plan, 'Vibe Pro')
-  assert.equal(usage.unit, 'percent')
+  assert.equal(usage.plan, 'EDU')
   const windows = usage.windows ?? []
   assert.equal(windows.length, 2)
-  assert.equal(windows[0]?.usedPercent, 40)
-  assert.equal(windows[0]?.remaining, 60, 'remaining is derived from the stated size')
-  assert.equal(windows[1]?.usedPercent, 0)
+  assert.equal(windows[0]?.usedPercent, 0)
+  assert.equal(windows[0]?.limit, 150)
+  assert.equal(windows[0]?.unit, 'currency', 'the amounts are dollars, not a percentage')
+  // 100x off if the fraction were read as a percentage.
+  assert.ok(Math.abs((windows[1]?.usedPercent ?? 0) - 0.035333333) < 1e-6)
+  assert.ok(Math.abs((windows[1]?.used ?? 0) - 0.0053) < 1e-4)
+  assert.equal(windows[1]?.resetsAt, Date.parse('2026-12-01T00:00:00Z'), 'the reset date is kept')
+  // A value above 1 can only be a percentage.
+  const doubled = mistralUsageFromBilling({}, { budget: { usage_percentage: 40, initial_budget: 100 } })
+  if (!doubled.supported) throw new Error('unreachable')
+  assert.equal(doubled.windows?.[0]?.usedPercent, 40)
 })
 
 test('mistral: an empty billing answer reports no quota instead of zeroes', () => {

@@ -16,7 +16,7 @@
  *   - **The quota is published** for an API key: `/billing/subscription` names the
  *     plan and `/billing/budget` reports the Vibe and API allowances as a
  *     percentage of their initial size. Those are percentages, not token counts,
- *     so that is exactly how they are reported (`unit: 'percent'`).
+ *     as a FRACTION, which is why the parser scales it and reports the budget in
  *   - **Prompt caching** is opt-in per request (`prompt_cache_key`). This route
  *     does not send one: a stable key per conversation is what makes it hit, and
  *     the hub does not own the conversation's lifetime. A cache that never hits
@@ -132,9 +132,22 @@ interface MistralBudget {
 /**
  * Parse the plan and the budget windows from the two billing answers.
  *
- * A percentage is reported as a percentage: converting it to tokens would invent
- * a denominator. The budget's own size is carried as the window's `limit` so a
- * reader can see what the percentage is of.
+ * Measured on a live key:
+ *
+ *   /billing/subscription → { "plan_name": "EDU", … }
+ *   /billing/budget       → { "vibe_budget": { "usage_percentage": 0.0,
+ *                                              "initial_budget": 150.0,
+ *                                              "currency": "USD",
+ *                                              "reset_at": "2026-12-01T00:00:00Z" }, … }
+ *
+ * `usage_percentage` is a FRACTION of the budget, not a 0–100 percentage: a chat
+ * costing about half a cent against `initial_budget: 15` came back as
+ * `0.0003533…`, i.e. used/budget — 100× smaller than the percentage it looks
+ * like. A value above 1 can only be a percentage, so it is taken as one; that is
+ * the single case where the field is not ambiguous.
+ *
+ * The amounts are money, so the window is `unit: 'currency'` and `limit`, `used`
+ * and `remaining` are all in the entry's `currency`.
  *
  * @param subscription - `/billing/subscription` body.
  * @param budget - `/billing/budget` body.
@@ -145,34 +158,37 @@ export function mistralUsageFromBilling(subscription: unknown, budget: unknown):
   const plan = [planRecord.plan_name, planRecord.plan, planRecord.planName].find(value => typeof value === 'string' && value !== '') as string | undefined
   const body = (typeof budget === 'object' && budget !== null ? budget : {}) as Record<string, unknown>
   const windows: UsageWindow[] = []
-  const add = (entry: unknown, id: string, label: string): void => {
+  const add = (entry: unknown, scope: string): void => {
     if (typeof entry !== 'object' || entry === null) return
-    const record = entry as MistralBudget
-    const percent = [record.usage_percentage, record.usagePercentage].find(value => typeof value === 'number') as number | undefined
-    const size = [record.initial_budget, record.initialBudget, record.budget].find(value => typeof value === 'number') as number | undefined
-    if (percent === undefined && size === undefined) return
-    const usedPercent = percent === undefined ? 0 : Math.min(100, Math.max(0, percent))
+    const record = entry as MistralBudget & { reset_at?: unknown; resetsAt?: unknown }
+    const raw = [record.usage_percentage, record.usagePercentage].find(value => typeof value === 'number' && Number.isFinite(value)) as number | undefined
+    const size = [record.initial_budget, record.initialBudget, record.budget].find(value => typeof value === 'number' && Number.isFinite(value)) as number | undefined
+    if (raw === undefined && size === undefined) return
+    const fraction = raw === undefined ? 0 : raw > 1 ? raw / 100 : raw
+    const usedPercent = Math.min(100, Math.max(0, fraction * 100))
+    const reset = [record.reset_at, record.resetsAt].find(value => typeof value === 'string' || typeof value === 'number')
+    const resetsAt = typeof reset === 'number' ? reset : typeof reset === 'string' ? Date.parse(reset) : Number.NaN
     windows.push({
       kind: 'other',
-      scope: label,
+      scope,
       usedPercent,
+      unit: 'currency',
       ...size === undefined ? {} : {
         limit: size,
-        remaining: Math.max(0, size * (1 - usedPercent / 100)),
+        used: size * fraction,
+        remaining: Math.max(0, size * (1 - fraction)),
       },
-      unit: 'percent',
-      ...id === '' ? {} : {},
+      ...Number.isFinite(resetsAt) ? { resetsAt } : {},
     })
   }
-  add(body.vibe_budget, 'vibe', 'Vibe budget')
-  add(body.api_budget, 'api', 'API budget')
-  if (windows.length === 0) add(body.budget, 'budget', 'Monthly budget')
+  add(body.vibe_budget, 'Vibe budget')
+  add(body.api_budget, 'API budget')
+  if (windows.length === 0) add(body.budget, 'Monthly budget')
   if (windows.length === 0) return { supported: false }
   return {
     supported: true,
     windows,
     ...plan === undefined ? {} : { plan },
-    unit: 'percent',
   }
 }
 
