@@ -138,10 +138,19 @@ export function buildKiroRequest(options: GenerateOptions, messages: readonly Tr
   const pushResults = (): void => {
     if (results.length === 0) return
     const previous = entries.at(-1)
+    // A result belongs to the message IMMEDIATELY after the assistant turn that
+    // made the call. Merging into whatever happens to be last is what broke that:
+    // when a text-only user message sat between the call and its results, they were
+    // pushed onto the TEXT message instead, and Kiro answered
+    // TOOL_USE_RESULT_MISMATCH ("each tool_use needs its tool_result in the very
+    // next message"). So a pending call forces a carrier entry of its own.
+    const callPending = previous !== undefined
+      && 'assistantResponseMessage' in previous
+      && ((previous.assistantResponseMessage.toolUses ?? []) as unknown[]).length > 0
     const context = (previous !== undefined && 'userInputMessage' in previous
       ? previous.userInputMessage.userInputMessageContext as { toolResults?: Record<string, unknown>[] } | undefined
       : undefined)
-    if (context !== undefined && Array.isArray(context.toolResults)) {
+    if (!callPending && context !== undefined && Array.isArray(context.toolResults)) {
       context.toolResults.push(...results.splice(0))
       return
     }
@@ -241,6 +250,66 @@ export function buildKiroRequest(options: GenerateOptions, messages: readonly Tr
     else entries.push(interrupted)
   }
 
+  // Kiro validates the pairing, not just its presence: every `toolUse` must be
+  // answered by a `toolResult` in the VERY NEXT message. A text-only user message
+  // that sat between a call and its results therefore broke the turn
+  // (TOOL_USE_RESULT_MISMATCH on three ids at once), so the pairing is normalised
+  // once the whole history exists: each assistant turn keeps only the results that
+  // answer its own calls in the entry right after it, and any other results move
+  // with them. Results with no call, and calls with no result, are left to the
+  // unanswered pass below.
+  const hoistResults = (list: KiroEntry[]): KiroEntry[] => {
+    /** toolUseId → the result built for it, wherever it currently sits. */
+    const byId = new Map<string, Record<string, unknown>>()
+    const strip = (entry: KiroEntry): void => {
+      if (!('userInputMessage' in entry)) return
+      const context = entry.userInputMessage.userInputMessageContext as { toolResults?: Record<string, unknown>[] } | undefined
+      if (context === undefined || !Array.isArray(context.toolResults)) return
+      for (const result of context.toolResults) {
+        const id = typeof result.toolUseId === 'string' ? result.toolUseId : ''
+        if (id !== '' && !byId.has(id)) byId.set(id, result)
+      }
+      delete context.toolResults
+    }
+    list.forEach(strip)
+    const out: KiroEntry[] = []
+    for (const entry of list) {
+      out.push(entry)
+      if (!('assistantResponseMessage' in entry)) continue
+      const uses = (entry.assistantResponseMessage.toolUses ?? []) as { toolUseId?: unknown }[]
+      if (uses.length === 0) continue
+      const matched: Record<string, unknown>[] = []
+      for (const use of uses) {
+        const id = typeof use.toolUseId === 'string' ? use.toolUseId : ''
+        const result = id === '' ? undefined : byId.get(id)
+        if (result !== undefined) matched.push(result)
+      }
+      if (matched.length === 0) continue
+      // The carrier goes directly after the call. Its text is empty, so a real user
+      // message that follows still reads as the message being answered.
+      out.push({
+        userInputMessage: {
+          content: '',
+          modelId,
+          origin: KIRO_ORIGIN,
+          images: [],
+          userInputMessageContext: { toolResults: matched },
+        },
+      })
+    }
+    // An entry whose ONLY content was the results just hoisted is now empty; a
+    // placeholder turn is not something Kiro asked for, so it goes.
+    const isEmpty = (entry: KiroEntry): boolean => {
+      if (!('userInputMessage' in entry)) return false
+      const message = entry.userInputMessage
+      const text = typeof message.content === 'string' ? message.content : ''
+      const context = message.userInputMessageContext as { toolResults?: unknown[] } | undefined
+      const images = Array.isArray(message.images) ? message.images : []
+      return text.trim() === '' && images.length === 0 && (context?.toolResults ?? []).length === 0
+    }
+    return out.filter(entry => !isEmpty(entry))
+  }
+  entries.splice(0, entries.length, ...hoistResults(entries))
   const current = entries.pop()
   const currentMessage = current !== undefined && 'userInputMessage' in current
     ? current.userInputMessage
