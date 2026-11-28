@@ -223,6 +223,8 @@ export interface ResponsesStreamEvent {
   }
   response?: {
     status?: string
+    /** The final output items, as `response.completed` lists them. */
+    output?: Array<{ type?: string; call_id?: string }>
     usage?: ResponsesUsage
     error?: { code?: string; message?: string }
     incomplete_details?: { reason?: string }
@@ -433,7 +435,14 @@ export class ResponsesStreamTranslator {
         if (item.type === 'function_call') {
           const key = `${item.id}:call`
           // The provider may deliver the complete arguments only on done.
-          const block = this.blocks.get(key)
+          let block = this.blocks.get(key)
+          if (block === undefined && !this.order.some(open => open.kind === 'tool-call' && open.callId !== '' && open.callId === item.call_id)) {
+            // Neither the added event nor any delta arrived: the done payload is
+            // the whole call. Dropping it ended the turn as a plain stop and the
+            // tool never ran (the reference's 6ff264b).
+            this.sawToolCall = true
+            block = this.open(key, 'tool-call', chunks, item.call_id ?? '', item.name)
+          }
           if (block !== undefined && block.text.length === 0 && item.arguments !== undefined) {
             block.text = item.arguments
           }
@@ -459,7 +468,20 @@ export class ResponsesStreamTranslator {
         this.closeAll(chunks)
         const usage = event.response?.usage
         if (usage !== undefined) chunks.push({ type: 'usage', usage: mapResponsesUsage(usage) })
-        if (this.order.length === 0) {
+        // The final output list can name a call no event assembled. Finishing as
+        // a normal stop would silently skip the tool, so the turn fails loudly.
+        const represented = new Set(this.order.filter(block => block.kind === 'tool-call').map(block => block.callId))
+        const unassembled = (event.response?.output ?? []).some(item =>
+          item.type === 'function_call' && typeof item.call_id === 'string' && item.call_id !== '' && !represented.has(item.call_id))
+        if (unassembled) {
+          chunks.push({
+            type: 'finish',
+            reason: {
+              kind: 'error',
+              failure: { message: 'completed response contains an unassembled function call', code: 'MALFORMED_RESPONSE' },
+            },
+          })
+        } else if (this.order.length === 0) {
           chunks.push({
             type: 'finish',
             reason: {

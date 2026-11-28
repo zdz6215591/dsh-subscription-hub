@@ -21,6 +21,7 @@ import {
   getAccountSession,
   listAccounts,
   loadStore,
+  patchAccountSession,
   saveAccountSession,
   setDefaultAccount,
 } from '../src/auth/store.js'
@@ -107,6 +108,18 @@ test('a store file saved with a UTF-8 BOM still loads', async () => {
   writeFileSync(path, `\uFEFF${readFileSync(path, 'utf8')}`)
   const store = await loadStore(path)
   assert.equal(store.codex?.accounts['acct-1']?.accessToken, CODEX.accessToken)
+})
+
+test('a patch changes only the named fields, so a newer refresh is not undone', async () => {
+  // agy heals its project id from a session read before the call; a refresh
+  // that rotated the tokens meanwhile must survive the write.
+  const path = storePath()
+  await saveAccountSession('codex', 'acct-1', CODEX, path)
+  await saveAccountSession('codex', 'acct-1', { ...CODEX, accessToken: 'rotated' }, path)
+  assert.equal(await patchAccountSession('codex', 'acct-1', { accountId: 'acct-1' }, path), true)
+  const store = await loadStore(path)
+  assert.equal(store.codex?.accounts['acct-1']?.accessToken, 'rotated', 'the newer token survives')
+  assert.equal(await patchAccountSession('codex', 'missing', { accountId: 'x' }, path), false, 'an absent account is not created')
 })
 
 test('writes to one path settle in call order', async () => {

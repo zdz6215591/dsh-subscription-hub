@@ -159,7 +159,6 @@ export class KiroAdapter extends LlmAdapter {
       void writeKiroRosterDiagnostic({
         at: Date.now(),
         region: session.region ?? KIRO_DEFAULT_REGION,
-        tokenTail: session.accessToken.slice(-6),
         count: roster.models.length,
         api: roster.api,
         pages: roster.pages,
@@ -197,7 +196,6 @@ export class KiroAdapter extends LlmAdapter {
       void writeKiroRosterDiagnostic({
         at: Date.now(),
         region: 'unknown',
-        tokenTail: 'unknown',
         count: 0,
         api: 'management',
         pages: 0,

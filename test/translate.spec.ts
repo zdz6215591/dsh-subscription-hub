@@ -352,6 +352,32 @@ test('Responses translator: response.failed maps context overflow and quota', ()
   )
 })
 
+test('Responses translator: a function call carried only by its done event still runs', () => {
+  // No output_item.added and no argument deltas: the done payload is the call.
+  const translator = new ResponsesStreamTranslator()
+  const chunks = [
+    ...translator.push({ type: 'response.output_item.done', item: { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'bash', arguments: '{"cmd":"ls"}' } }),
+    ...translator.push({ type: 'response.completed', response: { usage: { input_tokens: 1, output_tokens: 1 } } }),
+  ]
+  const end = chunks.find(chunk => chunk.type === 'block-end') as { block: { type: string; id: string; arguments: string } } | undefined
+  assert.equal(end?.block.type, 'tool-call')
+  assert.equal(end?.block.id, 'call_1')
+  assert.equal(end?.block.arguments, '{"cmd":"ls"}')
+  assert.deepEqual(chunks.at(-1), { type: 'finish', reason: { kind: 'tool-calls' } })
+})
+
+test('Responses translator: a call the final output names but no event assembled fails the turn', () => {
+  const translator = new ResponsesStreamTranslator()
+  translator.push({ type: 'response.output_text.delta', item_id: 'msg_1', delta: 'ok' })
+  const chunks = translator.push({
+    type: 'response.completed',
+    response: { output: [{ type: 'function_call', call_id: 'call_lost' }], usage: { input_tokens: 1, output_tokens: 1 } },
+  })
+  const finish = chunks.at(-1) as { reason: { kind: string; failure?: { code: string } } }
+  assert.equal(finish.reason.kind, 'error', 'a silently skipped tool would read as a normal stop')
+  assert.equal(finish.reason.failure?.code, 'MALFORMED_RESPONSE')
+})
+
 test('Responses translator: a streamed error event is read from its nested error object', () => {
   // Codex sends the facts under `error`; reading only the top level made
   // every streamed overflow or quota failure a generic SERVER error.

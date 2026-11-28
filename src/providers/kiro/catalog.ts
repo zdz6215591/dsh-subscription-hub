@@ -76,8 +76,6 @@ export function parseKiroModels(payload: unknown): { models: KiroModel[]; nextTo
 export interface KiroRosterDiagnostic {
   at: number
   region: string
-  /** Last six characters of the token, to tell two accounts apart. */
-  tokenTail: string
   count: number
   /** The API that answered. */
   api: 'management' | 'bearer'

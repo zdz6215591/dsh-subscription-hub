@@ -24,12 +24,29 @@ import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attac
 import { OAuthFlowManager, type OAuthAttempt } from './auth/oauth-flow.js'
 import { DeviceFlowManager, type DeviceAttempt } from './auth/device-flow.js'
 import { execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 
 const execFileAsync = promisify(execFile)
+
+/**
+ * A Kiro sign-in's account label. It keys the stored account, so it must stay
+ * the same across sign-ins of one account: the access token changes every
+ * time, and a label cut from it made each re-sign-in a duplicate account that
+ * orphaned the old one's refused-model records. The profile ARN names the
+ * account; the refresh token is the fallback when Kiro sent no profile.
+ * @param source - the sign-in method, for a readable prefix.
+ * @param profileArn - the profile the sign-in belongs to, when known.
+ * @param refreshToken - the sign-in's refresh token.
+ * @returns a stable, non-secret label.
+ */
+function kiroAccountLabel(source: string, profileArn: string | undefined, refreshToken: string): string {
+  const identity = profileArn !== undefined && profileArn !== '' ? profileArn : refreshToken
+  return `kiro-${source.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${createHash('sha256').update(identity).digest('hex').slice(0, 10)}`
+}
 import { readClaudeCodeCredentials, refreshClaudeSynced } from './auth/claude-code-creds.js'
 import { BadRequest, registerAuthRpc } from './auth/rpc.js'
 import { CodexClientVersionCache } from './providers/codex-client-version.js'
@@ -816,7 +833,13 @@ export class SubscriptionsAuthController implements AuthController {
       // the page provisioned. The card opens the returned URL for us.
       try {
         const started = await startMistralSignIn(proxiedFetch)
+        // A second click starts a new sign-in; the claim makes the older poller's
+        // outcome stale, so it can neither store a key nor overwrite the newer
+        // attempt's status when it finally times out.
+        const claim = this.claim('mistral')
+        const current = (): boolean => this.claims.get('mistral') === claim
         void pollMistralSignIn(proxiedFetch, started).then(async result => {
+          if (!current()) return
           const fields = result.kind === 'ready' ? result.fields : []
           if (result.kind === 'failed') {
             await writeSignInDiagnostic({ fields, status: result.reason, adopted: 'none' })
@@ -858,10 +881,12 @@ export class SubscriptionsAuthController implements AuthController {
             return
           }
           const session = sessionFromMistralKey(assertUsableMistralKey(candidate, 'mistral'), `mistral-vibe-${maskMistralKey(candidate)}`)
+          if (!current()) return
           await this.persist('mistral', session)
           this.lastError.delete('mistral')
           this.onAuthChanged('mistral', accountKeyOf('mistral', session))
         }).catch(error => {
+          if (!current()) return
           this.lastError.set('mistral', `mistral: sign-in failed (${error instanceof Error ? error.message : String(error)})`)
         })
         return { authorizeUrl: started.signInUrl }
@@ -917,7 +942,7 @@ export class SubscriptionsAuthController implements AuthController {
           ...local.profileArn === undefined ? {} : { profileArn: local.profileArn },
           ...local.clientId === undefined ? {} : { clientId: local.clientId },
           ...local.clientSecret === undefined ? {} : { clientSecret: local.clientSecret },
-        }, `kiro-local-${local.accessToken.slice(-6)}`, proxiedFetch)
+        }, kiroAccountLabel('local', local.profileArn, local.refreshToken), proxiedFetch)
         await this.persist('kiro', session)
         this.lastError.delete('kiro')
         this.onAuthChanged('kiro', accountKeyOf('kiro', session))
@@ -1013,7 +1038,7 @@ export class SubscriptionsAuthController implements AuthController {
       if (!outcome.ok) throw new Error(outcome.error)
       const session = await sessionFromKiroSignIn(
         outcome.result,
-        `kiro-${outcome.result.loginProvider.toLowerCase()}-${outcome.result.accessToken.slice(-6)}`,
+        kiroAccountLabel(outcome.result.loginProvider, outcome.result.profileArn, outcome.result.refreshToken),
         proxiedFetch,
       )
       if (this.claims.get('kiro') !== claim) return

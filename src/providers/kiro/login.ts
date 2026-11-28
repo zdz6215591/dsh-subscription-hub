@@ -363,7 +363,18 @@ export async function startKiroSignIn(options: {
       finish({ ok: false, error: 'enter a valid AWS region' })
       throw new Error('enter a valid AWS region')
     }
-    authorizeUrl = await startAws(options.direct.method, issuerUrl, region)
+    try {
+      authorizeUrl = await startAws(options.direct.method, issuerUrl, region)
+    } catch (error) {
+      // The caller gets no handle to cancel a sign-in that never started, so
+      // release the loopback port now instead of holding it until the timeout
+      // (repeated failures used to exhaust the ports the callback can use).
+      const message = error instanceof Error ? error.message : String(error)
+      finish({ ok: false, error: message })
+      clearTimeout(timer)
+      server.close()
+      throw error
+    }
     instructions = 'Complete the AWS sign-in in your browser, then come back here.'
   } else {
     const query = new URLSearchParams({

@@ -13,7 +13,7 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { FlowSpec } from '../auth/oauth-flow.js'
-import { accountKeyOf, saveAccountSession, type AgySession } from '../auth/store.js'
+import { accountKeyOf, patchAccountSession, type AgySession } from '../auth/store.js'
 import type { ProviderId } from '../auth/store.js'
 import { directFetch, proxiedFetch } from '../http.js'
 import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from './accounts.js'
@@ -435,7 +435,9 @@ export async function fetchAgyUsage(
 ): Promise<ProviderUsage> {
   const ready = await ensureAgyProject(session, fetchFn)
   if (ready.projectId !== undefined && ready.projectId !== session.projectId) {
-    try { await saveAccountSession('agy', accountKeyOf('agy', ready), ready) } catch { /* cache is optional */ }
+    // Patch the project id alone: `ready` carries the tokens read before this
+    // call, and a refresh that landed meanwhile must not be written back over.
+    try { await patchAccountSession('agy', accountKeyOf('agy', ready), { projectId: ready.projectId }) } catch { /* cache is optional */ }
   }
   const headers = {
     ...attributionHeaders(),
@@ -585,7 +587,12 @@ export class AgyAdapter extends LlmAdapter {
     const next = await ensureAgyProject(session, this.options.fetchFn ?? proxiedFetch)
     if (next.projectId !== undefined && next.projectId !== session.projectId) {
       const key = account ?? await this.options.tokens.defaultAccount()
-      if (key !== undefined) await this.options.tokens.update(key, next)
+      if (key !== undefined) {
+        // Merge onto what is stored NOW: `next` carries the tokens read before
+        // the project call, and a refresh may have rotated them meanwhile.
+        const stored = await this.options.tokens.peek(key)
+        await this.options.tokens.update(key, { ...(stored ?? next), projectId: next.projectId })
+      }
     }
     return next
   }

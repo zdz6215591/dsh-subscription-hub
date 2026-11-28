@@ -701,6 +701,39 @@ export async function saveAccountSession<K extends ProviderId>(
 }
 
 /**
+ * Patch fields of one stored account in place, inside the same serialized
+ * read-modify-write as every other store write. A caller holding a session it
+ * read earlier must use this instead of {@link saveAccountSession}: a token
+ * refresh can land in between, and saving the stale object would write the
+ * old access and refresh tokens back over the new ones.
+ * @param provider - the provider route.
+ * @param account - the account key.
+ * @param patch - the fields to change; nothing else is touched.
+ * @param path - store file path; defaults to {@link authFilePath}.
+ * @returns whether the account existed and was patched.
+ */
+export async function patchAccountSession<K extends ProviderId>(
+  provider: K,
+  account: string,
+  patch: Partial<SessionOf<K>>,
+  path = authFilePath(),
+): Promise<boolean> {
+  return serialize(path, async () => {
+    const store = await loadStore(path)
+    const entry = store[provider] as ProviderAccounts<SessionOf<K>> | undefined
+    const current = entry?.accounts[account]
+    if (entry === undefined || current === undefined) return false
+    const patched = { ...current, ...patch } as SessionOf<K>
+    ;(store as Record<string, unknown>)[provider] = {
+      default: entry.default,
+      accounts: { ...entry.accounts, [account]: patched },
+    }
+    await writeStore(store, path)
+    return true
+  })
+}
+
+/**
  * Delete one account's session (logout). Deleting the default moves the badge
  * to the next remaining account.
  * @param provider - the provider route.
