@@ -55,7 +55,7 @@ test('classifyPoolFailure: the provider retry-after wins over the default cooldo
 
 test('classifyPoolFailure: auth failures park the account until re-login', () => {
   for (const code of ['AUTH', 'INVALID_CREDENTIAL', 'MISSING_CREDENTIAL']) {
-    assert.deepEqual(classifyPoolFailure(new LlmError('denied', code), 'claude'), {
+    assert.deepEqual(classifyPoolFailure(new LlmError('denied', code as never), 'claude'), {
       action: 'switch',
       cooldownMs: AUTH_COOLDOWN_MS,
       reason: code,
@@ -66,7 +66,7 @@ test('classifyPoolFailure: auth failures park the account until re-login', () =>
 
 test('classifyPoolFailure: transient server failures cool the member briefly', () => {
   for (const code of ['SERVER', 'TIMEOUT', 'EMPTY_RESPONSE']) {
-    assert.deepEqual(classifyPoolFailure(new LlmError('oops', code), 'codex'), {
+    assert.deepEqual(classifyPoolFailure(new LlmError('oops', code as never), 'codex'), {
       action: 'switch',
       cooldownMs: TRANSIENT_COOLDOWN_MS,
       reason: code,
@@ -81,7 +81,7 @@ test('classifyPoolFailure: transport failures switch without a health record', (
 
 test('classifyPoolFailure: plan/model availability switches the member', () => {
   for (const code of ['HTTP_402', 'HTTP_404']) {
-    assert.deepEqual(classifyPoolFailure(new LlmError('unavailable', code), 'codex'), {
+    assert.deepEqual(classifyPoolFailure(new LlmError('unavailable', code as never), 'codex'), {
       action: 'switch',
       cooldownMs: TRANSIENT_COOLDOWN_MS,
       reason: code,
@@ -92,7 +92,7 @@ test('classifyPoolFailure: plan/model availability switches the member', () => {
 
 test('classifyPoolFailure: request-fault and unknown failures rethrow', () => {
   for (const code of ['CONTEXT_WINDOW_EXCEEDED', 'ABORTED', 'HTTP_400']) {
-    assert.deepEqual(classifyPoolFailure(new LlmError('bad request', code), 'codex'), { action: 'throw' })
+    assert.deepEqual(classifyPoolFailure(new LlmError('bad request', code as never), 'codex'), { action: 'throw' })
   }
   assert.deepEqual(classifyPoolFailure(new Error('plain'), 'codex'), { action: 'throw' })
   assert.deepEqual(classifyPoolFailure('string failure', 'codex'), { action: 'throw' })

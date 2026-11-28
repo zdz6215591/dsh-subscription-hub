@@ -49,6 +49,16 @@ test('catalog store round-trips per-provider snapshots in one file', async () =>
   JSON.parse(await readFile(path, 'utf8'))
 })
 
+test('a catalog file saved with a UTF-8 BOM still loads', async () => {
+  // Notepad and PowerShell 5 `Set-Content -Encoding utf8` both write a BOM;
+  // JSON.parse refuses it, which used to read the whole cache as empty.
+  const path = await tempStorePath()
+  const store = catalogStore('grok', path)
+  await store.save({ at: 7, models: [{ id: 'grok-4.6', name: 'Grok 4.6' }] })
+  await writeFile(path, `\uFEFF${await readFile(path, 'utf8')}`)
+  assert.equal((await store.load())?.models[0].id, 'grok-4.6')
+})
+
 test('catalog store tolerates missing and corrupt files', async () => {
   const path = await tempStorePath()
   const store = catalogStore('grok', path)

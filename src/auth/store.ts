@@ -524,7 +524,9 @@ export async function loadStore(path = authFilePath()): Promise<SessionMap> {
 function parseStore(text: string, path: string): SessionMap {
   let parsed: unknown
   try {
-    parsed = JSON.parse(text)
+    // A hand-edited file saved with a UTF-8 BOM would otherwise read as
+    // "not valid JSON" and lock every account out.
+    parsed = JSON.parse(text.replace(/^\uFEFF/u, ''))
   } catch {
     throw new Error(`subscriptions auth store at ${path} is not valid JSON; fix or delete the file`)
   }

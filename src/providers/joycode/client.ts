@@ -22,6 +22,7 @@
 
 import { createHmac } from 'node:crypto'
 import { LlmError } from '@deepseek-ai/dsh-llm'
+import { llmErrorFromFailure } from '../common.js'
 
 /** Product identity every JoyCode request presents. */
 export const JOYCODE_CLIENT_VERSION = '2.7.5'
@@ -345,7 +346,7 @@ export function joyCodeHttpError(status: number, body: string, label: string): L
   if (status === 429) return new LlmError(message, 'RATE_LIMIT', { status })
   if (status === 408 || status === 504) return new LlmError(message, 'TIMEOUT', { status })
   if (status >= 500) return new LlmError(message, 'SERVER', { status })
-  return new LlmError(message, `HTTP_${String(status)}`, { status })
+  return llmErrorFromFailure({ message, code: `HTTP_${String(status)}`, status })
 }
 
 /** The business `code` inside a body that may or may not be an envelope. */

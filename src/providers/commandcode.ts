@@ -25,7 +25,7 @@ import type { CommandCodeSession } from '../auth/store.js'
 import type { ProviderId } from '../auth/store.js'
 import { proxiedFetch } from '../http.js'
 import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from './accounts.js'
-import { httpLlmError, idleWatchdog, mapFetchFailure, priceLabel } from './common.js'
+import { httpLlmError, idleWatchdog, llmErrorFromFailure, mapFetchFailure, priceLabel } from './common.js'
 import { readCommandCodeCatalog, writeCommandCodeCatalog } from './commandcode-catalog-cache.js'
 import { COMMANDCODE_MODELS_VERSION, COMMANDCODE_PUBLISHED_MODELS } from './commandcode-models.js'
 import {
@@ -1158,7 +1158,7 @@ export async function* parseCommandCodeStream(
         if (retryable) {
           throw new LlmError(`Command Code stream error: ${detail}`, 'SERVER', options)
         }
-        throw new LlmError(`Command Code stream error: ${detail}`, 'PROVIDER_STREAM_ERROR', options)
+        throw llmErrorFromFailure({ message: `Command Code stream error: ${detail}`, code: 'PROVIDER_STREAM_ERROR', ...options })
       }
       default: {
         const delta = stringValue(event.delta) ?? stringValue(event.text)

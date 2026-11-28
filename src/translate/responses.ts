@@ -227,6 +227,8 @@ export interface ResponsesStreamEvent {
     error?: { code?: string; message?: string }
     incomplete_details?: { reason?: string }
   }
+  /** Codex nests a streamed `error` event's facts here; older gateways put them at the top level. */
+  error?: { code?: string; message?: string }
   code?: string
   message?: string
 }
@@ -479,7 +481,10 @@ export class ResponsesStreamTranslator {
             ?? `the provider reported an incomplete response (${event.response?.incomplete_details?.reason ?? 'unknown reason'})`,
         )
       case 'error':
-        throw responsesFailure(event.code, event.message)
+        // Codex sends `{"type":"error","error":{"code","message"}}`; reading only
+        // the top-level fields turned every streamed context overflow or quota
+        // failure into a generic SERVER error.
+        throw responsesFailure(event.error?.code ?? event.code, event.error?.message ?? event.message)
       default:
         // response.created, response.in_progress, content_part events, etc.: no chunks.
         return chunks

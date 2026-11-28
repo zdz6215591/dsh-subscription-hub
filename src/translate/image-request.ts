@@ -44,9 +44,12 @@ export const REQUEST_IMAGE_MAX_LONG_EDGE = 1568
 export const REQUEST_IMAGE_MAX_ENCODED_BYTES = 1024 * 1024
 
 /**
- * One image's request target, in both generations' vocabulary at once:
+ * One image's request target, in every host generation's vocabulary at once:
  *   <= 0.1.5 reads maxPixels and maxBytes
- *   >= 0.1.6 reads width, height, and maxBytes
+ *   0.1.6 - 0.2.2 reads width, height, and maxBytes
+ *   >= 0.2.3 reads width, height, maxImageBytes and imageTargetBytes, and
+ *   rejects a target that lacks the last two
+ * Each host validates only its own fields, so one target carries all of them.
  */
 export interface RequestImageTarget {
   /** <=0.1.5's pixel budget: the projected area this target came from. */
@@ -55,8 +58,12 @@ export interface RequestImageTarget {
   width: number
   /** >=0.1.6's target height, already projected. */
   height: number
-  /** Both generations' encoded-byte budget. */
+  /** The encoded-byte budget of hosts before 0.2.3. */
   maxBytes: number
+  /** 0.2.3+ hard encoded-byte cap. */
+  maxImageBytes: number
+  /** 0.2.3+ preferred encoded-byte target, never above `maxImageBytes`. */
+  imageTargetBytes: number
 }
 
 /** Backward-compatible alias for {@link RequestImageTarget}. */
@@ -100,6 +107,8 @@ export function requestImagePolicy(ref: Pick<ImageAttachmentRef, 'width' | 'heig
     width: projected.width,
     height: projected.height,
     maxBytes: REQUEST_IMAGE_MAX_ENCODED_BYTES,
+    maxImageBytes: REQUEST_IMAGE_MAX_ENCODED_BYTES,
+    imageTargetBytes: REQUEST_IMAGE_MAX_ENCODED_BYTES,
   }
 }
 

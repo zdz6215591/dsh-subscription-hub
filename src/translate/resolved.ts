@@ -6,8 +6,12 @@
  * base64 data.
  */
 
-import { LlmError } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, Message, ToolResultBlock } from '@deepseek-ai/dsh-llm'
+import { llmErrorFromFailure } from '../providers/common.js'
+import type {
+  CompatibleContentBlock as ContentBlock,
+  CompatibleMessage as Message,
+  LegacyToolResultBlock as ToolResultBlock,
+} from '../compat.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { readRequestImage } from './image-request.js'
 
@@ -129,7 +133,7 @@ export function withToolResultImages(messages: readonly TranslatableMessage[]): 
 
 /** Translator input message: role plus resolved blocks. */
 export interface TranslatableMessage {
-  role: 'system' | 'user' | 'assistant' | 'tool'
+  role: 'system' | 'developer' | 'user' | 'assistant' | 'tool'
   content: readonly TranslatableBlock[]
   /** Preserved for adapters whose provider-private replay metadata is required. */
   source?: Message['source']
@@ -158,11 +162,11 @@ export async function resolveImages(
     return messages
   }
   if (attachments === undefined) {
-    throw new LlmError(
-      'dsh-plugin-subscriptions: the request carries an image but no attachments service is mounted; '
-      + 'image input requires the harness attachment store',
-      'UNSUPPORTED',
-    )
+    throw llmErrorFromFailure({
+      message: 'dsh-plugin-subscriptions: the request carries an image but no attachments service is mounted; '
+        + 'image input requires the harness attachment store',
+      code: 'UNSUPPORTED',
+    })
   }
   const resolveBlock = async (block: ContentBlock): Promise<TranslatableBlock[]> => {
     if (block.type === 'tool-result') {

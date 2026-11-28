@@ -8,7 +8,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { LlmError, MessageId } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '../src/compat.js'
-import type { ContentBlock, Message, MessageSource, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { MessageSource, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { CompatibleContentBlock as ContentBlock, CompatibleMessage as Message } from '../src/compat.js'
 import {
   ResponsesStreamTranslator,
   toResponsesInput,
@@ -348,6 +349,21 @@ test('Responses translator: response.failed maps context overflow and quota', ()
   assert.throws(
     () => generic.push({ type: 'error', code: 'server_error', message: 'boom' }),
     (error: unknown) => error instanceof LlmError && error.code === 'SERVER',
+  )
+})
+
+test('Responses translator: a streamed error event is read from its nested error object', () => {
+  // Codex sends the facts under `error`; reading only the top level made
+  // every streamed overflow or quota failure a generic SERVER error.
+  const overflow = new ResponsesStreamTranslator()
+  assert.throws(
+    () => overflow.push({ type: 'error', error: { code: 'context_window_exceeded', message: 'too long' } }),
+    (error: unknown) => error instanceof LlmError && error.code === 'CONTEXT_WINDOW_EXCEEDED',
+  )
+  const quota = new ResponsesStreamTranslator()
+  assert.throws(
+    () => quota.push({ type: 'error', error: { code: 'insufficient_quota', message: 'out of credits' } }),
+    (error: unknown) => error instanceof LlmError && error.code === 'QUOTA',
   )
 })
 

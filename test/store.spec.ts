@@ -99,6 +99,16 @@ test('two accounts of one provider refreshing at once both survive', async () =>
   assert.equal(accounts[0].session.accessToken, 'alice-new')
 })
 
+test('a store file saved with a UTF-8 BOM still loads', async () => {
+  // A hand edit in Notepad or PowerShell 5 adds a BOM; JSON.parse refuses it,
+  // which used to report the file as invalid and lock every account out.
+  const path = storePath()
+  await saveAccountSession('codex', 'acct-1', CODEX, path)
+  writeFileSync(path, `\uFEFF${readFileSync(path, 'utf8')}`)
+  const store = await loadStore(path)
+  assert.equal(store.codex?.accounts['acct-1']?.accessToken, CODEX.accessToken)
+})
+
 test('writes to one path settle in call order', async () => {
   const path = storePath()
   const writes = [

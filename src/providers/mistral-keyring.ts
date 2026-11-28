@@ -64,6 +64,9 @@ if ([DshMistralCred]::CredEnumerate($null, 1, [ref]$count, [ref]$enumPtr)) {
       $cred = [Runtime.InteropServices.Marshal]::PtrToStructure($credPtr, [type][DshMistralCred+CREDENTIAL])
       $target = [Runtime.InteropServices.Marshal]::PtrToStringUni($cred.TargetName)
       $user = [Runtime.InteropServices.Marshal]::PtrToStringUni($cred.UserName)
+      # Decode only Vibe/Mistral entries: every other credential's secret must
+      # never leave this process, not even to be filtered out in Node.
+      if ("$target $user" -notmatch '(?i)vibe|mistral') { continue }
       $rows += [pscustomobject]@{ target = $target; user = $user; secret = (Decode-Blob $cred.CredentialBlob $cred.CredentialBlobSize) }
     }
   } finally { [DshMistralCred]::CredFree($enumPtr) }

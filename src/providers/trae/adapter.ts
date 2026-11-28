@@ -14,21 +14,20 @@
 import { randomUUID } from 'node:crypto'
 import { LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
-  ContentBlock,
   GenerateOptions,
   LlmModelInfo,
   LlmProviderInfo,
   LlmResolvedModelInfo,
-  Message,
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import type { CompatibleContentBlock as ContentBlock, CompatibleMessage as Message } from '../../compat.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { ToolCallId } from '../../compat.js'
 import type { TraeChannel } from './credentials.js'
 import type { ProviderId, TraeSession } from '../../auth/store.js'
 import { proxiedFetch } from '../../http.js'
 import { AccountTokenManager } from '../accounts.js'
-import { httpLlmError, idleWatchdog, mapFetchFailure, mergeReasoning } from '../common.js'
+import { httpLlmError, idleWatchdog, llmErrorFromFailure, mapFetchFailure, mergeReasoning } from '../common.js'
 import type { FetchFn, ModelEntry, ModelListNotFetched } from '../common.js'
 import type { PoolAdapter } from '../pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, subscriptionRetryPolicy } from '../rate-limit.js'
@@ -414,7 +413,7 @@ export class TraeAdapter extends LlmAdapter {
         if (event.type === 'error') {
           // Defer: a usable answer may still precede the terminal event. The
           // failure is raised once the stream settles.
-          upstreamError = new LlmError(`Trae upstream error: ${event.message}`, 'PROVIDER_HTTP_ERROR')
+          upstreamError = llmErrorFromFailure({ message: `Trae upstream error: ${event.message}`, code: 'PROVIDER_HTTP_ERROR' })
           return chunks
         }
         if (event.type === 'usage') {

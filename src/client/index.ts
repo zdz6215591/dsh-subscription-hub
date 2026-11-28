@@ -194,7 +194,9 @@ export function apply(ctx: ClientContext): void {
       // the registry's candidate pass on 0.1.5, aborting the whole `/` source
       // and hiding every host command — /plan, /model, /goal, ... — not just
       // /fast. Older lines render a function child as empty copy, no crash.
-      description: (() => t('commandFast')) as unknown as string,
+      // The field is typed `string` before DSH 0.2.2 and `() => string` from
+      // it on; the function is right on every line that runs today.
+      description: (() => t('commandFast')) as never,
       available: () => true,
       ui: {
         kind: 'popupSelect',

@@ -19,7 +19,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
+import type { CompatibleContentBlock as ContentBlock, CompatibleMessage as Message } from '../src/compat.js'
 import { parseAgySse } from '../src/providers/agy/parse.js'
 import {
   clearToolSignaturesForTests,

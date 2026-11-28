@@ -10,7 +10,8 @@
  */
 
 import { contentHasImage, LlmError } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
+import type { CompatibleContentBlock as ContentBlock, CompatibleMessage as Message } from '../../compat.js'
 import { toolResultOf } from '../../translate/resolved.js'
 import type { WireMessage, WireRequest, WireTool } from './types.js'
 
@@ -123,7 +124,7 @@ function flattenText(blocks: readonly ContentBlock[]): string {
  * @param supportsImages - whether the selected model declared image input.
  */
 function assertSupportedContent(blocks: readonly ContentBlock[], supportsImages: boolean): void {
-  if (!supportsImages && contentHasImage(blocks)) {
+  if (!supportsImages && blocks.some(block => block.type === 'image')) {
     throw new LlmError(
       'The selected CodeBuddy model does not accept image content.',
       'UNSUPPORTED_CONTENT',

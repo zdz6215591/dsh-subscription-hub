@@ -15,7 +15,8 @@
  */
 
 import { createHash, randomBytes } from 'node:crypto'
-import type { ContentBlock, GenerateOptions, Message, ToolSchema } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, ToolSchema } from '@deepseek-ai/dsh-llm'
+import type { CompatibleContentBlock as ContentBlock, CompatibleMessage as Message } from '../../compat.js'
 import { pairedToolCalls, toolResultOf } from '../../translate/resolved.js'
 import type { ToolResultView } from '../../translate/resolved.js'
 import { catalogModel, isLevelThinkingModel } from './catalog.js'

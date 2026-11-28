@@ -7,8 +7,10 @@
  * out — so the specs keep asserting on plain RpcResult values.
  */
 
-import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
 import type { RpcResult } from '../src/compat.js'
+
+/** The three-argument caller the specs drive (exact Fetch routes carry no peer). */
+export type ConnectionRpcHandler = (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<RpcResult<unknown>>
 
 interface FakeRoute {
   path: string

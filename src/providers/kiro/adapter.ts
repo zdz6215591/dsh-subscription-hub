@@ -29,7 +29,7 @@ import type { KiroSession, ProviderId } from '../../auth/store.js'
 import { resolveImages } from '../../translate/resolved.js'
 import { proxiedFetch } from '../../http.js'
 import { AccountTokenManager } from '../accounts.js'
-import { httpLlmError, idleWatchdog, mapFetchFailure } from '../common.js'
+import { httpLlmError, idleWatchdog, llmErrorFromFailure, mapFetchFailure } from '../common.js'
 import type { FetchFn, ModelEntry, ModelListNotFetched } from '../common.js'
 import type { PoolAdapter } from '../pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, subscriptionRetryPolicy } from '../rate-limit.js'
@@ -53,6 +53,19 @@ const KIRO_RETRY = Object.freeze({ maxRetries: 2, initialDelayMs: 700, maxDelayM
 
 /** How long a probed roster is trusted before discovery asks again. */
 const CATALOG_TTL_MS = 60 * 60_000
+
+/**
+ * Re-yield a stream, calling `onItem` before each item, so an idle watchdog
+ * sees activity per frame instead of once per request.
+ * @param source - the stream to pass through.
+ * @param onItem - called for every item that arrives.
+ */
+async function* pulsed<T>(source: AsyncIterable<T>, onItem: () => void): AsyncGenerator<T> {
+  for await (const item of source) {
+    onItem()
+    yield item
+  }
+}
 
 /** Adapter dependencies. */
 export interface KiroAdapterOptions {
@@ -270,14 +283,17 @@ export class KiroAdapter extends LlmAdapter {
 
       const contextWindow = (await this.resolveOwnModel('kiro', options.model)).context?.contextWindow ?? 0
       const wantsThinking = options.reasoningEffort !== undefined && String(options.reasoningEffort) !== 'off'
-      const frames = decodeEventStream(response.body)
+      // The watchdog is an IDLE timer: each frame resets it, so a long reply that
+      // keeps streaming is never cut off as if it had stalled.
+      const frames = pulsed(decodeEventStream(response.body), () => watchdog.pulse())
       const events = readKiroReply(frames, contextWindow, wantsThinking)
       try {
         yield* toStreamChunks(events, kiroToolNameMap(options.tools))
       } catch (error) {
         // The same refusal can also arrive as an exception frame inside a 200.
         await this.noteRefusal(error, session, options.model)
-        throw error
+        if (error instanceof LlmError) throw error
+        throw mapFetchFailure('kiro', error, watchdog, options.signal)
       }
     } finally {
       watchdog.stop()
@@ -313,7 +329,7 @@ export class KiroAdapter extends LlmAdapter {
     }
     const mapped = classifyKiroFailure(message)
     if (mapped !== 'UPSTREAM_ERROR') {
-      return new LlmError(`kiro: ${message}`, mapped)
+      return llmErrorFromFailure({ message: `kiro: ${message}`, code: mapped })
     }
     if (response.status === 401 || response.status === 403) {
       // An API key has no refresh: a rejected one is a credential problem.

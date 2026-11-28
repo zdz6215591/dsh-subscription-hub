@@ -21,6 +21,7 @@ import type {
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import type { ProviderId } from '../auth/store.js'
+import { llmErrorFromFailure } from './common.js'
 import type { AccountAwareAdapter } from './accounts.js'
 import type { ConcretePoolMember, PoolDefinition, PoolMemberRef } from './pool-family.js'
 import { poolKey } from './pool-family.js'
@@ -391,7 +392,7 @@ export class PoolAdapter extends LlmAdapter {
       || underlying.code === 'TRANSPORT'
       || underlying.code === EMPTY_RESPONSE_CODE
     if (!transient) {
-      return new LlmError(`pool "${model}": ${underlying.message}`, underlying.code, { cause })
+      return llmErrorFromFailure({ ...underlying.failure, message: `pool "${model}": ${underlying.message}` }, { cause })
     }
     const keys = new Set<string>()
     for (const member of pool) {

@@ -12,6 +12,7 @@ import assert from 'node:assert/strict'
 import { MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '../src/compat.js'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
+import type { CompatibleMessage } from '../src/compat.js'
 import {
   completeCopilotLogin,
   COPILOT_MODELS_URL,
@@ -669,7 +670,8 @@ function secondReasoningToolCallSse(): string {
 
 /** The conversation handed back for the second request after the call ran. */
 function toolRoundTripHistory(callId = 'call_A'): GenerateOptions['messages'] {
-  return [
+  // Pre-0.2 nested tool results, on purpose: the adapter must still read them.
+  const history: CompatibleMessage[] = [
     {
       id: MessageId('m-a'),
       role: 'assistant',
@@ -686,12 +688,13 @@ function toolRoundTripHistory(callId = 'call_A'): GenerateOptions['messages'] {
       source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   ]
+  return history as never
 }
 
 /** A two-round tool-chain history: call_A and its result, then call_B and its result. */
 function twoRoundHistory(): GenerateOptions['messages'] {
-  return [
-    ...toolRoundTripHistory('call_A'),
+  const history: CompatibleMessage[] = [
+    ...toolRoundTripHistory('call_A') as CompatibleMessage[],
     {
       id: MessageId('m-c'),
       role: 'assistant',
@@ -708,6 +711,7 @@ function twoRoundHistory(): GenerateOptions['messages'] {
       source: { kind: 'tool', callId: ToolCallId('call_B') },
     },
   ]
+  return history as never
 }
 
 /** A wire-forced responses adapter with no discovery, over the global fetch stub. */

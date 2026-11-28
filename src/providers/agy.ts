@@ -410,13 +410,16 @@ export function parseAgyUserQuotaSummary(payload: unknown): UsageWindow[] {
       const remainingFraction = typeof row.remainingFraction === 'number' && Number.isFinite(row.remainingFraction)
         ? row.remainingFraction
         : 1
+      // The same guard as the groups path: an unparsable reset is no reset,
+      // never a NaN the card would render as "Invalid Date".
+      const resetsAt = typeof row.resetTime === 'string' ? Date.parse(row.resetTime) : undefined
       windows.push({
         kind: index === 0 ? 'session' : 'weekly',
         usedPercent: Math.max(0, Math.min(100, Math.round((1 - remainingFraction) * 100))),
         remaining: Math.round(remainingFraction * 1000) / 10,
         limit: 100,
         unit: 'percent',
-        ...typeof row.resetTime === 'string' ? { resetsAt: Date.parse(row.resetTime) } : {},
+        ...resetsAt !== undefined && Number.isFinite(resetsAt) ? { resetsAt } : {},
         ...typeof row.displayName === 'string' ? { scope: row.displayName } : {},
       })
     }
@@ -474,7 +477,9 @@ export async function fetchAgyUsage(
   // If Gemini or other families are not already represented in summaryWindows, prepend from catalogWindows.
   let windows: UsageWindow[] = []
   if (summaryWindows.length > 0) {
-    const coveredScopes = new Set(summaryWindows.map(w => w.scope?.toLowerCase() ?? ''))
+    // An unnamed summary group has scope ''; ''.includes-matching would then
+    // claim every catalog window as covered and drop all the Gemini rows.
+    const coveredScopes = new Set(summaryWindows.map(w => w.scope?.toLowerCase() ?? '').filter(scope => scope !== ''))
     const missingFromCatalog = catalogWindows.filter(w => {
       const s = w.scope?.toLowerCase() ?? ''
       if (s === 'other') return false
@@ -649,9 +654,15 @@ export class AgyAdapter extends LlmAdapter {
       // times with no way to tell the rows apart (the reference's 185ab5e).
       const visible = discovered.filter(model => !isDisabledAgyModel(model.id))
       const { singles, families } = groupAgyFamilies(visible)
-      this.agyFamilies.clear()
+      // Merge, never clear: accounts list concurrently, and clearing here let the
+      // last account to finish erase another account's families, so a family id
+      // only that account serves went upstream unresolved (HTTP 404).
       for (const family of families) {
-        this.agyFamilies.set(family.family, { name: family.name, variants: family.variants })
+        const known = this.agyFamilies.get(family.family)
+        this.agyFamilies.set(family.family, {
+          name: family.name,
+          variants: known === undefined ? family.variants : new Map([...known.variants, ...family.variants]),
+        })
       }
       const rows: { id: string; name: string }[] = [
         ...singles,

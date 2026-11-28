@@ -26,6 +26,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { LlmError, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { llmErrorFromFailure } from '../common.js'
 import { toolResultsOf } from '../../translate/resolved.js'
 import type { TranslatableBlock, TranslatableMessage } from '../../translate/resolved.js'
 import { KIRO_ORIGIN } from './protocol.js'
@@ -645,7 +646,7 @@ export async function* toStreamChunks(
     }
   }
 
-  if (error !== undefined) throw new LlmError(`kiro: ${error}`, classifyKiroFailure(error))
+  if (error !== undefined) throw llmErrorFromFailure({ message: `kiro: ${error}`, code: classifyKiroFailure(error) })
   yield {
     type: 'finish',
     reason: calls.length > 0 || stopReason === 'tool_use'

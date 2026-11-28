@@ -802,6 +802,9 @@ export class SubscriptionsAuthController implements AuthController {
           throw new Error('mistral: no Vibe CLI credential found (system keyring or ~/.vibe/.env). Run the Vibe CLI once and complete its browser sign-in, or paste an API key.')
         }
         const key = assertUsableMistralKey(imported.key, 'mistral')
+        if (!await verifyMistralKey(proxiedFetch, key)) {
+          throw new Error('mistral: the local Vibe CLI credential was rejected by the API; sign in again or paste an API key.')
+        }
         const session = sessionFromMistralKey(key, `mistral-vibe-${maskMistralKey(key)}`)
         await this.persist('mistral', session)
         this.lastError.delete('mistral')
@@ -868,6 +871,12 @@ export class SubscriptionsAuthController implements AuthController {
         this.lastError.set('mistral', `mistral: could not start the browser sign-in (${error instanceof Error ? error.message : String(error)}); trying the Vibe CLI`)
         void runVibeSignIn().then(async outcome => {
           if (outcome.kind !== 'found') return
+          // The keyring match is by name, so verify the key against the inference
+          // API before storing it, the same gate the browser sign-in uses.
+          if (!await verifyMistralKey(proxiedFetch, outcome.key)) {
+            this.lastError.set('mistral', 'mistral: the Vibe CLI credential was rejected by the API; paste an API key')
+            return
+          }
           const session = sessionFromMistralKey(assertUsableMistralKey(outcome.key, 'mistral'), `mistral-vibe-${maskMistralKey(outcome.key)}`)
           await this.persist('mistral', session)
           this.lastError.delete('mistral')

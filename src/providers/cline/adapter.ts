@@ -32,7 +32,7 @@ import type { ClineSession } from '../../auth/store.js'
 import type { ProviderId } from '../../auth/store.js'
 import { proxiedFetch } from '../../http.js'
 import { AccountTokenManager } from '../accounts.js'
-import { effortDisplayName, httpLlmError, idleWatchdog, mapFetchFailure } from '../common.js'
+import { effortDisplayName, httpLlmError, idleWatchdog, llmErrorFromFailure, mapFetchFailure } from '../common.js'
 import type { FetchFn, ModelEntry, ModelListNotFetched } from '../common.js'
 import type { PoolAdapter } from '../pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, subscriptionRetryPolicy } from '../rate-limit.js'
@@ -550,10 +550,10 @@ export class ClineAdapter extends LlmAdapter {
           const detail = raw.slice(0, 400)
           this.options.pins.learnUpstream(options.model, attempt.upstream, classifyUpstreamError(detail), detail, 0)
           if (attempt.upstream === null) this.options.pins.learnAvailableProviders(options.model, detail)
-          lastError = new LlmError(
-            detail === '' ? `cline answered HTTP 200 with ${contentType || 'no content type'}` : detail,
-            'PROVIDER_HTTP_ERROR',
-          )
+          lastError = llmErrorFromFailure({
+            message: detail === '' ? `cline answered HTTP 200 with ${contentType || 'no content type'}` : detail,
+            code: 'PROVIDER_HTTP_ERROR',
+          })
           continue
         }
 
@@ -716,12 +716,12 @@ export class ClineAdapter extends LlmAdapter {
     }
     throw lastError instanceof LlmError
       ? lastError
-      : new LlmError(
-          lastError === undefined
+      : llmErrorFromFailure({
+          message: lastError === undefined
             ? 'no pinned upstream could serve the request'
             : `cline: ${String(lastError)}`,
-          'UPSTREAM',
-        )
+          code: 'UPSTREAM',
+        })
   }
 
   /** Convert harness messages to the OpenAI-shaped wire history. */

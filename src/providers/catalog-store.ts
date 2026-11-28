@@ -139,7 +139,9 @@ async function readCatalogFile(path: string): Promise<CatalogFile> {
     return {}
   }
   try {
-    const parsed: unknown = JSON.parse(text)
+    // A leading UTF-8 BOM (Notepad, PowerShell 5 `Set-Content -Encoding utf8`)
+    // makes JSON.parse throw; without the strip the cache silently reads as empty.
+    const parsed: unknown = JSON.parse(text.replace(/^\uFEFF/u, ''))
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
     return parsed as CatalogFile
   } catch {

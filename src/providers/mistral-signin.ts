@@ -53,6 +53,10 @@ export type SpawnDetached = (command: string, args: readonly string[]) => void
 
 const spawnDetached: SpawnDetached = (command, args) => {
   const child = spawn(command, [...args], { detached: true, stdio: 'ignore', windowsHide: false })
+  // A candidate that exists but cannot run (EACCES, an extensionless file on
+  // Windows) emits 'error'; unhandled, that event would crash the host. The
+  // poll below then simply times out with no credential.
+  child.on('error', () => undefined)
   child.unref()
 }
 

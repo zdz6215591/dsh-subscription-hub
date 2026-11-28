@@ -35,7 +35,7 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { MistralSession, ProviderId } from '../auth/store.js'
 import { proxiedFetch } from '../http.js'
 import { AccountTokenManager } from '../providers/accounts.js'
-import { effortDisplayName, httpLlmError, idleWatchdog, mapFetchFailure } from '../providers/common.js'
+import { DISCOVERY_TIMEOUT_MS, effortDisplayName, httpLlmError, idleWatchdog, mapFetchFailure } from '../providers/common.js'
 import type { FetchFn, ModelEntry, ModelListNotFetched, ProviderUsage, UsageWindow } from '../providers/common.js'
 import type { PoolAdapter } from '../providers/pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, subscriptionRetryPolicy } from '../providers/rate-limit.js'
@@ -325,6 +325,8 @@ export class MistralAdapter extends LlmAdapter {
       const session = await this.options.tokens.session(key)
       const response = await this.fetchFn(`${this.baseUrl(session)}${MISTRAL_MODELS_PATH}`, {
         headers: { authorization: `Bearer ${session.accessToken}`, accept: 'application/json', ...attributionHeaders() },
+        // A stalled API must not hang the picker; the catch below serves the cache.
+        signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
       })
       if (!response.ok) throw await httpLlmError(response, 'mistral models')
       // Alias rows collapse here: the vendor lists every alias as its own row,
@@ -398,9 +400,12 @@ export class MistralAdapter extends LlmAdapter {
     try {
       const session = await this.options.tokens.session(account)
       const resolved = await resolveImages(options.messages, this.options.resolveAttachments?.(), options.signal)
-      // One call per turn loop: the first is the turn's main call, later ones are
-      // secondary — the same taxonomy the vendor CLI reports.
-      let iteration = 0
+      // The vendor CLI reports a turn's first call as `main_call` and the calls
+      // that follow a tool result as `secondary_call`. Each request is a fresh
+      // call here, so the history decides: a request answering a tool is secondary.
+      const last = resolved[resolved.length - 1]
+      const followsTool = last !== undefined
+        && (last.role === 'tool' || last.content.some(block => block.type === 'tool-result'))
       const body: Record<string, unknown> = {
         model: options.model,
         messages: toChatMessages(resolved, options.system),
@@ -421,15 +426,17 @@ export class MistralAdapter extends LlmAdapter {
           os: process.platform,
           arch: process.arch,
           version: MISTRAL_VIBE_VERSION,
-          call_type: iteration === 0 ? 'main_call' : 'secondary_call',
+          call_type: followsTool ? 'secondary_call' : 'main_call',
           ...options.sessionId === undefined ? {} : { session_id: String(options.sessionId) },
           ...this.options.planName === undefined ? {} : { user_plan: this.options.planName },
         }
-        iteration++
       }
       // Only for models that declare the capability; any other value would be
       // rejected by the API (Reasoning prompt mode is not enabled for this model).
+      // The configured roster counts too: with discovery off, resolveOwnModel
+      // already offers efforts from it, so the request must carry them.
       const declared = [...this.rosters.values()].flatMap(entry => entry.models).find(entry => entry.id === options.model)
+        ?? this.configuredRoster().find(entry => entry.id === options.model)
       const effort = options.reasoningEffort === undefined ? '' : String(options.reasoningEffort).trim()
       if (declared?.supportsReasoning === true && effort !== '' && effort !== 'off') body.reasoning_effort = effort
 
@@ -452,6 +459,9 @@ export class MistralAdapter extends LlmAdapter {
         // request to the API wallet — measured both ways on the live account, so this
         // retry is a wallet switch rather than a hope.
         if (response.status === 402 && body.metadata !== undefined) {
+          // Release the refused response before the retry, or its socket stays
+          // held until garbage collection.
+          await response.body?.cancel().catch(() => undefined)
           const withoutMetadata = { ...body }
           delete withoutMetadata.metadata
           response = await send(withoutMetadata)

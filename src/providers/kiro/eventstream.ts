@@ -100,6 +100,7 @@ export function parseFrameHeaders(bytes: Uint8Array): Record<string, string> {
 export async function* decodeEventStream(body: ReadableStream<Uint8Array>): AsyncGenerator<EventStreamFrame> {
   let buffer = new Uint8Array(0)
   const reader = body.getReader()
+  let finished = false
   try {
     for (;;) {
       while (buffer.length >= 12) {
@@ -121,6 +122,7 @@ export async function* decodeEventStream(body: ReadableStream<Uint8Array>): Asyn
       }
       const { value, done } = await reader.read()
       if (done) {
+        finished = true
         if (buffer.length > 0) throw new Error('kiro: event stream ended mid-frame')
         return
       }
@@ -130,6 +132,9 @@ export async function* decodeEventStream(body: ReadableStream<Uint8Array>): Asyn
       buffer = merged
     }
   } finally {
+    // A consumer that stops early (abort, break, a downstream throw) leaves the
+    // body unread; cancel it so the connection is released now, not at GC.
+    if (!finished) await reader.cancel().catch(() => undefined)
     reader.releaseLock?.()
   }
 }

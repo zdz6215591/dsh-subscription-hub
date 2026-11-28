@@ -49,6 +49,7 @@ import {
   QUOTA_EXCEEDED_CODE,
 } from '@deepseek-ai/dsh-llm'
 import type { LlmErrorOptions } from '@deepseek-ai/dsh-llm'
+import { llmErrorFromFailure } from '../common.js'
 import { qoderResultCode } from './codes.js'
 
 /** Code for a request the caller cancelled. */
@@ -70,7 +71,8 @@ export const QODER_TRANSPORT_CODE = 'TRANSPORT'
  * @returns the classified error.
  */
 export function qoderError(message: string, code: string, options?: LlmErrorOptions): LlmError {
-  return new LlmError(message, code, options)
+  const { cause, ...facts } = options ?? {}
+  return llmErrorFromFailure({ message, code, ...facts }, cause === undefined ? undefined : { cause })
 }
 
 /**
@@ -226,12 +228,12 @@ export function qoderHttpError(message: string, response: QoderErrorResponse): L
   // request failure, not a dead credential. The hub's vocabulary folds the
   // reference's `INVALID_REQUEST` into `UNSUPPORTED` (see the table above).
   if (documented?.family === 'request' && code === 'AUTH') {
-    return new LlmError(deauthorizeDigits(message, 'rejected'), QODER_UNSUPPORTED_CODE, {
+    return qoderError(deauthorizeDigits(message, 'rejected'), QODER_UNSUPPORTED_CODE, {
       status,
       ...requestId === undefined ? {} : { requestId },
     })
   }
-  return new LlmError(message, code, {
+  return qoderError(message, code, {
     status,
     ...headerRetryAfterMs === undefined ? {} : { providerRetryAfterMs: headerRetryAfterMs },
     ...requestId === undefined ? {} : { requestId },

@@ -22,7 +22,8 @@
  */
 
 import { isHarnessError } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, ImageBlock, Message, ToolResultBlock, ToolSchema } from '@deepseek-ai/dsh-llm'
+import type { ImageBlock, ToolSchema } from '@deepseek-ai/dsh-llm'
+import type { CompatibleContentBlock as ContentBlock, CompatibleMessage as Message, LegacyToolResultBlock as ToolResultBlock } from '../../compat.js'
 import type { AttachmentStore, RequestImageAttachment } from '@deepseek-ai/dsh-attachment'
 import { qoderError, QODER_ABORTED_CODE, QODER_UNSUPPORTED_CODE } from './errors.js'
 import { requestImagePolicy } from '../../translate/image-request.js'
@@ -330,7 +331,8 @@ export async function validateAndTranslateMessages(
       }))
     }
     output.push({
-      role: message.role,
+      // Qoder has no `developer` role; DSH 0.2 tool-change notices travel as system text.
+      role: message.role === 'developer' ? 'system' : message.role,
       content: hasImage
         ? userContent.filter((part): part is QoderWireTextPart | QoderWireImagePart => part !== undefined)
         : text,

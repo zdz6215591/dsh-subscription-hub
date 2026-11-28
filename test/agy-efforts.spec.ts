@@ -12,7 +12,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import './keep-alive.js'
 import { antigravityEfforts, isLevelThinkingModel } from '../src/providers/agy/catalog.js'
-import { agyFamilyEfforts, groupAgyFamilies, uniqueAgyLabels } from '../src/providers/agy.js'
+import { agyFamilyEfforts, groupAgyFamilies, parseAgyUserQuotaSummary, uniqueAgyLabels } from '../src/providers/agy.js'
 import { resolveAgyModel } from '../src/providers/agy/models.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
 import { AgyAdapter } from '../src/providers/agy.js'
@@ -165,4 +165,16 @@ test('agy: two rows sharing one label are told apart, and no id is dropped', () 
   assert.equal(rows[2]?.name, 'Claude Opus 4.6', 'a unique label is untouched')
   assert.equal(new Set(rows.map(row => row.name)).size, 3, 'every label is now distinct')
   assert.match(rows[0]?.name ?? '', /Gemini 3\.8 Flash \(/)
+})
+
+test('agy: an unparsable legacy reset time is dropped, never a NaN instant', () => {
+  const windows = parseAgyUserQuotaSummary({
+    summaries: [
+      { remainingFraction: 0.5, resetTime: 'not a date', displayName: 'Gemini' },
+      { remainingFraction: 0.25, resetTime: '2026-12-01T00:00:00Z' },
+    ],
+  })
+  assert.equal(windows.length, 2)
+  assert.equal('resetsAt' in (windows[0] ?? {}), false, 'no NaN reaches the card')
+  assert.equal(windows[1]?.resetsAt, Date.parse('2026-12-01T00:00:00Z'))
 })

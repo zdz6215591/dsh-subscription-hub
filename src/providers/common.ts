@@ -80,6 +80,30 @@ export function validateModels(models: readonly ModelEntry[], label: string): Mo
   })
 }
 
+/**
+ * Build an LlmError whose code may be plugin-specific (`UNSUPPORTED`,
+ * `IMAGE_TOO_LARGE`, a provider's own code) or copied from another failure.
+ *
+ * DSH 0.2.2 narrowed the constructor's `code` type to the built-in codes and
+ * added `LlmError.fromFailure` for everything else; earlier hosts accept any
+ * code in the constructor and have no `fromFailure`. The runtime check of both
+ * lines only requires a non-empty string, so either path keeps the code.
+ * @param failure - message, code and optional provider facts.
+ * @param options - optional cause.
+ * @returns the error carrying exactly that code.
+ */
+export function llmErrorFromFailure(
+  failure: { message: string; code: string; status?: number; providerRetryAfterMs?: number; requestId?: string },
+  options?: ErrorOptions,
+): LlmError {
+  const ctor = LlmError as unknown as {
+    fromFailure?: (failure: object, options?: ErrorOptions) => LlmError
+    new (message: string, code: string, options?: object): LlmError
+  }
+  if (typeof ctor.fromFailure === 'function') return ctor.fromFailure(failure, options)
+  return new ctor(failure.message, failure.code, { ...failure, ...options })
+}
+
 /** Optional per-call hooks {@link httpLlmError} uses to read a rate-limit window. */
 export interface HttpLlmErrorOptions {
   /**
@@ -152,7 +176,9 @@ export async function httpLlmError(
   if (reset === undefined && rateLimited) {
     options.onWarn?.(`${label}: ${rateLimitDiagnostics(response, body)}`)
   }
-  return new LlmError(message, code, {
+  return llmErrorFromFailure({
+    message,
+    code,
     status: response.status,
     ...reset === undefined ? {} : { providerRetryAfterMs: waitFromReset(reset, now) },
   })

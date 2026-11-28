@@ -9,7 +9,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import './keep-alive.js'
 import { MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
+import type { CompatibleMessage as Message } from '../src/compat.js'
 import { CodexAdapter, codexRequestBody, fetchCodexModels } from '../src/providers/codex.js'
 import { GrokAdapter } from '../src/providers/grok.js'
 import { CLAUDE_IMAGE_LIMITS, ClaudeAdapter, assertClaudeImageLimits, claudeRequestBody } from '../src/providers/claude.js'
@@ -480,7 +481,7 @@ test('claudeRequestBody ships the cache breakpoints and never exceeds four', () 
     {
       provider: 'claude',
       model: 'claude-opus-5',
-      messages: history,
+      messages: history as never,
       system: 'explicit',
       tools: [
         { name: 'write', description: 'write a file', parameters: { type: 'object' } },
@@ -510,7 +511,7 @@ test('claudeRequestBody ships the cache breakpoints and never exceeds four', () 
 
 test('claudeRequestBody omits tools, thinking and effort when the request carries none', () => {
   const history: Message[] = [claudeMessage('u0', 'user', 'hi')]
-  const body = claudeRequestBody({ provider: 'claude', model: 'claude-opus-5', messages: history }, history, 32_000)
+  const body = claudeRequestBody({ provider: 'claude', model: 'claude-opus-5', messages: history as never }, history, 32_000)
   assert.equal('tools' in body, false)
   assert.equal('thinking' in body, false)
   assert.equal('output_config' in body, false)
@@ -1582,7 +1583,7 @@ test('claude images: an oversized image is refused before it is sent, naming the
         readImage: () => Promise.resolve({ ref: oversized, data: new Uint8Array(9) }),
       }) as never,
     })
-    const options: GenerateOptions = { provider: 'claude', model: 'claude-opus-4-5', messages, maxTokens: 1_000 }
+    const options: GenerateOptions = { provider: 'claude', model: 'claude-opus-4-5', messages: messages as never, maxTokens: 1_000 }
     await assert.rejects(
       (async () => { for await (const _chunk of adapter.stream(options)) { /* drain */ } })(),
       (error: unknown) => error instanceof Error

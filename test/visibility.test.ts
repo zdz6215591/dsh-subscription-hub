@@ -10,7 +10,7 @@ import { filterVisible, setModelVisible, hiddenIds } from '../src/model-visibili
 import { sessionFromZedPaste, parseZedModels, ndjsonToSse, parseZedUsage, buildZedProviderRequest, stripSandboxArguments, sandboxPolicyFacts, shouldStripSandboxArguments } from '../src/providers/zed.js'
 import { parseMeterUsage } from '../src/providers/codebuddy-lib/usage.js'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, Message } from '@deepseek-ai/dsh-llm'
+import type { CompatibleContentBlock as ContentBlock, CompatibleMessage as Message } from '../src/compat.js'
 import { messagesToCommandCode, messagesToOpenAI, parseCommandCodeAuthFile, parseCommandCodeCredits, parseCommandCodeOpenAIStream, parseCommandCodeStream, sessionFromCommandCodePaste, commandCodePublishedEfforts, isUnpublishedModel } from '../src/providers/commandcode.js'
 import { COMMANDCODE_MODELS_VERSION, COMMANDCODE_PUBLISHED_MODELS } from '../src/providers/commandcode-models.js'
 import { extractAgyProjectId } from '../src/providers/agy.js'
@@ -567,7 +567,7 @@ describe('commandcode stream', () => {
 
 describe('commandcode messagesToCommandCode', () => {
   function msg(role: Message['role'], content: ContentBlock[], source: Message['source']): Message {
-    return { id: MessageId('m-' + Math.random().toString(36).slice(2)), role, content, source }
+    return { id: MessageId('m-' + Math.random().toString(36).slice(2)), role, content, ...source === undefined ? {} : { source } }
   }
 
   it('round-trips paired tool-call and tool-result as structured wire parts', () => {
@@ -626,7 +626,7 @@ describe('commandcode messagesToCommandCode', () => {
 
 describe('commandcode OpenAI transport', () => {
   function msg(role: Message['role'], content: ContentBlock[], source: Message['source']): Message {
-    return { id: MessageId('m-' + Math.random().toString(36).slice(2)), role, content, source }
+    return { id: MessageId('m-' + Math.random().toString(36).slice(2)), role, content, ...source === undefined ? {} : { source } }
   }
 
   it('replays reasoning_content on assistant turns (DeepSeek thinking contract)', () => {
@@ -844,7 +844,7 @@ describe('agy request body EOTP', () => {
 
   it('omits project when projectId is absent', () => {
     const body = toAgyRequestBody(
-      { model: 'gemini-3.7-flash-tiered', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] } as Parameters<typeof toAgyRequestBody>[0],
+      { model: 'gemini-3.7-flash-tiered', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] } as unknown as Parameters<typeof toAgyRequestBody>[0],
       {},
     )
     assert.equal('project' in body, false)

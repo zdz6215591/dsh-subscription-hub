@@ -8,14 +8,13 @@ import type { InputModality } from './modality.js'
 import { execFileSync } from 'node:child_process'
 import { EMPTY_RESPONSE_CODE, errorChain, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
-  ContentBlock,
   GenerateOptions,
   LlmModelInfo,
   LlmProviderInfo,
   LlmResolvedModelInfo,
-  Message,
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import type { CompatibleContentBlock as ContentBlock, CompatibleMessage as Message } from '../compat.js'
 import type { FlowSpec } from '../auth/oauth-flow.js'
 import type { ClaudeSession } from '../auth/store.js'
 import type { ProviderId } from '../auth/store.js'
@@ -40,6 +39,7 @@ import {
   discoverOrRetryAuth,
   isDiscoveryAborted,
   isMissingOrInvalidCredential,
+  llmErrorFromFailure,
   oauthEndpointError,
   OAuthEndpointError,
 } from './common.js'
@@ -616,13 +616,10 @@ export function assertClaudeImageLimits(
   payloads.forEach((dataBase64, index) => {
     const bytes = base64ByteLength(dataBase64)
     if (bytes > CLAUDE_IMAGE_LIMITS.maxImageBytes) {
-      throw new LlmError(
-        `claude request image ${index + 1} of ${payloads.length} is ${bytes} bytes encoded, over the `
+      throw llmErrorFromFailure({ message: `claude request image ${index + 1} of ${payloads.length} is ${bytes} bytes encoded, over the `
         + `${CLAUDE_IMAGE_LIMITS.maxImageBytes}-byte per-image limit the Messages API enforces `
         + '(ref f34770c: 3.75MB encoded, under the 5MB base64 per-image cap); '
-        + 'reduce or split that image before sending it on this route',
-        'IMAGE_TOO_LARGE',
-      )
+        + 'reduce or split that image before sending it on this route', code: 'IMAGE_TOO_LARGE' })
     }
   })
   const projectsImages = typeof (attachments as { readImageRequest?: unknown } | undefined)
@@ -633,25 +630,19 @@ export function assertClaudeImageLimits(
     requestedImageRefs(requested).forEach((ref, index) => {
       const longEdge = Math.max(ref.width, ref.height)
       if (longEdge > CLAUDE_IMAGE_LIMITS.maxEdge) {
-        throw new LlmError(
-          `claude request image ${index + 1} is ${ref.width}x${ref.height}: its ${longEdge}px long edge `
+        throw llmErrorFromFailure({ message: `claude request image ${index + 1} is ${ref.width}x${ref.height}: its ${longEdge}px long edge `
           + `exceeds the ${CLAUDE_IMAGE_LIMITS.maxEdge}px limit the Messages API enforces once a request `
           + 'carries many images (ref f34770c, #110), and this host cannot downscale it for the request; '
-          + 'resize the image below 2000px on its long edge before sending it on this route',
-          'IMAGE_TOO_LARGE',
-        )
+          + 'resize the image below 2000px on its long edge before sending it on this route', code: 'IMAGE_TOO_LARGE' })
       }
     })
   }
   const totalBase64Bytes = payloads.reduce((sum, dataBase64) => sum + dataBase64.length, 0)
   if (totalBase64Bytes > CLAUDE_IMAGE_LIMITS.maxRequestBase64Bytes) {
-    throw new LlmError(
-      `claude request carries ${totalBase64Bytes} bytes of inline image data, over the `
+    throw llmErrorFromFailure({ message: `claude request carries ${totalBase64Bytes} bytes of inline image data, over the `
       + `${CLAUDE_IMAGE_LIMITS.maxRequestBase64Bytes}-byte image budget kept inside the 32MB body limit `
       + '(ref 43f2bbe/eb42966, #136); remove the oldest images from the history before sending it '
-      + 'on this route',
-      'IMAGE_TOO_LARGE',
-    )
+      + 'on this route', code: 'IMAGE_TOO_LARGE' })
   }
 }
 

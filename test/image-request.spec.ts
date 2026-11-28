@@ -77,7 +77,21 @@ test('readRequestImage prefers the provider request version', async () => {
   assert.deepEqual(bytes.data, projected)
   // The encoder's media type travels, not the stored one (webp may become jpeg).
   assert.equal(bytes.mediaType, 'image/jpeg')
-  assert.deepEqual(seenPolicy, { maxPixels: 1568 * 980, width: 1568, height: 980, maxBytes: REQUEST_IMAGE_MAX_ENCODED_BYTES })
+  assert.deepEqual(seenPolicy, {
+    maxPixels: 1568 * 980,
+    width: 1568,
+    height: 980,
+    maxBytes: REQUEST_IMAGE_MAX_ENCODED_BYTES,
+    maxImageBytes: REQUEST_IMAGE_MAX_ENCODED_BYTES,
+    imageTargetBytes: REQUEST_IMAGE_MAX_ENCODED_BYTES,
+  })
+})
+
+test('the request target carries the DSH 0.2.3 byte fields, which that host requires', () => {
+  const policy = requestImagePolicy(ref(2880, 1800))
+  assert.equal(policy.maxImageBytes, REQUEST_IMAGE_MAX_ENCODED_BYTES)
+  assert.equal(policy.imageTargetBytes, REQUEST_IMAGE_MAX_ENCODED_BYTES)
+  assert.ok(policy.imageTargetBytes <= policy.maxImageBytes, 'the target never exceeds the cap')
 })
 
 test('readRequestImage falls back to the original when the provider cannot project', async () => {
