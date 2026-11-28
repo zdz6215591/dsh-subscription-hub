@@ -239,7 +239,7 @@ import {
 import type { KiroSignIn } from './providers/kiro/index.js'
 import { importLocalMistralKey } from './providers/mistral-keyring.js'
 import { VIBE_INSTALL_HINT, runVibeSignIn } from './providers/mistral-signin.js'
-import { pollMistralSignIn, startMistralSignIn, writeSignInDiagnostic } from './providers/mistral-oauth.js'
+import { exchangeMistralSignIn, pollMistralSignIn, startMistralSignIn, verifyMistralKey, writeSignInDiagnostic } from './providers/mistral-oauth.js'
 import {
   MistralAdapter,
   assertUsableMistralKey,
@@ -808,18 +808,39 @@ export class SubscriptionsAuthController implements AuthController {
       try {
         const started = await startMistralSignIn(proxiedFetch)
         void pollMistralSignIn(proxiedFetch, started).then(async result => {
-          if (result.kind !== 'ready' || result.key === undefined) {
-            await writeSignInDiagnostic({
-              fields: result.kind === 'ready' ? result.fields : [],
-              ...result.kind === 'failed' ? { status: result.reason } : {},
-              adopted: result.kind === 'ready' && result.key !== undefined ? 'key' : result.kind === 'ready' && result.code !== undefined ? 'code' : 'none',
-            })
-            this.lastError.set('mistral', result.kind === 'failed'
-              ? `mistral: sign-in did not complete (${result.reason})`
-              : 'mistral: the sign-in answered with a code instead of a key; paste an API key for now')
+          const fields = result.kind === 'ready' ? result.fields : []
+          if (result.kind === 'failed') {
+            await writeSignInDiagnostic({ fields, status: result.reason, adopted: 'none' })
+            this.lastError.set('mistral', `mistral: sign-in did not complete (${result.reason})`)
             return
           }
-          const session = sessionFromMistralKey(assertUsableMistralKey(result.key, 'mistral'), `mistral-vibe-${maskMistralKey(result.key)}`)
+          const resultKey = result.kind === 'ready' ? result.key : undefined
+          const resultExchange = result.kind === 'ready' ? result.exchangeToken : undefined
+          const resultCode = result.kind === 'ready' ? result.code : undefined
+          // The poll may hand back a key outright, or an `exchange_token` that must be
+          // exchanged. Only a credential the inference API ACCEPTS is stored: a token
+          // that is not an API key would list an account that can never answer.
+          let candidate: string | undefined = resultKey
+          try {
+            if (candidate === undefined && resultExchange !== undefined) {
+              candidate = await exchangeMistralSignIn(proxiedFetch, resultExchange)
+            }
+          } catch (error) {
+            await writeSignInDiagnostic({ fields, adopted: 'code' })
+            this.lastError.set('mistral', error instanceof Error ? error.message : String(error))
+            return
+          }
+          if (candidate === undefined) {
+            await writeSignInDiagnostic({ fields, adopted: resultCode === undefined ? 'none' : 'code' })
+            this.lastError.set('mistral', 'mistral: the sign-in finished without a usable key; paste an API key')
+            return
+          }
+          if (!await verifyMistralKey(proxiedFetch, candidate)) {
+            await writeSignInDiagnostic({ fields, adopted: 'none' })
+            this.lastError.set('mistral', 'mistral: the sign-in returned a credential the API rejects; paste an API key')
+            return
+          }
+          const session = sessionFromMistralKey(assertUsableMistralKey(candidate, 'mistral'), `mistral-vibe-${maskMistralKey(candidate)}`)
           await this.persist('mistral', session)
           this.lastError.delete('mistral')
           this.onAuthChanged('mistral', accountKeyOf('mistral', session))

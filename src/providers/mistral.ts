@@ -23,7 +23,7 @@
  *     would be worse than none.
  */
 
-import { attributionHeaders, LlmAdapter, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
+import { attributionHeaders, LlmAdapter, LlmError, QUOTA_EXCEEDED_CODE, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -35,7 +35,7 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { MistralSession, ProviderId } from '../auth/store.js'
 import { proxiedFetch } from '../http.js'
 import { AccountTokenManager } from '../providers/accounts.js'
-import { httpLlmError, idleWatchdog, mapFetchFailure } from '../providers/common.js'
+import { effortDisplayName, httpLlmError, idleWatchdog, mapFetchFailure } from '../providers/common.js'
 import type { FetchFn, ModelEntry, ModelListNotFetched, ProviderUsage, UsageWindow } from '../providers/common.js'
 import type { PoolAdapter } from '../providers/pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, subscriptionRetryPolicy } from '../providers/rate-limit.js'
@@ -50,6 +50,9 @@ export const MISTRAL_MODELS_PATH = '/models'
 export const MISTRAL_SUBSCRIPTION_PATH = '/billing/subscription'
 export const MISTRAL_BUDGET_PATH = '/billing/budget'
 
+/** The effort levels Mistral accepts; low and high were measured, medium is the documented middle. */
+const MISTRAL_REASONING_EFFORTS = ['low', 'medium', 'high'] as const
+
 /** Retry ladder: a busy gateway recovers in place. */
 const MISTRAL_RETRY = Object.freeze({ maxRetries: 3, initialDelayMs: 800, maxDelayMs: 30_000, jitterRatio: 0.1 })
 
@@ -63,6 +66,8 @@ export interface MistralModel {
   contextWindow?: number
   maxOutputTokens?: number
   supportsImages: boolean
+  /** capabilities.reasoning: the model accepts easoning_effort. */
+  supportsReasoning: boolean
 }
 
 /**
@@ -85,7 +90,7 @@ export function parseMistralModels(payload: unknown): MistralModel[] {
     const row = (typeof raw === 'object' && raw !== null ? raw : {}) as {
       id?: unknown
       name?: unknown
-      capabilities?: { vision?: unknown; completion_chat?: unknown }
+      capabilities?: { vision?: unknown; completion_chat?: unknown; reasoning?: unknown }
       max_context_length?: unknown
       max_output_tokens?: unknown
     }
@@ -99,6 +104,7 @@ export function parseMistralModels(payload: unknown): MistralModel[] {
       ...typeof context === 'number' && Number.isFinite(context) && context > 0 ? { contextWindow: Math.trunc(context) } : {},
       ...typeof output === 'number' && Number.isFinite(output) && output > 0 ? { maxOutputTokens: Math.trunc(output) } : {},
       supportsImages: row.capabilities?.vision === true,
+      supportsReasoning: row.capabilities?.reasoning === true,
     })
   }
   return out
@@ -255,6 +261,7 @@ export class MistralAdapter extends LlmAdapter {
       ...entry.contextWindow === undefined ? {} : { contextWindow: entry.contextWindow },
       ...entry.maxTokens === undefined ? {} : { maxOutputTokens: entry.maxTokens },
       supportsImages: entry.inputModalities?.includes('image') ?? false,
+      supportsReasoning: (entry as { reasoning?: boolean }).reasoning === true,
     }))
   }
 
@@ -303,6 +310,14 @@ export class MistralAdapter extends LlmAdapter {
       ?? this.configuredRoster().find(entry => entry.id === model)
     const contextWindow = configured?.contextWindow ?? known?.contextWindow
     const maxTokens = configured?.maxTokens ?? known?.maxOutputTokens
+    // Mistral HONOURS `reasoning_effort` on models that declare
+    // `capabilities.reasoning` — measured on a live key, the same prompt spent 102
+    // reasoning tokens with no effort, 193 with `high` and 64 with `low`. A model
+    // without that capability claims no axis at all, rather than offering knobs the
+    // API answers with `Reasoning prompt mode is not enabled for this model`.
+    const efforts = known?.supportsReasoning === true
+      ? MISTRAL_REASONING_EFFORTS.map(effort => ({ id: ReasoningEffortId(effort), name: effortDisplayName(effort) }))
+      : []
     return {
       provider,
       id: model,
@@ -310,6 +325,7 @@ export class MistralAdapter extends LlmAdapter {
       inputModalities: configured?.inputModalities ?? (known?.supportsImages === true ? ['text', 'image'] : ['text']),
       ...contextWindow === undefined ? {} : { context: { contextWindow } },
       ...maxTokens === undefined ? {} : { defaultMaxTokens: maxTokens },
+      ...efforts.length === 0 ? {} : { reasoning: { efforts } },
     }
   }
 
@@ -346,6 +362,11 @@ export class MistralAdapter extends LlmAdapter {
       if (options.temperature !== undefined) body.temperature = options.temperature
       if (options.maxTokens !== undefined) body.max_tokens = options.maxTokens
       if (options.stop !== undefined && options.stop.length > 0) body.stop = options.stop
+      // Only for models that declare the capability; any other value would be
+      // rejected by the API (Reasoning prompt mode is not enabled for this model).
+      const declared = [...this.rosters.values()].flatMap(entry => entry.models).find(entry => entry.id === options.model)
+      const effort = options.reasoningEffort === undefined ? '' : String(options.reasoningEffort).trim()
+      if (declared?.supportsReasoning === true && effort !== '' && effort !== 'off') body.reasoning_effort = effort
 
       let response: Response
       try {

@@ -179,3 +179,52 @@ test('mistral: the roster merges the operator\'s configured rows over the live l
   const models = await adapter.listOwnModels('mistral')
   assert.deepEqual(models.map(model => model.id).sort(), ['hand-added', 'live-model'])
 })
+
+test('mistral: reasoning models advertise efforts, others advertise none', async () => {
+  // Measured: `reasoning_effort` is honoured (102 / 193 / 64 reasoning tokens for
+  // none / high / low), but only for models declaring `capabilities.reasoning`.
+  const fetchFn = (async () => new Response(JSON.stringify({
+    data: [
+      { id: 'mistral-large-latest', max_context_length: 1_048_576, capabilities: { reasoning: true, vision: true } },
+      { id: 'codestral-latest', max_context_length: 256_000, capabilities: { reasoning: false } },
+    ],
+  }), { status: 200 })) as unknown as typeof fetch
+  const adapter = adapterWith(fetchFn)
+  await adapter.listOwnModels('mistral')
+
+  const reasoning = await adapter.resolveOwnModel('mistral', 'mistral-large-latest')
+  assert.deepEqual(reasoning.reasoning?.efforts.map(effort => effort.id), ['low', 'medium', 'high'])
+  const plain = await adapter.resolveOwnModel('mistral', 'codestral-latest')
+  assert.equal(plain.reasoning, undefined, 'no axis for a model that does not reason')
+})
+
+test('mistral: the effort is sent as reasoning_effort, and only for such a model', async () => {
+  const bodies: Record<string, unknown>[] = []
+  const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).endsWith('/models')) {
+      return new Response(JSON.stringify({
+        data: [
+          { id: 'mistral-large-latest', capabilities: { reasoning: true } },
+          { id: 'codestral-latest', capabilities: { reasoning: false } },
+        ],
+      }), { status: 200 })
+    }
+    bodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
+    return new Response([
+      'data: {"choices":[{"index":0,"delta":{"content":"ok"}}]}',
+      '',
+      'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n'), { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  }) as unknown as typeof fetch
+  const adapter = adapterWith(fetchFn)
+  await adapter.listOwnModels('mistral')
+
+  for await (const _chunk of adapter.stream({ ...OPTIONS, model: 'mistral-large-latest', reasoningEffort: 'high' } as never)) { /* drain */ }
+  for await (const _chunk of adapter.stream({ ...OPTIONS, model: 'codestral-latest', reasoningEffort: 'high' } as never)) { /* drain */ }
+
+  assert.equal(bodies[0]?.reasoning_effort, 'high', 'a reasoning model gets the level it asked for')
+  assert.equal(bodies[1]?.reasoning_effort, undefined, 'a model without the capability is not sent one')
+})

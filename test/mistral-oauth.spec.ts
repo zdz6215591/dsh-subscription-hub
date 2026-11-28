@@ -21,7 +21,9 @@ import {
   createPkcePair,
   parseStartedSignIn,
   pollMistralSignIn,
+  exchangeMistralSignIn,
   startMistralSignIn,
+  verifyMistralKey,
 } from '../src/providers/mistral-oauth.js'
 import type { FetchFn } from '../src/providers/common.js'
 
@@ -142,4 +144,49 @@ test('mistral oauth: a 404 from the poll is terminal, a 500 is retried', async (
   }, { intervalMs: 1, timeoutMs: 2_000, sleep: async () => {} })
   assert.equal(calls, 2, 'the 500 was retried, the 404 was not')
   assert.equal(result.kind, 'failed')
+})
+
+test('mistral oauth: api_key and exchange_token are told apart by name, not by shape', () => {
+  // Both are opaque strings; storing the token as a key is what left an account
+  // listed with no models.
+  const exchanged = classifyPollPayload({ status: 'complete', exchange_token: 'IcHOWDIEQTCYeqlufZ_NzbyVB7s' })
+  assert.equal(exchanged.kind, 'ready')
+  if (exchanged.kind === 'ready') {
+    assert.equal(exchanged.exchangeToken, 'IcHOWDIEQTCYeqlufZ_NzbyVB7s')
+    assert.equal(exchanged.key, undefined, 'an exchange token is NOT a key')
+  }
+  const direct = classifyPollPayload({ status: 'complete', api_key: 'mstrl_direct_0123456789abcd' })
+  assert.equal(direct.kind, 'ready')
+  if (direct.kind === 'ready') {
+    assert.equal(direct.key, 'mstrl_direct_0123456789abcd')
+    assert.equal(direct.exchangeToken, undefined)
+  }
+})
+
+test('mistral oauth: the exchange posts the token in the body and returns the key', async () => {
+  let seen: { url: string; body: Record<string, unknown> } | undefined
+  const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    seen = { url: String(input), body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown> }
+    return new Response(JSON.stringify({ api_key: 'mstrl_exchanged_0123456789' }), { status: 200 })
+  }) as unknown as FetchFn
+  const key = await exchangeMistralSignIn(fetchFn, 'exchange-token-value')
+  assert.equal(seen?.url, `${MISTRAL_CONSOLE_BASE}/api/vibe/sign-in/exchange`)
+  assert.equal(seen?.body.exchange_token, 'exchange-token-value')
+  assert.equal(key, 'mstrl_exchanged_0123456789')
+})
+
+test('mistral oauth: an exchange without a key fails instead of storing nothing useful', async () => {
+  const empty = (async () => new Response('{}', { status: 200 })) as unknown as FetchFn
+  await assert.rejects(exchangeMistralSignIn(empty, 't'), /without an API key/)
+  const rejected = (async () => new Response('{"detail":null}', { status: 401 })) as unknown as FetchFn
+  await assert.rejects(exchangeMistralSignIn(rejected, 't'), /failed \(HTTP 401\)/)
+})
+
+test('mistral oauth: a credential is verified against /v1/models before it is stored', async () => {
+  const good = (async () => new Response('{"data":[]}', { status: 200 })) as unknown as FetchFn
+  assert.equal(await verifyMistralKey(good, 'k'), true)
+  const bad = (async () => new Response('{"detail":"Invalid API Key"}', { status: 401 })) as unknown as FetchFn
+  assert.equal(await verifyMistralKey(bad, 'k'), false)
+  const broken = (async () => { throw new Error('network down') }) as unknown as FetchFn
+  assert.equal(await verifyMistralKey(broken, 'k'), false, 'a network failure is not a pass')
 })

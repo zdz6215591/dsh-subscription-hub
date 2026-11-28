@@ -120,7 +120,7 @@ export async function startMistralSignIn(
 /** What one poll said. */
 export type PollResult =
   | { kind: 'pending' }
-  | { kind: 'ready'; key?: string; code?: string; fields: string[] }
+  | { kind: 'ready'; key?: string; exchangeToken?: string; code?: string; fields: string[] }
   | { kind: 'failed'; reason: string }
 
 /**
@@ -147,14 +147,18 @@ export function classifyPollPayload(payload: unknown): PollResult {
     const reason = typeof body.error === 'string' ? body.error : status
     return { kind: 'failed', reason }
   }
-  // A key is a long opaque token; a JWT or a short word is not one.
-  const keyEntry = Object.entries(body).find(([name, value]) => (
-    /key|token|secret|credential/i.test(name)
-    && typeof value === 'string'
-    && /^[A-Za-z0-9_-]{20,}$/.test(value)
-    && !/^ey[A-Za-z0-9_-]+\./.test(value)
+  // The response struct the CLI itself uses lists `api_key` and `exchange_token`
+  // side by side, so both are matched BY NAME. A 32-character opaque token merely
+  // LOOKING like a key is how an `exchange_token` was once stored as one, which left
+  // an account listed with no models: the inference API answers 401 to it.
+  const directKey = [body.api_key, body.apiKey].find(
+    (value): value is string => typeof value === 'string' && value !== '',
+  )
+  if (directKey !== undefined) return { kind: 'ready', key: directKey, fields }
+  const exchangeEntry = Object.entries(body).find(([name, value]) => (
+    /^(exchange_token|exchangeToken)$/.test(name) && typeof value === 'string' && value !== ''
   ))
-  if (keyEntry !== undefined) return { kind: 'ready', key: keyEntry[1] as string, fields }
+  if (exchangeEntry !== undefined) return { kind: 'ready', exchangeToken: exchangeEntry[1] as string, fields }
   const codeEntry = Object.entries(body).find(([name, value]) => /^code$/i.test(name) && typeof value === 'string' && value !== '')
   if (codeEntry !== undefined) return { kind: 'ready', code: codeEntry[1] as string, fields }
   return { kind: 'failed', reason: `unrecognised completion (fields: ${fields.join(', ') || 'none'})` }
@@ -229,4 +233,60 @@ export async function pollMistralSignIn(
     await sleep(intervalMs)
   }
   return { kind: 'failed', reason: 'timed out waiting for the browser' }
+}
+
+/** Where an approved sign-in is exchanged for the account's API key. */
+export const MISTRAL_EXCHANGE_PATH = '/api/vibe/sign-in/exchange'
+
+/**
+ * Exchange the poll's `exchange_token` for the account's API key.
+ *
+ * The CLI's own response struct lists `api_key` and `exchange_token` side by side,
+ * so a poll can end either way. Measured on the real endpoint: a request WITHOUT a
+ * token body answers `401 {"detail":null}`, while one carrying `exchange_token` is
+ * accepted far enough to be rate limited (`429`), which places the token in the body.
+ *
+ * @param fetchFn - fetch to use.
+ * @param exchangeToken - the token the poll returned.
+ * @param options - cancellation.
+ * @returns the API key.
+ */
+export async function exchangeMistralSignIn(
+  fetchFn: FetchFn,
+  exchangeToken: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<string> {
+  const response = await fetchFn(`${MISTRAL_CONSOLE_BASE}${MISTRAL_EXCHANGE_PATH}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json', ...attributionHeaders() },
+    body: JSON.stringify({ exchange_token: exchangeToken }),
+    ...options.signal === undefined ? {} : { signal: options.signal },
+  })
+  if (!response.ok) throw new Error(`mistral: exchanging the sign-in failed (HTTP ${response.status})`)
+  const payload: unknown = await response.json().catch(() => ({}))
+  const body = (typeof payload === 'object' && payload !== null ? payload : {}) as Record<string, unknown>
+  const key = [body.api_key, body.apiKey, body.key].find((value): value is string => typeof value === 'string' && value !== '')
+  if (key === undefined) throw new Error('mistral: the exchange answered without an API key')
+  return key
+}
+
+/**
+ * Check a credential against the inference API before storing it.
+ *
+ * A token that is not an API key answers `401 {"detail":"Invalid API Key"}` here —
+ * the exact state that left an account listed with no models in the picker.
+ *
+ * @param fetchFn - fetch to use.
+ * @param key - the candidate credential.
+ * @returns whether `/v1/models` accepted it.
+ */
+export async function verifyMistralKey(fetchFn: FetchFn, key: string): Promise<boolean> {
+  try {
+    const response = await fetchFn('https://api.mistral.ai/v1/models', {
+      headers: { authorization: `Bearer ${key}`, accept: 'application/json', ...attributionHeaders() },
+    })
+    return response.ok
+  } catch {
+    return false
+  }
 }
