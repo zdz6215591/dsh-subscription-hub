@@ -318,6 +318,11 @@ export interface Config {
    * newer one than the baked-in default.
    */
   commandCodeCliVersion?: string
+  /**
+   * Send Mistral's Vibe attribution metadata. Default on: it is what charges the
+   * plan allowance instead of the pay-as-you-go wallet.
+   */
+  mistralVibeAttribution?: boolean
   /** Whether and how long a route waits out a closed rate-limit window. */
   rateLimit?: RateLimitConfig
   /** Advisory model catalogs for providers whose discovery you want to override, per provider. */
@@ -393,6 +398,7 @@ export const Config: z<Config> = z.object({
   agyVersion: z.string(),
   agyUserAgent: z.string(),
   commandCodeCliVersion: z.string(),
+  mistralVibeAttribution: z.boolean().default(true),
   rateLimit: z.object({
     wait: z.boolean().default(true),
     maxWaitMs: z.number().min(1).default(DEFAULT_RATE_LIMIT_MAX_WAIT_MS),
@@ -1574,6 +1580,7 @@ export function apply(ctx: Context, config: Config): void {
         }
         const adapter = new MistralAdapter({
           models: catalog.mistral,
+          vibeAttribution: config.mistralVibeAttribution !== false,
           streamIdleTimeoutMs,
           rateLimit,
           tokens,

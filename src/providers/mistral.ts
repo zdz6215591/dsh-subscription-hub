@@ -53,6 +53,15 @@ export const MISTRAL_BUDGET_PATH = '/billing/budget'
 /** The effort levels Mistral accepts; low and high were measured, medium is the documented middle. */
 const MISTRAL_REASONING_EFFORTS = ['low', 'medium', 'high'] as const
 
+/**
+ * The Vibe client version presented in the attribution metadata.
+ *
+ * Not a capability: Mistral attributes a completion to the Vibe product (and so to
+ * the plan allowance) by the metadata it carries, and this is one of its fields.
+ * Override with mistralVibeVersion when the vendor moves on.
+ */
+const MISTRAL_VIBE_VERSION = '3.1.5'
+
 /** Retry ladder: a busy gateway recovers in place. */
 const MISTRAL_RETRY = Object.freeze({ maxRetries: 3, initialDelayMs: 800, maxDelayMs: 30_000, jitterRatio: 0.1 })
 
@@ -218,6 +227,13 @@ export interface MistralAdapterOptions {
   fetchFn?: FetchFn
   resolveAttachments?: () => AttachmentStore | undefined
   rateLimit?: RateLimitWait
+  /**
+   * Send the Vibe attribution metadata. Default on: it is what charges the plan
+   * allowance instead of the pay-as-you-go wallet.
+   */
+  vibeAttribution?: boolean
+  /** Plan name to report in the metadata, when known. */
+  planName?: string
 }
 
 /** Mistral provider adapter. */
@@ -376,6 +392,9 @@ export class MistralAdapter extends LlmAdapter {
     try {
       const session = await this.options.tokens.session(account)
       const resolved = await resolveImages(options.messages, this.options.resolveAttachments?.(), options.signal)
+      // One call per turn loop: the first is the turn's main call, later ones are
+      // secondary — the same taxonomy the vendor CLI reports.
+      let iteration = 0
       const body: Record<string, unknown> = {
         model: options.model,
         messages: toChatMessages(resolved, options.system),
@@ -385,6 +404,23 @@ export class MistralAdapter extends LlmAdapter {
       if (options.temperature !== undefined) body.temperature = options.temperature
       if (options.maxTokens !== undefined) body.max_tokens = options.maxTokens
       if (options.stop !== undefined && options.stop.length > 0) body.stop = options.stop
+      // Attribution metadata routes the charge to the plan allowance. MEASURED:
+      // the same key and model billed `api_budget` without it and `vibe_budget`
+      // with it (+0.000029 % of the 150 USD allowance, API wallet untouched),
+      // which is how the vendor CLI spends the subscription rather than the
+      // pay-as-you-go wallet. `call_type` mirrors the CLI: the first call of a
+      // turn is `main_call`, later ones `secondary_call`.
+      if (this.options.vibeAttribution !== false) {
+        body.metadata = {
+          os: process.platform,
+          arch: process.arch,
+          version: MISTRAL_VIBE_VERSION,
+          call_type: iteration === 0 ? 'main_call' : 'secondary_call',
+          ...options.sessionId === undefined ? {} : { session_id: String(options.sessionId) },
+          ...this.options.planName === undefined ? {} : { user_plan: this.options.planName },
+        }
+        iteration++
+      }
       // Only for models that declare the capability; any other value would be
       // rejected by the API (Reasoning prompt mode is not enabled for this model).
       const declared = [...this.rosters.values()].flatMap(entry => entry.models).find(entry => entry.id === options.model)

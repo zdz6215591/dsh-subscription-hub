@@ -269,3 +269,73 @@ test('mistral: the picker serves the union of every account, because one roster 
   const models = await adapter.listOwnModels('mistral')
   assert.deepEqual(models.map(model => model.id), ['mistral-small-latest'], 'duplicates collapse across accounts')
 })
+test('mistral: requests carry the Vibe attribution metadata that bills the plan allowance', async () => {
+  // Measured on the live account: the same key and model billed `api_budget`
+  // without this metadata and `vibe_budget` with it (+0.000029 % of the 150 USD
+  // allowance, API wallet untouched). `call_type` follows the CLI: the turn's first
+  // call is main_call, later ones secondary_call.
+  const bodies: Record<string, unknown>[] = []
+  const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).endsWith('/models')) {
+      return new Response(JSON.stringify({ data: [{ id: 'mistral-medium-latest', capabilities: {} }] }), { status: 200 })
+    }
+    bodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
+    return new Response([
+      'data: {"choices":[{"index":0,"delta":{"content":"ok"}}]}',
+      '',
+      'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n'), { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  }) as unknown as typeof fetch
+  const adapter = new MistralAdapter({
+    models: [],
+    streamIdleTimeoutMs: 5_000,
+    discovery: true,
+    fetchFn: fetchFn as never,
+    planName: 'EDU',
+    tokens: {
+      session: async () => sessionFromMistralKey('test-key-0123456789', 'mistral-test'),
+      list: async () => [{ key: 'a', session: sessionFromMistralKey('test-key-0123456789', 'mistral-test'), isDefault: true }],
+      hasSession: async () => true,
+    } as unknown as MistralAdapterOptions['tokens'],
+  })
+  for await (const _chunk of adapter.stream({ ...OPTIONS, model: 'mistral-medium-latest' } as never)) { /* drain */ }
+  const metadata = bodies[0]?.metadata as Record<string, unknown> | undefined
+  assert.ok(metadata !== undefined, 'the attribution metadata is present')
+  assert.equal(metadata.call_type, 'main_call')
+  assert.equal(metadata.user_plan, 'EDU')
+  assert.equal(typeof metadata.version, 'string')
+  assert.equal(typeof metadata.os, 'string')
+  assert.equal(metadata.session_id, undefined, 'no session id on an options object without one')
+})
+
+test('mistral: the attribution can be switched off', async () => {
+  const bodies: Record<string, unknown>[] = []
+  const fetchFn = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    bodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
+    return new Response([
+      'data: {"choices":[{"index":0,"delta":{"content":"ok"}}]}',
+      '',
+      'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n'), { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  }) as unknown as typeof fetch
+  const adapter = new MistralAdapter({
+    models: [],
+    streamIdleTimeoutMs: 5_000,
+    discovery: false,
+    fetchFn: fetchFn as never,
+    vibeAttribution: false,
+    tokens: {
+      session: async () => sessionFromMistralKey('test-key-0123456789', 'mistral-test'),
+      list: async () => [{ key: 'a', session: sessionFromMistralKey('test-key-0123456789', 'mistral-test'), isDefault: true }],
+      hasSession: async () => true,
+    } as unknown as MistralAdapterOptions['tokens'],
+  })
+  for await (const _chunk of adapter.stream(OPTIONS)) { /* drain */ }
+  assert.equal(bodies[0]?.metadata, undefined, 'switched off means no metadata at all')
+})
