@@ -75,9 +75,10 @@ export interface MistralModel {
   contextWindow?: number
   maxOutputTokens?: number
   supportsImages: boolean
-  /** capabilities.reasoning: the model accepts 
-easoning_effort. */
+  /** `capabilities.reasoning`: the model accepts `reasoning_effort`. */
   supportsReasoning: boolean
+  /** Other ids the vendor lists for the same model. */
+  aliases?: string[]
 }
 
 /**
@@ -115,6 +116,9 @@ export function parseMistralModels(payload: unknown): MistralModel[] {
       ...typeof output === 'number' && Number.isFinite(output) && output > 0 ? { maxOutputTokens: Math.trunc(output) } : {},
       supportsImages: row.capabilities?.vision === true,
       supportsReasoning: row.capabilities?.reasoning === true,
+      ...Array.isArray((row as { aliases?: unknown }).aliases)
+        ? { aliases: ((row as { aliases: unknown[] }).aliases).filter((a): a is string => typeof a === 'string') }
+        : {},
     })
   }
   return out
@@ -323,7 +327,9 @@ export class MistralAdapter extends LlmAdapter {
         headers: { authorization: `Bearer ${session.accessToken}`, accept: 'application/json', ...attributionHeaders() },
       })
       if (!response.ok) throw await httpLlmError(response, 'mistral models')
-      const models = parseMistralModels(await response.json())
+      // Alias rows collapse here: the vendor lists every alias as its own row,
+      // which repeats one model up to nine times in the picker.
+      const models = collapseMistralAliases(parseMistralModels(await response.json()))
       if (models.length === 0) {
         this.notFetched.set(provider, { what: 'Mistral returned no models', detail: '/v1/models listed nothing' })
         return this.configuredRoster().map(model => toMistralModelInfo(model, provider))
@@ -558,4 +564,58 @@ export function isMistralPermanentRefreshError(_error: unknown): boolean {
 /** Refresh a static key: the identity. */
 export async function refreshMistral(session: MistralSession): Promise<MistralSession> {
   return session
+}
+
+/**
+ * Collapse the vendor's ALIAS rows into one row per model.
+ *
+ * `/v1/models` lists every alias as its own row with the canonical display name, so
+ * a naive listing repeats `mistral-medium-latest` nine times (its aliases are
+ * `mistral-medium`, `mistral-medium-3`, `mistral-medium-3-5`, `mistral-medium-3.5`,
+ * `mistral-medium-2604`, `mistral-vibe-cli-latest`, `mistral-vibe-cli-with-tools`
+ * and `magistral-medium-latest`). Rows are grouped when each one's id appears in the
+ * other's `aliases`.
+ *
+ * The survivor is the row that IS its own display name (a stable id), else the
+ * dated pin, else the first — so the picker keeps `mistral-medium-latest` rather
+ * than an arbitrary alias.
+ *
+ * @param models - parsed rows, in vendor order.
+ * @returns one row per model, aliases merged onto the survivor.
+ */
+export function collapseMistralAliases(models: readonly MistralModel[]): MistralModel[] {
+  const byId = new Map(models.map(model => [model.id, model]))
+  const groupOf = new Map<string, string>()
+  for (const model of models) {
+    for (const alias of model.aliases ?? []) {
+      const other = byId.get(alias)
+      if (other === undefined || other.id === model.id) continue
+      const a = groupOf.get(model.id) ?? model.id
+      const b = groupOf.get(other.id) ?? other.id
+      if (a === b) continue
+      // Union the two groups under the lower id, so the choice is deterministic.
+      const target = a < b ? a : b
+      const moved = a < b ? b : a
+      for (const [id, root] of groupOf) if (root === moved) groupOf.set(id, target)
+      groupOf.set(target, target)
+      groupOf.set(moved, target)
+    }
+  }
+  const groups = new Map<string, MistralModel[]>()
+  for (const model of models) {
+    const root = groupOf.get(model.id) ?? model.id
+    const list = groups.get(root) ?? []
+    list.push(model)
+    groups.set(root, list)
+  }
+  const out: MistralModel[] = []
+  for (const list of groups.values()) {
+    const survivor = list.find(model => model.id === model.name)
+      ?? list.find(model => /-\d{4}$/.test(model.id))
+      ?? list[0]
+    if (survivor === undefined) continue
+    const aliases = [...new Set(list.flatMap(model => [model.id, ...model.aliases ?? []]).filter(id => id !== survivor.id))]
+    out.push({ ...survivor, ...aliases.length === 0 ? {} : { aliases } })
+  }
+  return out
 }

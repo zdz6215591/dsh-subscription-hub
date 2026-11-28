@@ -12,6 +12,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import './keep-alive.js'
 import { antigravityEfforts, isLevelThinkingModel } from '../src/providers/agy/catalog.js'
+import { agyFamilyEfforts, groupAgyFamilies, uniqueAgyLabels } from '../src/providers/agy.js'
 import { resolveAgyModel } from '../src/providers/agy/models.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
 import { AgyAdapter } from '../src/providers/agy.js'
@@ -129,4 +130,39 @@ test('the configured default thinking level reaches the resolved model', async (
   // A model with no picker gains none from an override.
   const noLevels = await adapterWith(() => 'high').resolveOwnModel('agy', 'gemini-2.5-flash-lite')
   assert.equal(noLevels.reasoning, undefined)
+})
+test('agy: tiered ids become one family row with an effort axis', () => {
+  const { singles, families } = groupAgyFamilies([
+    { id: 'gemini-4-hydrogen-low', name: 'Gemini 4 Hydrogen (Low)' },
+    { id: 'gemini-4-hydrogen-medium', name: 'Gemini 4 Hydrogen (Medium)' },
+    { id: 'gemini-4-hydrogen-high', name: 'Gemini 4 Hydrogen (High)' },
+    { id: 'gemini-4-hydrogen-xhigh', name: 'Gemini 4 Hydrogen (XHigh)' },
+    { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6' },
+  ])
+  assert.equal(singles.length, 1, 'the untiered model is left alone')
+  assert.equal(families.length, 1)
+  assert.equal(families[0]?.family, 'gemini-4-hydrogen')
+  assert.equal(families[0]?.name, 'Gemini 4 Hydrogen')
+  assert.deepEqual([...(families[0]?.variants.keys() ?? [])], ['low', 'medium', 'high', 'xhigh'])
+  assert.deepEqual(agyFamilyEfforts(families[0]?.variants ?? new Map()).map(e => [e.id, e.name]), [
+    ['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['xhigh', 'Extra High'],
+  ])
+})
+
+test('agy: a single-tier family keeps its own id instead of being renamed', () => {
+  const { singles, families } = groupAgyFamilies([{ id: 'gemini-3.8-flash-low', name: 'Gemini 3.8 Flash' }])
+  assert.equal(families.length, 0)
+  assert.deepEqual(singles, [{ id: 'gemini-3.8-flash-low', name: 'Gemini 3.8 Flash' }])
+})
+
+test('agy: two rows sharing one label are told apart, and no id is dropped', () => {
+  const rows = uniqueAgyLabels([
+    { id: 'gemini-3.8-flash-low', name: 'Gemini 3.8 Flash' },
+    { id: 'gemini-3.8-flash-medium', name: 'Gemini 3.8 Flash' },
+    { id: 'claude-opus-4-6', name: 'Claude Opus 4.6' },
+  ])
+  assert.equal(rows.length, 3, 'nothing is hidden')
+  assert.equal(rows[2]?.name, 'Claude Opus 4.6', 'a unique label is untouched')
+  assert.equal(new Set(rows.map(row => row.name)).size, 3, 'every label is now distinct')
+  assert.match(rows[0]?.name ?? '', /Gemini 3\.8 Flash \(/)
 })

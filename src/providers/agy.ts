@@ -3,7 +3,7 @@ import type { InputModality } from './modality.js'
  * Google Antigravity over HTTP OAuth (no `agy` CLI, no cmd.exe windows).
  */
 
-import { attributionHeaders, errorChain, LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
+import { attributionHeaders, errorChain, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -541,6 +541,8 @@ function discoveredFromList(models: readonly LlmModelInfo[]): DiscoveredModel[] 
 export class AgyAdapter extends LlmAdapter {
   private readonly catalog: ModelCatalogCache
   private readonly accountCatalogs = new Map<string, ModelCatalogCache>()
+  /** Tier → concrete id per family, from the last roster read. */
+  private readonly agyFamilies = new Map<string, { name: string; variants: Map<string, string> }>()
   private catalogOwner: string | undefined
   /**
    * Why a route's roster was not retrieved, when it was not.
@@ -641,11 +643,25 @@ export class AgyAdapter extends LlmAdapter {
         }),
       )
       if (discovered.length > 0) this.notFetched.delete(provider)
-      return discovered.filter(model => !isDisabledAgyModel(model.id)).map(model => ({
+      // Tiered ids collapse into one row per family: Antigravity lists
+      // `gemini-4-hydrogen-low|medium|high|xhigh` as four ids that all carry the label
+      // "Gemini 4 Hydrogen", so taking the catalogue literally shows one model four
+      // times with no way to tell the rows apart (the reference's 185ab5e).
+      const visible = discovered.filter(model => !isDisabledAgyModel(model.id))
+      const { singles, families } = groupAgyFamilies(visible)
+      this.agyFamilies.clear()
+      for (const family of families) {
+        this.agyFamilies.set(family.family, { name: family.name, variants: family.variants })
+      }
+      const rows: { id: string; name: string }[] = [
+        ...singles,
+        ...families.map(family => ({ id: family.family, name: family.name })),
+      ]
+      return uniqueAgyLabels(rows).map(model => ({
         provider,
         id: model.id,
         name: model.name,
-        inputModalities: model.inputModalities ?? ['text', 'image'] as const,
+        inputModalities: ['text', 'image'] as const,
       }))
     } catch (error) {
       if (isDiscoveryAborted(error, signal)) throw error
@@ -714,9 +730,23 @@ export class AgyAdapter extends LlmAdapter {
    */
   async resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     const info = resolveAgyModel(provider, model)
-    const reasoning = mergeReasoning(this.options.defaultEffortOf?.(model), info.reasoning)
-    if (reasoning === undefined) return info
-    return { ...info, reasoning }
+    // A family row owns an effort axis; the tier ids live in its variants map and
+    // are chosen at request time from the effort the caller picked.
+    const family = this.agyFamilies.get(model)
+    const familyEfforts = family === undefined ? [] : agyFamilyEfforts(family.variants)
+    const base: LlmResolvedModelInfo = family === undefined
+      ? info
+      : {
+          ...info,
+          name: family.name,
+          reasoning: {
+            efforts: familyEfforts.map(effort => ({ id: ReasoningEffortId(effort.id), name: effort.name })),
+            defaultEffort: ReasoningEffortId(family.variants.has('high') ? 'high' : [...family.variants.keys()].at(-1) ?? 'high'),
+          },
+        }
+    const reasoning = mergeReasoning(this.options.defaultEffortOf?.(model), base.reasoning)
+    if (reasoning === undefined) return base
+    return { ...base, reasoning }
   }
 
   streamAccount(options: GenerateOptions, account: string): AsyncIterable<StreamChunk> {
@@ -735,6 +765,14 @@ export class AgyAdapter extends LlmAdapter {
   private async *streamCore(options: GenerateOptions, account?: string): AsyncIterable<StreamChunk> {
     const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
     try {
+      // A family row is a label plus an effort axis; the wire needs one concrete id.
+      // The effort picks the tier (defaulting to the family's own default), and an id
+      // that is not a family passes through untouched.
+      const family = this.agyFamilies.get(options.model)
+      const resolvedModel = family === undefined
+        ? options.model
+        : family.variants.get(String(options.reasoningEffort ?? '')) ?? family.variants.get('high') ?? [...family.variants.values()][0] ?? options.model
+      if (resolvedModel !== options.model) options = { ...options, model: resolvedModel }
       const session = await this.ensureProject(account)
       if (session.projectId === undefined || session.projectId.length === 0) {
         throw new LlmError(
@@ -804,4 +842,117 @@ export class AgyAdapter extends LlmAdapter {
       watchdog.stop()
     }
   }
+}
+
+/** Tier suffixes Antigravity publishes as separate ids for one model family. */
+const AGY_TIER_SUFFIX = /^(.*)-(low|medium|high|xhigh)$/
+/** Display order, weakest first; `xhigh` is opt-in so it never becomes the default. */
+const AGY_TIER_ORDER = ['low', 'medium', 'high', 'xhigh'] as const
+
+/**
+ * The family a tiered Antigravity id belongs to, or undefined when it is not tiered.
+ *
+ * Ported from the reference (`185ab5e fix(antigravity): group xhigh tiers into their
+ * model family`): Antigravity lists `gemini-4-hydrogen-low|medium|high|xhigh` as four
+ * ids that all carry the label "Gemini 4 Hydrogen", so a roster that takes the
+ * catalogue literally repeats one model up to four times with no way to tell the
+ * rows apart.
+ *
+ * @param id - a model id.
+ * @returns the family id and tier, when the id carries one.
+ */
+export function agyTierOf(id: string): { family: string; tier: string } | undefined {
+  const match = AGY_TIER_SUFFIX.exec(id)
+  if (match === null) return undefined
+  return { family: match[1] as string, tier: match[2] as string }
+}
+
+/** A family's tier → concrete id, and the label to show once. */
+export interface AgyFamily {
+  family: string
+  name: string
+  variants: Map<string, string>
+}
+
+/**
+ * Group tiered ids into one row per family.
+ *
+ * A family with a single tier keeps its own id (grouping one row would rename a
+ * model for no gain); a family with two or more becomes the family id plus a
+ * reasoning-effort axis, which is what the reference does.
+ *
+ * @param models - roster rows, in catalogue order.
+ * @returns family rows plus the untouched singles.
+ */
+export function groupAgyFamilies(models: readonly { id: string; name: string }[]): {
+  singles: { id: string; name: string }[]
+  families: AgyFamily[]
+} {
+  const byFamily = new Map<string, { id: string; name: string; tier: string }[]>()
+  const singles: { id: string; name: string }[] = []
+  for (const model of models) {
+    const tier = agyTierOf(model.id)
+    if (tier === undefined) {
+      singles.push({ id: model.id, name: model.name })
+      continue
+    }
+    const list = byFamily.get(tier.family) ?? []
+    list.push({ id: model.id, name: model.name, tier: tier.tier })
+    byFamily.set(tier.family, list)
+  }
+  const families: AgyFamily[] = []
+  for (const [family, rows] of byFamily) {
+    if (rows.length < 2) {
+      const only = rows[0]
+      if (only !== undefined) singles.push({ id: only.id, name: only.name })
+      continue
+    }
+    const variants = new Map<string, string>()
+    for (const tier of AGY_TIER_ORDER) {
+      const row = rows.find(entry => entry.tier === tier)
+      if (row !== undefined) variants.set(tier, row.id)
+    }
+    // The label is the one the family's own rows carry, with the tier removed so the
+    // effort axis owns it instead.
+    const label = rows[0]?.name ?? family
+    const name = label.replace(/\s*\(?\b(?:low|medium|high|xhigh)\b\)?\s*$/i, '').trim() || family
+    families.push({ family, name, variants })
+  }
+  return { singles, families }
+}
+
+/** The effort list a family exposes, in display order. */
+export function agyFamilyEfforts(variants: ReadonlyMap<string, string>): { id: string; name: string }[] {
+  return AGY_TIER_ORDER.filter(tier => variants.has(tier)).map(tier => ({
+    id: tier,
+    name: tier === 'xhigh' ? 'Extra High' : tier[0]?.toUpperCase() + tier.slice(1),
+  }))
+}
+
+/**
+ * Make every row's label distinguishable.
+ *
+ * The reference's rule is "correct the label, never add or hide a model id". Two ids
+ * can still share one display label — Antigravity publishes `gemini-3.8-flash-low`
+ * and `gemini-3.8-flash-medium` as "Gemini 3.8 Flash", and a configured row from the
+ * static catalogue can collide with a discovered one — so a repeated label gains the
+ * part of its id that tells the rows apart: `Gemini 3.8 Flash (Low)`.
+ *
+ * @param rows - roster rows in catalogue order.
+ * @returns the same rows, with unique labels.
+ */
+export function uniqueAgyLabels(rows: readonly { id: string; name: string }[]): { id: string; name: string }[] {
+  const counts = new Map<string, number>()
+  for (const row of rows) counts.set(row.name, (counts.get(row.name) ?? 0) + 1)
+  return rows.map(row => {
+    if ((counts.get(row.name) ?? 0) < 2) return { id: row.id, name: row.name }
+    // The qualifier is the id minus the label's own words, which is exactly the part
+    // that differs between the rows sharing it.
+    const qualifier = row.id
+      .split('-')
+      .filter(part => part !== '' && !row.name.toLowerCase().includes(part.toLowerCase()))
+      .join(' ')
+    if (qualifier === '') return { id: row.id, name: `${row.name} (${row.id})` }
+    return { id: row.id, name: `${row.name} (${qualifier.replace(/\b\w/g, ch => ch.toUpperCase())})` }
+  })
 }

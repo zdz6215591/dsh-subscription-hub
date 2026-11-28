@@ -16,6 +16,7 @@ import {
   MistralAdapter,
   assertUsableMistralKey,
   maskMistralKey,
+  collapseMistralAliases,
   mistralUsageFromBilling,
   parseMistralModels,
   sessionFromMistralKey,
@@ -378,4 +379,24 @@ test('mistral: an empty allowance falls back to the pay-as-you-go wallet, once',
   assert.equal(bodies.length, 2, 'one attempt on the allowance, one on the wallet')
   assert.ok(bodies[0]?.metadata !== undefined)
   assert.equal(bodies[1]?.metadata, undefined, 'the fallback carries no attribution')
+})
+test('mistral: alias rows collapse to one model, so no label repeats', () => {
+  // Live shape: `mistral-medium-latest` and its eight aliases arrive as nine rows
+  // that all carry the same display name.
+  const parsed = parseMistralModels({
+    data: [
+      { id: 'mistral-medium-latest', name: 'mistral-medium-latest', aliases: ['mistral-medium', 'mistral-medium-3'] },
+      { id: 'mistral-medium', name: 'mistral-medium-latest', aliases: ['mistral-medium-latest', 'mistral-medium-3'] },
+      { id: 'mistral-medium-3', name: 'mistral-medium-latest', aliases: ['mistral-medium-latest', 'mistral-medium'] },
+      { id: 'codestral-2508', name: 'codestral-2508', aliases: ['codestral-latest'] },
+      { id: 'codestral-latest', name: 'codestral-2508', aliases: ['codestral-2508'] },
+      { id: 'zai-glm-5-3', name: 'zai-glm-5-3' },
+    ],
+  })
+  assert.equal(parsed.length, 6)
+  const collapsed = collapseMistralAliases(parsed)
+  assert.deepEqual(collapsed.map(model => model.id).sort(), ['codestral-2508', 'mistral-medium-latest', 'zai-glm-5-3'])
+  assert.equal(new Set(collapsed.map(model => model.name)).size, collapsed.length, 'no repeated labels')
+  const medium = collapsed.find(model => model.id === 'mistral-medium-latest')
+  assert.deepEqual([...(medium?.aliases ?? [])].sort(), ['mistral-medium', 'mistral-medium-3'])
 })
