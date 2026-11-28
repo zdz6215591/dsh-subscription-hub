@@ -251,7 +251,12 @@ export async function pollMistralSignIn(
 }
 
 /** Where an approved sign-in is exchanged for the account's API key. */
-export const MISTRAL_EXCHANGE_PATH = '/api/vibe/sign-in/exchange'
+export function mistralExchangePath(processId: string): string {
+  // Captured from the vendor CLI's own successful login: the process id is a
+  // PATH SEGMENT. The flatter `/api/vibe/sign-in/exchange` answers 401 to every
+  // body shape, which is what four release rounds of guessing ran into.
+  return `/api/vibe/sign-in/${encodeURIComponent(processId)}/exchange`
+}
 
 /**
  * Exchange the poll's `exchange_token` for the account's API key.
@@ -301,6 +306,7 @@ export async function exchangeMistralSignIn(
   const shapes: { name: string; headers: Record<string, string>; body: Record<string, unknown> }[] = []
   const verifier = options.codeVerifier
   const process = options.processId
+  if (verifier !== undefined) shapes.push({ name: 'captured: token+verifier', headers: baseHeaders, body: { exchange_token: exchangeToken, code_verifier: verifier } })
   shapes.push({ name: 'exchange_token', headers: baseHeaders, body: { exchange_token: exchangeToken } })
   if (verifier !== undefined) {
     shapes.push({
@@ -325,7 +331,7 @@ export async function exchangeMistralSignIn(
   let lastStatus = 0
   for (const shape of shapes) {
     for (let attempt = 0; attempt <= 3; attempt++) {
-      const response = await fetchFn(`${MISTRAL_CONSOLE_BASE}${MISTRAL_EXCHANGE_PATH}`, {
+      const response = await fetchFn(`${MISTRAL_CONSOLE_BASE}${mistralExchangePath(process ?? '')}`, {
         method: 'POST',
         headers: shape.headers,
         body: JSON.stringify(shape.body),
