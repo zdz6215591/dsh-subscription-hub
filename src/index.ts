@@ -72,6 +72,7 @@ import type {
   JoyCodeSession,
   ZedSession,
   KiroSession,
+  MistralSession,
 } from './auth/store.js'
 import { DISCOVERY_TIMEOUT_MS, validateModels, withTimeout } from './providers/common.js'
 import type { ModelEntry, ModelListNotFetched, ProviderUsage } from './providers/common.js'
@@ -232,6 +233,15 @@ import {
 } from './providers/kiro/index.js'
 import type { KiroSignIn } from './providers/kiro/index.js'
 import {
+  MistralAdapter,
+  assertUsableMistralKey,
+  fetchMistralUsage,
+  isMistralPermanentRefreshError,
+  maskMistralKey,
+  refreshMistral,
+  sessionFromMistralKey,
+} from './providers/mistral.js'
+import {
   filterVisible,
   hiddenIds,
   markProviderModelsRead,
@@ -269,6 +279,7 @@ export type {
   JoyCodeSession,
   ZedSession,
   KiroSession,
+  MistralSession,
 } from './auth/store.js'
 
 export const name = 'dsh-subscription-hub'
@@ -316,6 +327,7 @@ export interface Config {
     joycode?: ModelEntry[]
     zed?: ModelEntry[]
     kiro?: ModelEntry[]
+    mistral?: ModelEntry[]
   }
   /** Same-subscription account pools (and optional extra tier models). */
   pool?: {
@@ -336,7 +348,7 @@ export interface Config {
   }
 }
 
-const providerIdSchema = z.union(['codex', 'claude', 'grok', 'copilot', 'agy', 'commandcode', 'cline', 'codebuddy', 'qoder', 'trae', 'joycode', 'zed', 'kiro'])
+const providerIdSchema = z.union(['codex', 'claude', 'grok', 'copilot', 'agy', 'commandcode', 'cline', 'codebuddy', 'qoder', 'trae', 'joycode', 'zed', 'kiro', 'mistral'])
 const modelEntrySchema: z<ModelEntry> = z.object({
   id: z.string().required(),
   name: z.string(),
@@ -390,6 +402,7 @@ export const Config: z<Config> = z.object({
     trae: z.array(modelEntrySchema),
     zed: z.array(modelEntrySchema),
     kiro: z.array(modelEntrySchema),
+    mistral: z.array(modelEntrySchema),
   }),
   pool: z.object({
     enabled: z.boolean().default(true),
@@ -438,6 +451,7 @@ function resolveCatalog(models: Config['models']): Record<ProviderId, ModelEntry
     joycode: resolve('joycode'),
     zed: resolve('zed'),
     kiro: resolve('kiro'),
+    mistral: resolve('mistral'),
   }
 }
 
@@ -465,6 +479,7 @@ function accountOf(provider: ProviderId, session: StoredSession | undefined): st
     case 'joycode': return (session as JoyCodeSession).account ?? (session as JoyCodeSession).userId
     case 'zed': return (session as ZedSession).account ?? (session as ZedSession).userId
     case 'kiro': return (session as KiroSession).account
+    case 'mistral': return (session as MistralSession).account
   }
 }
 
@@ -491,6 +506,8 @@ function planOf(provider: ProviderId, session: StoredSession): string | undefine
     case 'zed': return undefined
     // Kiro states a plan in Get-Usage-Limits only, which the card's quota view shows.
     case 'kiro': return undefined
+    // Mistral states its plan in the billing answer, which the usage view shows.
+    case 'mistral': return undefined
   }
 }
 
@@ -745,6 +762,11 @@ export class SubscriptionsAuthController implements AuthController {
       this.completions.set(provider, this.completeJoyCode(login, this.claim(provider)))
       return { authorizeUrl: login.authorizeUrl }
     }
+    if (provider === 'mistral') {
+      // Mistral has no OAuth grant and no device flow: its only login is a pasted
+      // API key, which the panel collects through the manual-input field.
+      return { authorizeUrl: '' }
+    }
     if (provider === 'cline') {
       // Cline has no OAuth grant and no device flow: its only login is a pasted
       // API key, which the panel collects through the manual-input field. This
@@ -961,6 +983,7 @@ export class SubscriptionsAuthController implements AuthController {
       case 'trae':
       case 'joycode':
       case 'kiro':
+      case 'mistral':
       case 'zed':
         return Promise.reject(new Error(`${provider} does not use the authorization-code exchange`))
     }
@@ -996,6 +1019,16 @@ export class SubscriptionsAuthController implements AuthController {
       await this.persist('commandcode', session)
       this.lastError.delete('commandcode')
       this.onAuthChanged('commandcode', accountKeyOf('commandcode', session))
+      return
+    }
+    if (provider === 'mistral') {
+      // A Mistral login IS a pasted key: the API authenticates the key itself, so
+      // there is nothing to exchange and no browser hop to make.
+      const key = assertUsableMistralKey(input, 'mistral')
+      const session = sessionFromMistralKey(key, `mistral-${maskMistralKey(key)}`)
+      await this.persist('mistral', session)
+      this.lastError.delete('mistral')
+      this.onAuthChanged('mistral', accountKeyOf('mistral', session))
       return
     }
     if (provider === 'cline') {
@@ -1422,7 +1455,33 @@ export function apply(ctx: Context, config: Config): void {
         registerTrackedAdapter('cline', adapter)
         break
       }
-      case 'codebuddy': {
+      case 'mistral': {
+        // Mistral is API-key only: pi.mistral.ai takes a bearer key with no
+        // OAuth grant and no refresh contract, so the login path is a paste.
+        const tokens = new AccountTokenManager<MistralSession>({
+          provider: 'mistral',
+          displayName: 'Mistral',
+          makeOptions: () => ({ preemptMs: 0, refresh: refreshMistral, isPermanent: isMistralPermanentRefreshError }),
+          onAccountRemoved: account => { authChanged('mistral', account) },
+        })
+        accountTokens.set('mistral', tokens as unknown as AccountTokenManager<StoredSession>)
+        usageFetchers.mistral = async (account, signal) => {
+          const session = await tokens.session(account)
+          return fetchMistralUsage(proxiedFetch, session, signal)
+        }
+        const adapter = new MistralAdapter({
+          models: catalog.mistral,
+          streamIdleTimeoutMs,
+          rateLimit,
+          tokens,
+          discovery: !overridden.has('mistral'),
+          onWarn,
+          resolveAttachments,
+          pool: () => poolAdapter,
+        })
+        registerTrackedAdapter('mistral', adapter)
+        break
+      }      case 'codebuddy': {
         const tokens = new AccountTokenManager<CodeBuddySession>({
           provider: 'codebuddy',
           displayName: 'CodeBuddy',

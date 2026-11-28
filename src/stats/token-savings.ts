@@ -97,6 +97,7 @@ const SUBSCRIPTION_PROVIDERS = new Set([
   'agy',
   'commandcode',
   'cline',
+  'mistral',
   'codebuddy',
   'trae',
   'zed',

@@ -14,6 +14,7 @@ One Settings → **Subscriptions** page for thirteen subscription routes:
 | `agy` | Google Antigravity | **HTTP OAuth only** — no `agy` CLI, no flashing `cmd.exe` windows |
 | `commandcode` | Command Code Go | Import `~/.commandcode/auth.json` or paste API key (Studio optional) |
 | `cline` | Cline (ClinePass) | paste a `sk_…` key; live quota windows, **per-model upstream channel pinning** |
+| `mistral` | Mistral (Vibe Pro / Team) | paste a bare API key from console.mistral.ai — no browser sign-in on this route; live `/v1/models` catalog, plan plus Vibe/API budgets from `/billing/*` reported as percentages |
 | `codebuddy` | Tencent CodeBuddy | browser OAuth, daily auto check-in |
 | `qoder` | Qoder | paste a Personal Access Token; the deployment (**qoder.com** vs **qoder.com.cn**) is discovered, not picked; live catalog, credit packages, daily auto check-in |
 | `trae` | Trae (CN) | imports the local sign-in from **TRAE SOLO CN** and the **Trae CN IDE**; live catalog, credits, daily auto check-in |

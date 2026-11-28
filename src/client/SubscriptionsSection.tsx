@@ -43,7 +43,7 @@ const MODEL_FILTER_THRESHOLD = 8
 const MODEL_LIST_MAX_HEIGHT = 260
 
 /** Subscription provider ids, fixed by the node half's OAuth adapters. */
-export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'agy' | 'commandcode' | 'cline' | 'codebuddy'  | 'qoder' | 'trae' | 'joycode' | 'zed' | 'kiro'
+export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'agy' | 'commandcode' | 'cline' | 'mistral' | 'codebuddy'  | 'qoder' | 'trae' | 'joycode' | 'zed' | 'kiro'
 
 /** One logged-in account as answered by the `status` endpoint. */
 export interface AccountStatus {
@@ -301,6 +301,7 @@ const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [  { id
   { id: 'agy', name: 'Antigravity' },
   { id: 'commandcode', name: 'Command Code Go' },
   { id: 'cline', name: 'Cline' },
+  { id: 'mistral', name: 'Mistral (Vibe Pro / Team)' },
   { id: 'kiro', name: 'Kiro' },
   { id: 'codebuddy', name: 'CodeBuddy' },
   { id: 'qoder', name: 'Qoder' },
@@ -1142,7 +1143,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [statuses, setStatuses] = useState<Partial<Record<SubscriptionProvider, ProviderStatus>>>({})
   const [errors, setErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
-    codex: '', claude: '', grok: '', copilot: '', agy: '', commandcode: '', cline: '', codebuddy: '', qoder: '', trae: '', joycode: '', zed: '', kiro: '',
+    codex: '', claude: '', grok: '', copilot: '', agy: '', commandcode: '', cline: '', mistral: '', codebuddy: '', qoder: '', trae: '', joycode: '', zed: '', kiro: '',
   })
   /** Pending device-flow codes (copilot), shown while the attempt polls. */
   const [deviceCodes, setDeviceCodes] = useState<Partial<Record<SubscriptionProvider, { userCode: string; verificationUrl: string }>>>({})
@@ -1183,7 +1184,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [proxyBypass, setProxyBypass] = useState('')
   const [proxyProviders, setProxyProviders] = useState<Record<SubscriptionProvider, boolean>>({
     codex: true, claude: true, grok: true, copilot: true,
-    agy: true, commandcode: true, cline: true, codebuddy: true, qoder: true, trae: true, joycode: true, zed: true, kiro: true,
+    agy: true, commandcode: true, cline: true, mistral: true, codebuddy: true, qoder: true, trae: true, joycode: true, zed: true, kiro: true,
   })
   const [proxySaving, setProxySaving] = useState(false)
   const [proxyTesting, setProxyTesting] = useState(false)
@@ -1966,6 +1967,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       agy: proxy.providers.agy !== false,
       commandcode: proxy.providers.commandcode !== false,
       cline: proxy.providers.cline !== false,
+      mistral: proxy.providers.mistral !== false,
       codebuddy: proxy.providers.codebuddy !== false,
       qoder: proxy.providers.qoder !== false,
       trae: proxy.providers.trae !== false,
@@ -3110,6 +3112,15 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                           {manualOpen[id] ? t('cancel') : t('loginAccount')}
                         </button>
                       )}
+                      {id === 'mistral' && (
+                        <button
+                          type="button"
+                          style={styles.buttonSmall}
+                          onClick={() => { setManualOpen(prev => ({ ...prev, [id]: !prev[id] })) }}
+                        >
+                          {manualOpen[id] ? t('cancel') : t('loginMistral')}
+                        </button>
+                      )}
                       {id === 'kiro' && (
                         <>
                           <button type="button" style={styles.buttonSmall} onClick={() => { void login(id) }}>
@@ -3137,7 +3148,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                           </button>
                         </>
                       )}
-                      {id !== 'claude' && id !== 'commandcode' && id !== 'zed' && id !== 'trae' && id !== 'cline' && id !== 'joycode' && id !== 'kiro' && (
+                      {id !== 'claude' && id !== 'commandcode' && id !== 'zed' && id !== 'trae' && id !== 'cline' && id !== 'mistral' && id !== 'joycode' && id !== 'kiro' && (
                         <button type="button" style={styles.buttonSmall} onClick={() => { void login(id) }}>
                           {t('loginAccount')}
                         </button>
@@ -3246,6 +3257,26 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                       style={styles.manualInput}
                       value={manualDrafts[id]}
                       placeholder={t('clineKeyPlaceholder')}
+                      autoComplete="off"
+                      onChange={event => setManualDrafts(prev => ({ ...prev, [id]: event.target.value }))}
+                    />
+                    <button type="button" style={styles.buttonSmall} onClick={() => { void submitManual(id) }}>
+                      {t('submit')}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Mistral's only login is a pasted API key from console.mistral.ai:
+                  there is no OAuth or device flow, so the paste field IS the sign-in. */}
+              {!busy && id === 'mistral' && manualOpen[id] && (
+                <div style={styles.manualBox}>
+                  <p style={styles.statusLine}>{t('mistralPasteHint')}</p>
+                  <div style={styles.manualRow}>
+                    <input
+                      style={styles.manualInput}
+                      value={manualDrafts[id]}
+                      placeholder={t('mistralKeyPlaceholder')}
                       autoComplete="off"
                       onChange={event => setManualDrafts(prev => ({ ...prev, [id]: event.target.value }))}
                     />

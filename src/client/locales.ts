@@ -243,6 +243,11 @@ export const en = {
   kiroKeyPlaceholder: 'ksk_…',
   kiroPasteKey: 'Paste API key',
   kiroImport: 'Use this PC sign-in',
+  loginMistral: 'Paste a Mistral API key',
+  mistralPasteHint:
+    'Mistral (Vibe Pro / Team) authenticates a bare API key from console.mistral.ai — there is no browser sign-in for this route. '
+    + 'Its plan and budget are read from /billing/subscription and /billing/budget, so the card shows the Vibe and API allowances as percentages.',
+  mistralKeyPlaceholder: 'Mistral API key',
 } satisfies Record<string, string>
 
 /** zh strings, one per {@link en} key. */
@@ -490,6 +495,11 @@ export const zh = {
   kiroKeyPlaceholder: 'ksk_…',
   kiroPasteKey: '粘贴 API Key',
   kiroImport: '用本机登录',
+  loginMistral: '粘贴 Mistral API Key',
+  mistralPasteHint:
+    'Mistral（Vibe Pro / Team）只认 console.mistral.ai 生成的 API Key，本通道没有浏览器登录。'
+    + '套餐与预算从 /billing/subscription 与 /billing/budget 读取，卡片按百分比显示 Vibe 与 API 两项额度。',
+  mistralKeyPlaceholder: 'Mistral API Key',
 } satisfies Record<keyof typeof en, string>
 
 /** The Subscriptions namespace key union (en is the key-set source of truth). */

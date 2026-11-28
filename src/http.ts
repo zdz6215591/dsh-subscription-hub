@@ -174,6 +174,7 @@ export const PROVIDER_PROBE_TARGETS: Readonly<Record<ProviderId, { url: string; 
   // Kiro's management host in its default region. It answers a 4xx on `/`; any
   // status proves egress, which is what this probe measures.
   kiro: { url: 'https://management.us-east-1.kiro.dev', method: 'GET' },
+  mistral: { url: 'https://api.mistral.ai/v1/models', method: 'GET' },
 })
 
 /** Result of an egress GeoIP probe. */
